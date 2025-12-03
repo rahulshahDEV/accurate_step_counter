@@ -1,0 +1,207 @@
+# Changelog
+
+All notable changes to this project will be documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [1.1.1] - 2025-12-03
+
+### Removed
+- 🗑️ **Dependency Cleanup**: Removed unnecessary `health` package dependency
+  - The `health` package was included but never used in the plugin code
+  - Removed unused `health_connect_service.dart` file
+  - Reduces package size and eliminates unnecessary dependencies
+  - Users can still integrate with health platforms by adding the `health` package to their own app
+
+### Changed
+- 📖 **Documentation Updates**:
+  - Updated README with clear guidance on optional health platform integration
+  - Updated TERMINATED_STATE_USAGE.md with health integration examples as optional feature
+  - Clarified that health platform integration is the responsibility of the consuming app
+  - Added example code showing how to integrate with health platforms if needed
+
+### Improved
+- 🎯 **Package Focus**: Narrowed package scope to core step counting functionality
+  - Package now focuses exclusively on accurate step detection and counting
+  - Health platform integrations are left to the consuming application
+  - Provides better separation of concerns and flexibility for users
+
+### Migration Guide
+No breaking changes! Existing code continues to work without modifications.
+
+If you were expecting health platform integration:
+1. Add `health: ^13.1.4` to your app's `pubspec.yaml` (not the plugin)
+2. Use the `onTerminatedStepsDetected` callback to write steps to health platforms
+3. See README and TERMINATED_STATE_USAGE.md for complete examples
+
+---
+
+## [1.1.0] - 2025-01-27
+
+### Fixed
+- 🐛 **Critical Fix**: Terminated state step sync now works correctly when app returns from killed state
+  - Fixed issue where `syncStepsFromTerminated()` was never called from Dart side
+  - Enhanced Kotlin sensor handling to wait for fresh sensor data when app resumes
+  - Added sensor re-registration with 1.5-second wait loop to ensure data availability
+  - Improved fallback to SharedPreferences when sensor doesn't respond immediately
+
+### Added
+- ✨ **New Feature**: `onTerminatedStepsDetected` callback for handling missed steps
+  - Automatically triggered during `start()` when steps from terminated state are detected
+  - Provides `(missedSteps, startTime, endTime)` parameters for easy Health Connect integration
+  - Example: `stepCounter.onTerminatedStepsDetected = (steps, start, end) { ... }`
+- 📚 **New Method**: `syncTerminatedSteps()` - Manual sync for terminated state steps
+  - Returns `Map<String, dynamic>?` with missed steps data
+  - Useful for on-demand synchronization scenarios
+- 📖 **Documentation**: Added comprehensive `TERMINATED_STATE_USAGE.md` guide
+  - Complete API documentation with examples
+  - Health Connect integration patterns
+  - Troubleshooting guide and best practices
+  - Device reboot handling explanation
+
+### Improved
+- 🔍 **Enhanced Logging**: Added detailed debug logs to Kotlin plugin
+  - `StepCounter` tag for sensor events and data retrieval
+  - `AccurateStepCounter` tag for Dart-side sync operations
+  - Helps diagnose issues when steps aren't syncing
+- ⚡ **Better Sensor Handling**: Improved reliability when returning from terminated state
+  - Re-registers sensor listener to trigger immediate callbacks
+  - Implements retry logic with configurable wait time
+  - Falls back gracefully to cached data if sensor unavailable
+- 🎯 **Automatic Sync**: Terminated state sync now happens automatically on `start()`
+  - No manual intervention required
+  - Only triggers when `enableOsLevelSync: true` (default)
+  - Validates data before returning results
+
+### Changed
+- 📦 **Internal**: Added `dart:developer` import for logging in `AccurateStepCounterImpl`
+- 🔧 **Behavior**: `start()` method now includes terminated state sync in initialization flow
+  - Maintains backward compatibility - no breaking changes
+  - Existing code continues to work without modifications
+
+### Technical Details
+- **Sensor Wait Logic**: Kotlin plugin now waits up to 1500ms for sensor data with 50ms check intervals
+- **Validation**: All existing validation checks remain in place (max steps, step rate, time checks)
+- **Thread Safety**: Sensor wait loop properly handles interruptions
+- **Fallback Chain**: Sensor → Wait for callback → SharedPreferences → null
+
+### Migration Guide
+No breaking changes! Existing implementations continue to work. To use the new callback feature:
+
+```dart
+// Before starting, register the callback
+stepCounter.onTerminatedStepsDetected = (missedSteps, startTime, endTime) {
+  // Handle missed steps (e.g., write to Health Connect)
+  print('Synced $missedSteps steps from terminated state');
+};
+
+// Start as usual - sync happens automatically
+await stepCounter.start();
+```
+
+### Performance Impact
+- Minimal: Adds ~0-1.5 seconds to app startup only when terminated state data exists
+- No impact during normal operation or when no missed steps are found
+- Sensor wait timeout is configurable in Kotlin code if needed
+
+### Testing
+Verified fix with test scenario:
+1. Start app → step counter active
+2. Walk 100 steps → confirmed counted
+3. Force kill app → terminate completely
+4. Walk 50 steps while terminated
+5. Reopen app → automatic sync triggers
+6. ✅ Callback receives ~50 missed steps correctly
+
+### Known Issues
+- None identified in this release
+
+---
+
+## [1.0.0] - 2025-01-20
+
+### Added
+- ✨ Initial release of Accurate Step Counter plugin
+- 📱 Accelerometer-based step detection with advanced filtering algorithms
+- 🔧 Configurable sensitivity with preset modes (walking, running)
+- 📊 Real-time step count event stream
+- 🛡️ Comprehensive state management:
+  - Foreground tracking with real-time updates
+  - Background tracking support
+  - Terminated state recovery (syncs steps taken while app was closed)
+- 🔒 Validated step data with safety checks:
+  - Maximum reasonable step count (50,000)
+  - Maximum step rate validation (3 steps/second)
+  - Device reboot detection
+  - Time validation
+- 📱 Android native integration:
+  - OS-level step counter synchronization
+  - SharedPreferences for state persistence
+  - TYPE_STEP_COUNTER sensor support
+- 📚 Complete documentation:
+  - Comprehensive README with examples
+  - API reference documentation
+  - Integration tests
+  - Example application
+- 🎯 Core features:
+  - Low-pass filtering to reduce noise
+  - Peak detection algorithm
+  - Minimum time between steps validation
+  - Configurable threshold and filter parameters
+  - Battery-efficient implementation
+
+### Supported Platforms
+- ✅ Android (Full support)
+- 🚧 iOS (Planned for future release)
+
+### Requirements
+- Flutter SDK: >=3.3.0
+- Dart SDK: ^3.9.0
+- Android: API 19+ (Android 4.4 KitKat)
+
+### Dependencies
+- `sensors_plus`: ^6.0.1 - For accelerometer access
+- `plugin_platform_interface`: ^2.0.2 - For plugin architecture
+
+### Known Limitations
+- iOS support not yet implemented
+- Requires ACTIVITY_RECOGNITION permission on Android 10+
+- Background tracking may be limited by device-specific battery optimization settings
+
+### Breaking Changes
+- None (initial release)
+
+### Migration Guide
+- None (initial release)
+
+---
+
+## Future Roadmap
+
+### Planned for v1.2.0
+- 📊 Step history tracking with daily/weekly summaries
+- 🔔 Configurable step goal notifications
+- 📈 Calorie estimation based on step count
+- 🎨 Additional preset configurations (stairs, hiking, etc.)
+
+### Planned for v2.0.0
+- 🍎 iOS support with CoreMotion integration
+- 🔄 Cloud sync capabilities
+- 📊 Advanced analytics and insights
+- 🏃 Activity type detection (walking, running, cycling)
+
+---
+
+## Contributing
+
+Found a bug or have a feature request? Please [open an issue](https://github.com/rahulshahDEV/accurate_step_counter/issues).
+
+Want to contribute? Check out our [contributing guidelines](CONTRIBUTING.md).
+
+---
+
+## Version History
+
+- **1.1.0** (2025-01-27) - Fixed terminated state sync + added callback feature
+- **1.0.0** (2025-01-20) - Initial release with Android support
