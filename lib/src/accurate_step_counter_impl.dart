@@ -119,6 +119,29 @@ class AccurateStepCounterImpl {
   /// Returns null if not started yet
   StepDetectorConfig? get currentConfig => _currentConfig;
 
+  /// Check if ACTIVITY_RECOGNITION permission is granted (Android only)
+  ///
+  /// For Android 10+ (API 29+), this permission is required to access
+  /// the step counter sensor for OS-level synchronization.
+  ///
+  /// Returns true if permission is granted or not required, false otherwise.
+  ///
+  /// Note: You should request this permission before calling start() with
+  /// OS-level sync enabled. Use a permission package like 'permission_handler'
+  /// to request the permission from the user.
+  ///
+  /// Example:
+  /// ```dart
+  /// final hasPermission = await stepCounter.hasActivityRecognitionPermission();
+  /// if (!hasPermission) {
+  ///   // Use permission_handler or similar to request permission
+  ///   await Permission.activityRecognition.request();
+  /// }
+  /// ```
+  Future<bool> hasActivityRecognitionPermission() async {
+    return await _platform.hasPermission();
+  }
+
   /// Dispose the step counter and release all resources
   ///
   /// Call this when you're completely done with the step counter

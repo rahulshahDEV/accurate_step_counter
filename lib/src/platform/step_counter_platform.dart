@@ -34,6 +34,35 @@ class StepCounterPlatform {
     }
   }
 
+  /// Check if ACTIVITY_RECOGNITION permission is granted (Android only)
+  ///
+  /// For Android 10+ (API 29+), this permission is required to access the step counter sensor.
+  /// For lower Android versions, this always returns true.
+  ///
+  /// Returns true if permission is granted or not required, false otherwise.
+  ///
+  /// Example:
+  /// ```dart
+  /// final hasPermission = await StepCounterPlatform.instance.hasPermission();
+  /// if (!hasPermission) {
+  ///   // Request permission using permission_handler or similar package
+  ///   print('Please grant ACTIVITY_RECOGNITION permission');
+  /// }
+  /// ```
+  Future<bool> hasPermission() async {
+    if (!Platform.isAndroid) {
+      return true; // Not required on other platforms
+    }
+
+    try {
+      final result = await _channel.invokeMethod<bool>('hasPermission');
+      return result ?? false;
+    } on PlatformException catch (e) {
+      dev.log('Error checking permission: ${e.message}', error: e);
+      return false;
+    }
+  }
+
   /// Get current OS-level step count
   ///
   /// Returns null if not available or on unsupported platform

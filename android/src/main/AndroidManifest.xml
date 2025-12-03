@@ -1,3 +1,9 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
   package="com.example.accurate_step_counter">
+
+  <!-- Required for accessing step counter sensor on Android 10+ (API 29+) -->
+  <uses-permission android:name="android.permission.ACTIVITY_RECOGNITION"/>
+
+  <!-- Optional: For better sensor access on some devices -->
+  <uses-permission android:name="android.permission.BODY_SENSORS"/>
 </manifest>

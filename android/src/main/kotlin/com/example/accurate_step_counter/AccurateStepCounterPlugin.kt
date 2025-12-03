@@ -1,10 +1,14 @@
 package com.example.accurate_step_counter
 
+import android.Manifest
 import android.content.Context
+import android.content.pm.PackageManager
 import android.hardware.Sensor
 import android.hardware.SensorEvent
 import android.hardware.SensorEventListener
 import android.hardware.SensorManager
+import android.os.Build
+import androidx.core.content.ContextCompat
 import io.flutter.embedding.engine.plugins.FlutterPlugin
 import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
@@ -63,6 +67,11 @@ class AccurateStepCounterPlugin : FlutterPlugin, MethodCallHandler, SensorEventL
             "initialize" -> {
                 android.util.Log.d("AccurateStepCounter", "Initialize method called")
                 result.success(true)
+            }
+            "hasPermission" -> {
+                android.util.Log.d("AccurateStepCounter", "hasPermission method called")
+                val hasPermission = checkActivityRecognitionPermission()
+                result.success(hasPermission)
             }
             "getStepCount" -> {
                 android.util.Log.d("AccurateStepCounter", "getStepCount method called")
@@ -291,6 +300,26 @@ class AccurateStepCounterPlugin : FlutterPlugin, MethodCallHandler, SensorEventL
             android.util.Log.e("StepSync", "Error syncing steps: ${e.message}", e)
             return null
         }
+    }
+
+    /**
+     * Check if ACTIVITY_RECOGNITION permission is granted
+     *
+     * For Android 10+ (API 29+), this permission is required to access step counter sensor
+     * For lower versions, this permission is not required
+     */
+    private fun checkActivityRecognitionPermission(): Boolean {
+        // Only needed on Android 10+ (API 29+)
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+            android.util.Log.d("AccurateStepCounter", "Permission not required for Android < 10")
+            return true
+        }
+
+        val permission = Manifest.permission.ACTIVITY_RECOGNITION
+        val granted = ContextCompat.checkSelfPermission(context, permission) == PackageManager.PERMISSION_GRANTED
+
+        android.util.Log.d("AccurateStepCounter", "ACTIVITY_RECOGNITION permission granted: $granted")
+        return granted
     }
 
     override fun onSensorChanged(event: SensorEvent?) {
