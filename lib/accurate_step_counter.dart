@@ -44,7 +44,7 @@
 /// await stepCounter.start(config: StepDetectorConfig.walking());
 /// await stepCounter.start(config: StepDetectorConfig.running());
 /// ```
-library accurate_step_counter;
+library;
 
 // Export public API
 export 'src/accurate_step_counter_impl.dart' show AccurateStepCounterImpl;

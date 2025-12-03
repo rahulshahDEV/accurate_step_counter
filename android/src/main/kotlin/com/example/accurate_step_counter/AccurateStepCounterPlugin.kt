@@ -29,6 +29,7 @@ class AccurateStepCounterPlugin : FlutterPlugin, MethodCallHandler, SensorEventL
     private val TIMESTAMP_KEY = "last_timestamp"
 
     override fun onAttachedToEngine(flutterPluginBinding: FlutterPlugin.FlutterPluginBinding) {
+        android.util.Log.d("AccurateStepCounter", "Plugin attached to Flutter engine")
         channel = MethodChannel(flutterPluginBinding.binaryMessenger, "accurate_step_counter")
         channel.setMethodCallHandler(this)
         context = flutterPluginBinding.applicationContext
@@ -41,50 +42,75 @@ class AccurateStepCounterPlugin : FlutterPlugin, MethodCallHandler, SensorEventL
     }
 
     private fun initializeSensorManager() {
+        android.util.Log.d("AccurateStepCounter", "Initializing sensor manager")
         sensorManager = context.getSystemService(Context.SENSOR_SERVICE) as SensorManager
         stepCounterSensor = sensorManager?.getDefaultSensor(Sensor.TYPE_STEP_COUNTER)
 
         stepCounterSensor?.let { sensor ->
+            android.util.Log.d("AccurateStepCounter", "Step counter sensor found: ${sensor.name}")
+            android.util.Log.d("AccurateStepCounter", "Sensor vendor: ${sensor.vendor}, version: ${sensor.version}")
             sensorManager?.registerListener(this, sensor, SensorManager.SENSOR_DELAY_NORMAL)
+            android.util.Log.d("AccurateStepCounter", "Sensor listener registered")
+        } ?: run {
+            android.util.Log.w("AccurateStepCounter", "Step counter sensor NOT available on this device")
         }
     }
 
     override fun onMethodCall(call: MethodCall, result: Result) {
+        android.util.Log.d("AccurateStepCounter", "Method called: ${call.method}")
+
         when (call.method) {
             "initialize" -> {
+                android.util.Log.d("AccurateStepCounter", "Initialize method called")
                 result.success(true)
             }
             "getStepCount" -> {
+                android.util.Log.d("AccurateStepCounter", "getStepCount method called")
                 val stepCount = getStepCountFromSensor()
                 if (stepCount != null) {
+                    android.util.Log.d("AccurateStepCounter", "Returning step count: $stepCount")
                     result.success(stepCount)
                 } else {
+                    android.util.Log.e("AccurateStepCounter", "Step counter sensor not available")
                     result.error("UNAVAILABLE", "Step counter sensor not available", null)
                 }
             }
             "saveStepCount" -> {
                 val stepCount = call.argument<Int>("stepCount")
                 val timestamp = call.argument<Long>("timestamp")
+                android.util.Log.d("AccurateStepCounter", "saveStepCount called with: steps=$stepCount, timestamp=$timestamp")
                 if (stepCount != null && timestamp != null) {
                     saveStepCountToPrefs(stepCount, timestamp)
+                    android.util.Log.d("AccurateStepCounter", "Step count saved successfully")
                     result.success(true)
                 } else {
+                    android.util.Log.e("AccurateStepCounter", "Invalid arguments for saveStepCount")
                     result.error("INVALID_ARGS", "Invalid arguments", null)
                 }
             }
             "getLastStepCount" -> {
+                android.util.Log.d("AccurateStepCounter", "getLastStepCount method called")
                 val data = getLastStepCountFromPrefs()
                 if (data != null) {
+                    android.util.Log.d("AccurateStepCounter", "Retrieved last step count: $data")
                     result.success(data)
                 } else {
+                    android.util.Log.d("AccurateStepCounter", "No previous step count found")
                     result.success(null)
                 }
             }
             "syncStepsFromTerminated" -> {
+                android.util.Log.d("AccurateStepCounter", "syncStepsFromTerminated method called")
                 val syncData = syncStepsFromTerminatedState()
+                if (syncData != null) {
+                    android.util.Log.d("AccurateStepCounter", "Sync completed successfully: $syncData")
+                } else {
+                    android.util.Log.d("AccurateStepCounter", "Sync completed with no data to sync")
+                }
                 result.success(syncData)
             }
             else -> {
+                android.util.Log.w("AccurateStepCounter", "Unknown method called: ${call.method}")
                 result.notImplemented()
             }
         }
@@ -174,36 +200,52 @@ class AccurateStepCounterPlugin : FlutterPlugin, MethodCallHandler, SensorEventL
      */
     private fun syncStepsFromTerminatedState(): Map<String, Any>? {
         try {
+            android.util.Log.d("StepSync", "=== Starting syncStepsFromTerminatedState ===")
+
+            // Get current OS-level step count
             val currentStepCount = getStepCountFromSensor()
+            android.util.Log.d("StepSync", "Current OS step count: $currentStepCount")
+
             if (currentStepCount == null || currentStepCount <= 0) {
-                android.util.Log.d("StepSync", "No current step count available")
+                android.util.Log.w("StepSync", "No current step count available from sensor")
                 return null
             }
 
+            // Get last saved step data
             val lastSavedData = getLastStepCountFromPrefs()
             if (lastSavedData == null) {
-                android.util.Log.d("StepSync", "No previous step data found - first run")
+                android.util.Log.d("StepSync", "No previous step data found - this is the first run after install")
+                // First time - save current state and return null (no missed steps)
                 val now = System.currentTimeMillis()
                 saveStepCountToPrefs(currentStepCount, now)
+                android.util.Log.d("StepSync", "Saved baseline: $currentStepCount steps at $now")
                 return null
             }
 
             val lastStepCount = lastSavedData["stepCount"] as Int
             val lastTimestamp = lastSavedData["timestamp"] as Long
+
+            android.util.Log.d("StepSync", "Last saved step count: $lastStepCount at timestamp: $lastTimestamp")
+
+            // Calculate missed steps
             val missedSteps = currentStepCount - lastStepCount
             val currentTime = System.currentTimeMillis()
             val elapsedTimeMs = currentTime - lastTimestamp
+            val elapsedMinutes = elapsedTimeMs / (1000.0 * 60.0)
+
+            android.util.Log.d("StepSync", "Calculated: $missedSteps missed steps over ${elapsedMinutes.toInt()} minutes")
 
             // Validation 1: Check if missed steps is positive
             if (missedSteps <= 0) {
-                android.util.Log.d("StepSync", "No new steps or sensor reset detected")
+                android.util.Log.d("StepSync", "No new steps detected (missedSteps: $missedSteps) - possible device reboot")
+                // Save current state anyway
                 saveStepCountToPrefs(currentStepCount, currentTime)
                 return null
             }
 
-            // Validation 2: Check if elapsed time is reasonable
+            // Validation 2: Check if elapsed time is reasonable (not negative, not from future)
             if (elapsedTimeMs < 0) {
-                android.util.Log.w("StepSync", "Invalid timestamp - time went backwards")
+                android.util.Log.w("StepSync", "Invalid timestamp - time went backwards (elapsed: $elapsedTimeMs ms)")
                 saveStepCountToPrefs(currentStepCount, currentTime)
                 return null
             }
@@ -211,7 +253,8 @@ class AccurateStepCounterPlugin : FlutterPlugin, MethodCallHandler, SensorEventL
             // Validation 3: Check if missed steps is reasonable (not more than 50,000)
             val MAX_REASONABLE_STEPS = 50000
             if (missedSteps > MAX_REASONABLE_STEPS) {
-                android.util.Log.w("StepSync", "Missed steps ($missedSteps) exceeds reasonable limit")
+                android.util.Log.w("StepSync", "Missed steps ($missedSteps) exceeds reasonable limit ($MAX_REASONABLE_STEPS)")
+                // Probably a sensor reset - save current state and return null
                 saveStepCountToPrefs(currentStepCount, currentTime)
                 return null
             }
@@ -220,17 +263,24 @@ class AccurateStepCounterPlugin : FlutterPlugin, MethodCallHandler, SensorEventL
             val elapsedSeconds = elapsedTimeMs / 1000.0
             if (elapsedSeconds > 0) {
                 val stepsPerSecond = missedSteps / elapsedSeconds
+                android.util.Log.d("StepSync", "Step rate: ${"%.3f".format(stepsPerSecond)} steps/second")
+
                 if (stepsPerSecond > 3.0) {
-                    android.util.Log.w("StepSync", "Step rate ($stepsPerSecond steps/sec) is unreasonably high")
+                    android.util.Log.w("StepSync", "Step rate (${"%.3f".format(stepsPerSecond)} steps/sec) is unreasonably high (max: 3.0)")
                     saveStepCountToPrefs(currentStepCount, currentTime)
                     return null
                 }
             }
 
-            // All validations passed
+            // All validations passed - return the missed steps data
+            android.util.Log.d("StepSync", "✓ All validations passed!")
             android.util.Log.d("StepSync", "Syncing $missedSteps steps from terminated state")
+            android.util.Log.d("StepSync", "Time range: $lastTimestamp to $currentTime")
+
+            // Save current state
             saveStepCountToPrefs(currentStepCount, currentTime)
 
+            // Return data for the application
             return mapOf(
                 "missedSteps" to missedSteps,
                 "startTime" to lastTimestamp,
@@ -238,7 +288,7 @@ class AccurateStepCounterPlugin : FlutterPlugin, MethodCallHandler, SensorEventL
             )
 
         } catch (e: Exception) {
-            android.util.Log.e("StepSync", "Error syncing steps: ${e.message}")
+            android.util.Log.e("StepSync", "Error syncing steps: ${e.message}", e)
             return null
         }
     }

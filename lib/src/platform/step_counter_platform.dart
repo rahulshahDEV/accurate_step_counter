@@ -1,3 +1,4 @@
+import 'dart:developer' as dev;
 import 'dart:io';
 
 import 'package:flutter/services.dart';
@@ -20,13 +21,16 @@ class StepCounterPlatform {
   /// Initialize the platform channel
   Future<void> initialize() async {
     if (!Platform.isAndroid) {
+      dev.log('Platform not Android, skipping initialization');
       return;
     }
 
     try {
+      dev.log('Initializing platform channel');
       await _channel.invokeMethod('initialize');
+      dev.log('Platform channel initialized successfully');
     } catch (e) {
-      // Platform not supported or error occurred
+      dev.log('Error initializing platform channel: $e', error: e);
     }
   }
 
@@ -39,9 +43,12 @@ class StepCounterPlatform {
     }
 
     try {
+      dev.log('Getting OS step count from platform');
       final result = await _channel.invokeMethod<int>('getStepCount');
+      dev.log('OS step count retrieved: $result');
       return result;
-    } on PlatformException {
+    } on PlatformException catch (e) {
+      dev.log('Error getting OS step count: ${e.message}', error: e);
       return null;
     }
   }
@@ -56,12 +63,15 @@ class StepCounterPlatform {
     }
 
     try {
+      dev.log('Saving step count: $stepCount at $timestamp');
       final result = await _channel.invokeMethod<bool>('saveStepCount', {
         'stepCount': stepCount,
         'timestamp': timestamp.millisecondsSinceEpoch,
       });
+      dev.log('Step count saved successfully: $result');
       return result ?? false;
-    } on PlatformException {
+    } on PlatformException catch (e) {
+      dev.log('Error saving step count: ${e.message}', error: e);
       return false;
     }
   }
@@ -106,18 +116,29 @@ class StepCounterPlatform {
     }
 
     try {
+      dev.log('Syncing steps from terminated state');
       final result = await _channel
           .invokeMethod<Map<dynamic, dynamic>>('syncStepsFromTerminated');
-      if (result == null) return null;
 
-      return {
+      if (result == null) {
+        dev.log('No terminated steps to sync');
+        return null;
+      }
+
+      final syncData = {
         'missedSteps': result['missedSteps'] as int,
         'startTime':
             DateTime.fromMillisecondsSinceEpoch(result['startTime'] as int),
         'endTime':
             DateTime.fromMillisecondsSinceEpoch(result['endTime'] as int),
       };
-    } on PlatformException {
+
+      dev.log(
+          'Terminated steps synced: ${syncData['missedSteps']} steps from ${syncData['startTime']} to ${syncData['endTime']}');
+
+      return syncData;
+    } on PlatformException catch (e) {
+      dev.log('Error syncing terminated steps: ${e.message}', error: e);
       return null;
     }
   }

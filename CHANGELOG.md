@@ -14,18 +14,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Reduces package size and eliminates unnecessary dependencies
   - Users can still integrate with health platforms by adding the `health` package to their own app
 
+### Added
+- 📊 **Comprehensive Logging System**: Added detailed logging throughout the package
+  - **Android Kotlin**: Enhanced logging in all methods with structured tags
+    - `AccurateStepCounter`: Plugin lifecycle and method calls
+    - `StepCounter`: Sensor events and step data
+    - `StepSync`: Terminated state synchronization with detailed validation logs
+  - **Dart**: Added logging to platform channel calls and error handling
+  - Logs include sensor details (name, vendor, version)
+  - Step sync logs show elapsed time, step rate, and validation results
+  - Makes debugging and troubleshooting much easier for developers
+
+- 📖 **Debugging Documentation**: Added comprehensive debugging section to README
+  - How to view logs using `adb logcat`
+  - Explanation of all log tags
+  - Example log output for common scenarios
+  - Commands for filtered logging
+
 ### Changed
 - 📖 **Documentation Updates**:
   - Updated README with clear guidance on optional health platform integration
   - Updated TERMINATED_STATE_USAGE.md with health integration examples as optional feature
   - Clarified that health platform integration is the responsibility of the consuming app
   - Added example code showing how to integrate with health platforms if needed
+  - Added "Debugging & Logging" section with practical examples
+  - Updated GitHub repository URLs to use `rahulshahDEV` username
+
+- 🔧 **Code Quality**: Fixed lint warning about unnecessary library name
 
 ### Improved
 - 🎯 **Package Focus**: Narrowed package scope to core step counting functionality
   - Package now focuses exclusively on accurate step detection and counting
   - Health platform integrations are left to the consuming application
   - Provides better separation of concerns and flexibility for users
+
+- 🔍 **Enhanced Error Tracking**: Improved error handling and logging
+  - Platform exceptions are caught and logged with details
+  - Better sensor availability detection and reporting
+  - Validation failures in sync process are clearly logged with reasons
+
+- 🛠️ **Developer Experience**: Package is now much easier to debug
+  - Clear log messages at every step
+  - Sensor information logged on initialization
+  - Detailed terminated state sync process with timestamps and calculations
+  - All validation checks logged with pass/fail reasons
 
 ### Migration Guide
 No breaking changes! Existing code continues to work without modifications.
@@ -34,6 +66,16 @@ If you were expecting health platform integration:
 1. Add `health: ^13.1.4` to your app's `pubspec.yaml` (not the plugin)
 2. Use the `onTerminatedStepsDetected` callback to write steps to health platforms
 3. See README and TERMINATED_STATE_USAGE.md for complete examples
+
+### Debugging
+Use these commands to view logs:
+```bash
+# View all plugin logs
+adb logcat -s AccurateStepCounter StepCounter StepSync
+
+# View only sync logs
+adb logcat -s StepSync
+```
 
 ---
 

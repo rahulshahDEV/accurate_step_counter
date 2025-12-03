@@ -400,6 +400,58 @@ Event emitted when steps are detected.
 3. Review logs for specific error messages
 4. Ensure proper lifecycle management (call `dispose()`)
 
+## Debugging & Logging
+
+The package includes comprehensive logging to help debug issues. View logs using:
+
+### Android Logcat
+
+```bash
+# View all plugin logs
+adb logcat -s AccurateStepCounter StepCounter StepSync
+
+# View only step sync logs (terminated state)
+adb logcat -s StepSync
+
+# View only sensor events
+adb logcat -s StepCounter
+```
+
+### Log Tags
+
+The package uses the following log tags:
+
+- **AccurateStepCounter**: Main plugin lifecycle and method calls
+- **StepCounter**: Sensor events and step counting
+- **StepSync**: Terminated state synchronization
+
+### Dart Logs
+
+Dart-side logs are available in Flutter DevTools or console:
+
+```bash
+# Run with verbose logging
+flutter run --verbose
+```
+
+### Example Log Output
+
+```
+D/AccurateStepCounter: Plugin attached to Flutter engine
+D/AccurateStepCounter: Initializing sensor manager
+D/AccurateStepCounter: Step counter sensor found: Step Counter Sensor
+D/AccurateStepCounter: Sensor vendor: Google, version: 1
+D/AccurateStepCounter: Sensor listener registered
+D/StepCounter: onSensorChanged: Sensor reported 1234 steps
+D/StepSync: === Starting syncStepsFromTerminatedState ===
+D/StepSync: Current OS step count: 1284
+D/StepSync: Last saved step count: 1234 at timestamp: 1234567890
+D/StepSync: Calculated: 50 missed steps over 10 minutes
+D/StepSync: Step rate: 0.083 steps/second
+D/StepSync: ✓ All validations passed!
+D/StepSync: Syncing 50 steps from terminated state
+```
+
 ## Examples
 
 See the [example](example) directory for a complete working app demonstrating:
