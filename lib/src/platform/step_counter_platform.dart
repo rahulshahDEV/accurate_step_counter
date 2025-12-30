@@ -8,8 +8,7 @@ import 'package:flutter/services.dart';
 /// This class handles communication with platform-specific code
 /// for OS-level step counting (Android TYPE_STEP_COUNTER sensor)
 class StepCounterPlatform {
-  static const MethodChannel _channel =
-      MethodChannel('accurate_step_counter');
+  static const MethodChannel _channel = MethodChannel('accurate_step_counter');
 
   static final StepCounterPlatform _instance = StepCounterPlatform._();
 
@@ -114,14 +113,16 @@ class StepCounterPlatform {
     }
 
     try {
-      final result =
-          await _channel.invokeMethod<Map<dynamic, dynamic>>('getLastStepCount');
+      final result = await _channel.invokeMethod<Map<dynamic, dynamic>>(
+        'getLastStepCount',
+      );
       if (result == null) return null;
 
       return {
         'stepCount': result['stepCount'] as int,
-        'timestamp':
-            DateTime.fromMillisecondsSinceEpoch(result['timestamp'] as int),
+        'timestamp': DateTime.fromMillisecondsSinceEpoch(
+          result['timestamp'] as int,
+        ),
       };
     } on PlatformException {
       return null;
@@ -146,8 +147,9 @@ class StepCounterPlatform {
 
     try {
       dev.log('Syncing steps from terminated state');
-      final result = await _channel
-          .invokeMethod<Map<dynamic, dynamic>>('syncStepsFromTerminated');
+      final result = await _channel.invokeMethod<Map<dynamic, dynamic>>(
+        'syncStepsFromTerminated',
+      );
 
       if (result == null) {
         dev.log('No terminated steps to sync');
@@ -156,19 +158,139 @@ class StepCounterPlatform {
 
       final syncData = {
         'missedSteps': result['missedSteps'] as int,
-        'startTime':
-            DateTime.fromMillisecondsSinceEpoch(result['startTime'] as int),
-        'endTime':
-            DateTime.fromMillisecondsSinceEpoch(result['endTime'] as int),
+        'startTime': DateTime.fromMillisecondsSinceEpoch(
+          result['startTime'] as int,
+        ),
+        'endTime': DateTime.fromMillisecondsSinceEpoch(
+          result['endTime'] as int,
+        ),
       };
 
       dev.log(
-          'Terminated steps synced: ${syncData['missedSteps']} steps from ${syncData['startTime']} to ${syncData['endTime']}');
+        'Terminated steps synced: ${syncData['missedSteps']} steps from ${syncData['startTime']} to ${syncData['endTime']}',
+      );
 
       return syncData;
     } on PlatformException catch (e) {
       dev.log('Error syncing terminated steps: ${e.message}', error: e);
       return null;
+    }
+  }
+
+  /// Get the Android SDK version
+  ///
+  /// Returns the SDK_INT value (e.g., 29 for Android 10, 30 for Android 11)
+  /// Returns -1 on non-Android platforms
+  Future<int> getAndroidVersion() async {
+    if (!Platform.isAndroid) {
+      return -1;
+    }
+
+    try {
+      final result = await _channel.invokeMethod<int>('getAndroidVersion');
+      dev.log('Android version: $result');
+      return result ?? -1;
+    } on PlatformException catch (e) {
+      dev.log('Error getting Android version: ${e.message}', error: e);
+      return -1;
+    }
+  }
+
+  /// Start the foreground service for step counting
+  ///
+  /// This is used on Android ≤10 where terminated state sync doesn't work reliably.
+  /// Shows a persistent notification while counting steps.
+  ///
+  /// [title] - Notification title (default: "Step Counter")
+  /// [text] - Notification text (default: "Tracking your steps...")
+  Future<bool> startForegroundService({
+    String title = 'Step Counter',
+    String text = 'Tracking your steps...',
+  }) async {
+    if (!Platform.isAndroid) {
+      return false;
+    }
+
+    try {
+      dev.log('Starting foreground service');
+      final result = await _channel.invokeMethod<bool>(
+        'startForegroundService',
+        {'title': title, 'text': text},
+      );
+      dev.log('Foreground service started: $result');
+      return result ?? false;
+    } on PlatformException catch (e) {
+      dev.log('Error starting foreground service: ${e.message}', error: e);
+      return false;
+    }
+  }
+
+  /// Stop the foreground service
+  Future<bool> stopForegroundService() async {
+    if (!Platform.isAndroid) {
+      return false;
+    }
+
+    try {
+      dev.log('Stopping foreground service');
+      final result = await _channel.invokeMethod<bool>('stopForegroundService');
+      dev.log('Foreground service stopped: $result');
+      return result ?? false;
+    } on PlatformException catch (e) {
+      dev.log('Error stopping foreground service: ${e.message}', error: e);
+      return false;
+    }
+  }
+
+  /// Check if the foreground service is currently running
+  Future<bool> isForegroundServiceRunning() async {
+    if (!Platform.isAndroid) {
+      return false;
+    }
+
+    try {
+      final result = await _channel.invokeMethod<bool>(
+        'isForegroundServiceRunning',
+      );
+      return result ?? false;
+    } on PlatformException catch (e) {
+      dev.log(
+        'Error checking foreground service status: ${e.message}',
+        error: e,
+      );
+      return false;
+    }
+  }
+
+  /// Get the current step count from the foreground service
+  Future<int> getForegroundStepCount() async {
+    if (!Platform.isAndroid) {
+      return 0;
+    }
+
+    try {
+      final result = await _channel.invokeMethod<int>('getForegroundStepCount');
+      return result ?? 0;
+    } on PlatformException catch (e) {
+      dev.log('Error getting foreground step count: ${e.message}', error: e);
+      return 0;
+    }
+  }
+
+  /// Reset the foreground service step count to zero
+  Future<bool> resetForegroundStepCount() async {
+    if (!Platform.isAndroid) {
+      return false;
+    }
+
+    try {
+      final result = await _channel.invokeMethod<bool>(
+        'resetForegroundStepCount',
+      );
+      return result ?? false;
+    } on PlatformException catch (e) {
+      dev.log('Error resetting foreground step count: ${e.message}', error: e);
+      return false;
     }
   }
 }

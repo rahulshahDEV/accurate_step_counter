@@ -3,15 +3,15 @@
 [![pub package](https://img.shields.io/pub/v/accurate_step_counter.svg)](https://pub.dev/packages/accurate_step_counter)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-A highly accurate Flutter plugin for step counting using advanced accelerometer-based detection with low-pass filtering and peak detection algorithms. Designed for reliability across foreground, background, and terminated app states on Android.
+A highly accurate Flutter plugin for step counting using native Android `TYPE_STEP_DETECTOR` sensor with accelerometer fallback. Designed for reliability across foreground, background, and terminated app states on Android.
 
 ## Features
 
 ✨ **Highly Accurate Detection**
 
-- Advanced accelerometer-based step detection
-- Low-pass filtering to reduce noise
-- Peak detection algorithm for reliable step counting
+- Native Android `TYPE_STEP_DETECTOR` sensor (hardware-optimized)
+- Accelerometer fallback with low-pass filtering and peak detection
+- Zero third-party dependencies
 - Configurable sensitivity parameters
 
 📱 **Comprehensive State Support**
@@ -38,8 +38,11 @@ A highly accurate Flutter plugin for step counting using advanced accelerometer-
 
 | Platform | Supported | Notes                             |
 | -------- | --------- | --------------------------------- |
-| Android  | ✅        | Full support with OS-level sensor |
-| iOS      | 🚧        | Planned for future release        |
+| Android  | ✅        | Full support with native sensors  |
+| iOS      | ❌        | Not supported                     |
+
+> **Note**: This is an Android-only package. The package will not crash on iOS,
+> but step detection will not function.
 
 ## Installation
 
@@ -47,7 +50,7 @@ Add this to your package's `pubspec.yaml` file:
 
 ```yaml
 dependencies:
-  accurate_step_counter: ^1.1.1
+  accurate_step_counter: ^1.2.0
 ```
 
 Then run:
@@ -61,7 +64,13 @@ flutter pub get
 Add the following permissions to your `AndroidManifest.xml`:
 
 ```xml
+<!-- Required for step counter -->
 <uses-permission android:name="android.permission.ACTIVITY_RECOGNITION"/>
+
+<!-- Required for foreground service on Android ≤10 -->
+<uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
+<uses-permission android:name="android.permission.FOREGROUND_SERVICE_HEALTH"/>
+<uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
 ```
 
 For Android 10+ (API level 29+), you'll need to request the permission at runtime:
@@ -69,9 +78,12 @@ For Android 10+ (API level 29+), you'll need to request the permission at runtim
 ```dart
 import 'package:permission_handler/permission_handler.dart';
 
-// Request permission
-if (await Permission.activityRecognition.request().isGranted) {
-  // Permission granted, start step counting
+// Request permissions
+await Permission.activityRecognition.request();
+
+// On Android 13+, also request notification permission for foreground service
+if (Platform.isAndroid) {
+  await Permission.notification.request();
 }
 ```
 
@@ -363,12 +375,45 @@ Event emitted when steps are detected.
 - Continues tracking even when app is in background
 - Periodically syncs to OS-level step counter (if enabled)
 
-#### Terminated State (Android)
+#### Terminated State (Android 11+)
 
 - Saves current OS step count to SharedPreferences before termination
 - On app restart, compares saved count with current OS count
 - Validates and syncs any missed steps
 - Includes safety checks for device reboots and unrealistic step counts
+
+#### Foreground Service (Android ≤10)
+
+On Android 10 and below, the terminated state sync doesn't work reliably due to OS restrictions. The package automatically uses a **Foreground Service** to keep counting steps.
+
+**How it works:**
+- Automatically detects Android version on `start()`
+- Starts a persistent notification when needed
+- Keeps the CPU active with a wake lock
+- Steps are polled from the service every 500ms
+
+**Configuration:**
+
+```dart
+// Automatic mode (default) - foreground service used when needed
+await stepCounter.start(config: StepDetectorConfig.walking());
+
+// Check if using foreground service
+print('Using foreground service: ${stepCounter.isUsingForegroundService}');
+
+// Customize notification
+await stepCounter.start(config: StepDetectorConfig(
+  foregroundNotificationTitle: 'Walking Tracker',
+  foregroundNotificationText: 'Counting your daily steps...',
+));
+
+// Disable foreground service (not recommended for Android ≤10)
+await stepCounter.start(config: StepDetectorConfig(
+  useForegroundServiceOnOldDevices: false,
+));
+```
+
+> **Note**: On Android 13+, users must grant notification permission for the notification to appear.
 
 ## Performance & Battery
 

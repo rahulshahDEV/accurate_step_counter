@@ -48,6 +48,27 @@ class StepDetectorConfig {
   /// Requires ACTIVITY_RECOGNITION permission on Android
   final bool enableOsLevelSync;
 
+  /// Whether to use foreground service on Android 10 and below
+  ///
+  /// On Android ≤10, the terminated state sync doesn't work reliably.
+  /// When this is enabled, a foreground service with persistent notification
+  /// will be used to keep counting steps even when app is minimized.
+  ///
+  /// Defaults to true for reliable step counting on older devices.
+  final bool useForegroundServiceOnOldDevices;
+
+  /// Custom notification title when using foreground service
+  ///
+  /// Only used when [useForegroundServiceOnOldDevices] is true
+  /// and running on Android ≤10.
+  final String foregroundNotificationTitle;
+
+  /// Custom notification text when using foreground service
+  ///
+  /// Only used when [useForegroundServiceOnOldDevices] is true
+  /// and running on Android ≤10.
+  final String foregroundNotificationText;
+
   /// Creates a new step detector configuration
   ///
   /// Example:
@@ -73,11 +94,18 @@ class StepDetectorConfig {
     this.filterAlpha = 0.8,
     this.minTimeBetweenStepsMs = 200,
     this.enableOsLevelSync = true,
-  })  : assert(threshold > 0, 'Threshold must be positive'),
-        assert(filterAlpha >= 0.0 && filterAlpha <= 1.0,
-            'Filter alpha must be between 0.0 and 1.0'),
-        assert(minTimeBetweenStepsMs > 0,
-            'Minimum time between steps must be positive');
+    this.useForegroundServiceOnOldDevices = true,
+    this.foregroundNotificationTitle = 'Step Counter',
+    this.foregroundNotificationText = 'Tracking your steps...',
+  }) : assert(threshold > 0, 'Threshold must be positive'),
+       assert(
+         filterAlpha >= 0.0 && filterAlpha <= 1.0,
+         'Filter alpha must be between 0.0 and 1.0',
+       ),
+       assert(
+         minTimeBetweenStepsMs > 0,
+         'Minimum time between steps must be positive',
+       );
 
   /// Creates a preset configuration optimized for walking
   factory StepDetectorConfig.walking() {
@@ -86,6 +114,7 @@ class StepDetectorConfig {
       filterAlpha: 0.8,
       minTimeBetweenStepsMs: 250,
       enableOsLevelSync: true,
+      useForegroundServiceOnOldDevices: true,
     );
   }
 
@@ -96,6 +125,7 @@ class StepDetectorConfig {
       filterAlpha: 0.7,
       minTimeBetweenStepsMs: 150,
       enableOsLevelSync: true,
+      useForegroundServiceOnOldDevices: true,
     );
   }
 
@@ -108,6 +138,7 @@ class StepDetectorConfig {
       filterAlpha: 0.7,
       minTimeBetweenStepsMs: 180,
       enableOsLevelSync: true,
+      useForegroundServiceOnOldDevices: true,
     );
   }
 
@@ -120,6 +151,7 @@ class StepDetectorConfig {
       filterAlpha: 0.9,
       minTimeBetweenStepsMs: 300,
       enableOsLevelSync: true,
+      useForegroundServiceOnOldDevices: true,
     );
   }
 
@@ -129,19 +161,31 @@ class StepDetectorConfig {
     double? filterAlpha,
     int? minTimeBetweenStepsMs,
     bool? enableOsLevelSync,
+    bool? useForegroundServiceOnOldDevices,
+    String? foregroundNotificationTitle,
+    String? foregroundNotificationText,
   }) {
     return StepDetectorConfig(
       threshold: threshold ?? this.threshold,
       filterAlpha: filterAlpha ?? this.filterAlpha,
-      minTimeBetweenStepsMs: minTimeBetweenStepsMs ?? this.minTimeBetweenStepsMs,
+      minTimeBetweenStepsMs:
+          minTimeBetweenStepsMs ?? this.minTimeBetweenStepsMs,
       enableOsLevelSync: enableOsLevelSync ?? this.enableOsLevelSync,
+      useForegroundServiceOnOldDevices:
+          useForegroundServiceOnOldDevices ??
+          this.useForegroundServiceOnOldDevices,
+      foregroundNotificationTitle:
+          foregroundNotificationTitle ?? this.foregroundNotificationTitle,
+      foregroundNotificationText:
+          foregroundNotificationText ?? this.foregroundNotificationText,
     );
   }
 
   @override
   String toString() {
     return 'StepDetectorConfig(threshold: $threshold, filterAlpha: $filterAlpha, '
-        'minTimeBetweenStepsMs: $minTimeBetweenStepsMs, enableOsLevelSync: $enableOsLevelSync)';
+        'minTimeBetweenStepsMs: $minTimeBetweenStepsMs, enableOsLevelSync: $enableOsLevelSync, '
+        'useForegroundServiceOnOldDevices: $useForegroundServiceOnOldDevices)';
   }
 
   @override
@@ -152,7 +196,11 @@ class StepDetectorConfig {
         other.threshold == threshold &&
         other.filterAlpha == filterAlpha &&
         other.minTimeBetweenStepsMs == minTimeBetweenStepsMs &&
-        other.enableOsLevelSync == enableOsLevelSync;
+        other.enableOsLevelSync == enableOsLevelSync &&
+        other.useForegroundServiceOnOldDevices ==
+            useForegroundServiceOnOldDevices &&
+        other.foregroundNotificationTitle == foregroundNotificationTitle &&
+        other.foregroundNotificationText == foregroundNotificationText;
   }
 
   @override
@@ -160,6 +208,9 @@ class StepDetectorConfig {
     return threshold.hashCode ^
         filterAlpha.hashCode ^
         minTimeBetweenStepsMs.hashCode ^
-        enableOsLevelSync.hashCode;
+        enableOsLevelSync.hashCode ^
+        useForegroundServiceOnOldDevices.hashCode ^
+        foregroundNotificationTitle.hashCode ^
+        foregroundNotificationText.hashCode;
   }
 }

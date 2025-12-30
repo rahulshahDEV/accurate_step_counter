@@ -1,7 +1,42 @@
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:accurate_step_counter/accurate_step_counter.dart';
 
 void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
+
+  // Set up mock method channel for native step detector
+  setUpAll(() {
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(
+          const MethodChannel('accurate_step_counter'),
+          (MethodCall methodCall) async {
+            switch (methodCall.method) {
+              case 'resetNativeStepCount':
+                return true;
+              case 'stopNativeDetection':
+                return true;
+              case 'getNativeStepCount':
+                return 0;
+              case 'isNativeDetectionActive':
+                return false;
+              case 'isUsingHardwareDetector':
+                return false;
+              default:
+                return null;
+            }
+          },
+        );
+  });
+
+  tearDownAll(() {
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(
+          const MethodChannel('accurate_step_counter'),
+          null,
+        );
+  });
+
   group('AccurateStepCounter', () {
     late AccurateStepCounter stepCounter;
 
@@ -62,8 +97,10 @@ void main() {
     test('running allows faster steps than walking', () {
       final walking = StepDetectorConfig.walking();
       final running = StepDetectorConfig.running();
-      // Running should allow faster steps (shorter time between steps)
-      expect(running.minTimeBetweenStepsMs, lessThan(walking.minTimeBetweenStepsMs));
+      expect(
+        running.minTimeBetweenStepsMs,
+        lessThan(walking.minTimeBetweenStepsMs),
+      );
     });
 
     test('sensitive preset has lower threshold', () {

@@ -5,6 +5,84 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.0] - 2025-12-30
+
+### Added
+- 🔔 **Foreground Service Support**: Reliable step counting on Android ≤10
+  - Automatically detects Android version and uses foreground service when needed
+  - Persistent notification keeps step counting active even when app is minimized
+  - Customizable notification title and text via `StepDetectorConfig`
+  - No additional code required - works automatically!
+
+- 📱 **New Config Options** in `StepDetectorConfig`:
+  - `useForegroundServiceOnOldDevices` - Enable/disable foreground service mode (default: `true`)
+  - `foregroundNotificationTitle` - Custom notification title (default: "Step Counter")
+  - `foregroundNotificationText` - Custom notification text (default: "Tracking your steps...")
+
+- 🔍 **New API Properties**:
+  - `isUsingForegroundService` - Check if foreground service mode is active
+
+- 📄 **New Platform Methods** (internal):
+  - `getAndroidVersion()` - Get device Android API level
+  - `startForegroundService()` / `stopForegroundService()` - Control the service
+  - `getForegroundStepCount()` - Read steps from service
+  - `resetForegroundStepCount()` - Reset service step counter
+
+### Changed
+- 🔧 **Smart Mode Selection**: Package now auto-detects Android version:
+  - Android 11+ (API 30+): Uses native step detection + terminated state sync
+  - Android 10 and below (API ≤29): Uses foreground service with notification
+
+- 🚀 **Native Step Detection**: Replaced `sensors_plus` with native Kotlin implementation
+  - Uses `TYPE_STEP_DETECTOR` sensor for hardware-optimized step counting
+  - Falls back to accelerometer with software algorithm if unavailable
+  - Zero third-party dependencies
+  - Better battery efficiency
+
+### Removed
+- 🗑️ **Dependency Cleanup**: Removed `sensors_plus` package
+  - Step detection now handled entirely in native Kotlin code
+  - Reduces package size and dependency complexity
+
+### Technical Details
+- **New File**: `StepCounterForegroundService.kt` - Kotlin foreground service implementation
+- **New File**: `NativeStepDetector.kt` - Native step detection with TYPE_STEP_DETECTOR
+- **Notification**: Uses low-priority, silent notification to minimize user impact
+- **Wake Lock**: Keeps CPU active for accurate sensor reading
+- **EventChannel**: Real-time step events from native to Flutter
+
+### Migration Guide
+No breaking changes! Existing code works without modification.
+
+```dart
+// The foreground service is automatic for Android ≤10
+await stepCounter.start();
+
+// Customize notification (optional)
+await stepCounter.start(config: StepDetectorConfig(
+  foregroundNotificationTitle: 'Walking Tracker',
+  foregroundNotificationText: 'Counting your steps...',
+));
+
+// Disable foreground service if desired (not recommended for Android ≤10)
+await stepCounter.start(config: StepDetectorConfig(
+  useForegroundServiceOnOldDevices: false,
+));
+```
+
+### Android Manifest Changes
+The following permissions are now included in the plugin:
+```xml
+<uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
+<uses-permission android:name="android.permission.FOREGROUND_SERVICE_HEALTH"/>
+<uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
+<uses-permission android:name="android.permission.WAKE_LOCK"/>
+```
+
+> **Note**: On Android 13+, users may need to grant notification permission for the foreground service notification to appear.
+
+---
+
 ## [1.1.1] - 2025-12-03
 
 ### Removed
@@ -245,5 +323,7 @@ Want to contribute? Check out our [contributing guidelines](CONTRIBUTING.md).
 
 ## Version History
 
+- **1.2.0** (2025-12-30) - Foreground service support for Android ≤10
+- **1.1.1** (2025-12-03) - Removed unnecessary health dependency, added logging
 - **1.1.0** (2025-01-27) - Fixed terminated state sync + added callback feature
 - **1.0.0** (2025-01-20) - Initial release with Android support

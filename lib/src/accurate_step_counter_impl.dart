@@ -1,36 +1,60 @@
 import 'dart:async';
 import 'dart:developer' as dev;
+import 'dart:io';
 
 import 'models/step_count_event.dart';
 import 'models/step_detector_config.dart';
 import 'platform/step_counter_platform.dart';
-import 'services/accelerometer_step_detector.dart';
+import 'services/native_step_detector.dart';
 
 /// Implementation of the AccurateStepCounter plugin
 ///
 /// This class provides the core functionality for accurate step counting
-/// using accelerometer-based detection with optional OS-level synchronization.
+/// using native Android step detection with optional foreground service.
 class AccurateStepCounterImpl {
-  final AccelerometerStepDetector _accelerometerDetector =
-      AccelerometerStepDetector();
+  final NativeStepDetector _nativeDetector = NativeStepDetector();
   final StepCounterPlatform _platform = StepCounterPlatform.instance;
 
   StepDetectorConfig? _currentConfig;
   bool _isStarted = false;
+  bool _useForegroundService = false;
+  Timer? _foregroundStepPollTimer;
+  final StreamController<StepCountEvent> _foregroundStepController =
+      StreamController<StepCountEvent>.broadcast();
+  int _lastForegroundStepCount = 0;
 
   /// Callback for handling missed steps from terminated state
   /// Parameters: (missedSteps, startTime, endTime)
   Function(int, DateTime, DateTime)? onTerminatedStepsDetected;
 
-  /// Stream of step count events from the accelerometer detector
-  Stream<StepCountEvent> get stepEventStream =>
-      _accelerometerDetector.stepEventStream;
+  /// Stream of step count events
+  ///
+  /// Returns events from native detector or foreground service
+  /// depending on the Android version and configuration.
+  Stream<StepCountEvent> get stepEventStream {
+    if (_useForegroundService) {
+      return _foregroundStepController.stream;
+    }
+    return _nativeDetector.stepEventStream;
+  }
 
   /// Current step count since start()
-  int get currentStepCount => _accelerometerDetector.stepCount;
+  int get currentStepCount {
+    if (_useForegroundService) {
+      return _lastForegroundStepCount;
+    }
+    return _nativeDetector.stepCount;
+  }
 
   /// Whether the step counter is currently active
   bool get isStarted => _isStarted;
+
+  /// Whether foreground service mode is being used
+  bool get isUsingForegroundService => _useForegroundService;
+
+  /// Whether native hardware step detector is being used
+  Future<bool> isUsingNativeDetector() =>
+      _nativeDetector.isUsingHardwareDetector();
 
   /// Start step detection
   ///
@@ -62,17 +86,46 @@ class AccurateStepCounterImpl {
     }
 
     _currentConfig = config ?? const StepDetectorConfig();
+    _useForegroundService = false;
 
+    // Check if we should use foreground service (Android ≤10)
+    if (Platform.isAndroid &&
+        _currentConfig!.useForegroundServiceOnOldDevices) {
+      final androidVersion = await _platform.getAndroidVersion();
+      dev.log('AccurateStepCounter: Android version is $androidVersion');
+
+      // Android 10 is API 29, use foreground service for API ≤29
+      if (androidVersion > 0 && androidVersion <= 29) {
+        dev.log(
+          'AccurateStepCounter: Using foreground service for Android ≤10',
+        );
+        _useForegroundService = true;
+
+        // Start the foreground service
+        await _platform.startForegroundService(
+          title: _currentConfig!.foregroundNotificationTitle,
+          text: _currentConfig!.foregroundNotificationText,
+        );
+
+        // Start polling for step count updates
+        _startForegroundStepPolling();
+
+        _isStarted = true;
+        return;
+      }
+    }
+
+    // For Android 11+ or iOS, use native step detection
     // Initialize platform channel for OS-level sync (if enabled)
-    if (_currentConfig!.enableOsLevelSync) {
+    if (_currentConfig!.enableOsLevelSync && Platform.isAndroid) {
       await _platform.initialize();
 
       // Sync steps from terminated state
       await _syncStepsFromTerminatedState();
     }
 
-    // Start accelerometer-based detection
-    await _accelerometerDetector.start(config: _currentConfig);
+    // Start native step detection
+    await _nativeDetector.start(config: _currentConfig);
 
     _isStarted = true;
   }
@@ -92,7 +145,14 @@ class AccurateStepCounterImpl {
       return;
     }
 
-    await _accelerometerDetector.stop();
+    if (_useForegroundService) {
+      _stopForegroundStepPolling();
+      await _platform.stopForegroundService();
+      _useForegroundService = false;
+    } else {
+      await _nativeDetector.stop();
+    }
+
     _isStarted = false;
   }
 
@@ -111,7 +171,46 @@ class AccurateStepCounterImpl {
   /// stepCounter.reset();
   /// ```
   void reset() {
-    _accelerometerDetector.resetStepCount();
+    if (_useForegroundService) {
+      _platform.resetForegroundStepCount();
+      _lastForegroundStepCount = 0;
+    } else {
+      _nativeDetector.resetStepCount();
+    }
+  }
+
+  /// Start polling for step count updates from foreground service
+  void _startForegroundStepPolling() {
+    _foregroundStepPollTimer?.cancel();
+    _foregroundStepPollTimer = Timer.periodic(
+      const Duration(milliseconds: 500),
+      (_) => _pollForegroundStepCount(),
+    );
+  }
+
+  /// Stop polling for step count updates
+  void _stopForegroundStepPolling() {
+    _foregroundStepPollTimer?.cancel();
+    _foregroundStepPollTimer = null;
+  }
+
+  /// Poll the foreground service for current step count
+  Future<void> _pollForegroundStepCount() async {
+    try {
+      final stepCount = await _platform.getForegroundStepCount();
+
+      if (stepCount > _lastForegroundStepCount) {
+        _lastForegroundStepCount = stepCount;
+
+        if (!_foregroundStepController.isClosed) {
+          _foregroundStepController.add(
+            StepCountEvent(stepCount: stepCount, timestamp: DateTime.now()),
+          );
+        }
+      }
+    } catch (e) {
+      dev.log('AccurateStepCounter: Error polling foreground step count: $e');
+    }
   }
 
   /// Get the current configuration being used
@@ -157,7 +256,9 @@ class AccurateStepCounterImpl {
   /// ```
   Future<void> dispose() async {
     await stop();
-    await _accelerometerDetector.dispose();
+    await _nativeDetector.dispose();
+    _stopForegroundStepPolling();
+    await _foregroundStepController.close();
     _currentConfig = null;
   }
 
@@ -222,7 +323,9 @@ class AccurateStepCounterImpl {
   /// Returns the synced data or null if no steps were missed.
   Future<Map<String, dynamic>?> _syncStepsFromTerminatedState() async {
     try {
-      dev.log('AccurateStepCounter: Checking for steps from terminated state...');
+      dev.log(
+        'AccurateStepCounter: Checking for steps from terminated state...',
+      );
 
       final result = await _platform.syncStepsFromTerminated();
 
@@ -235,7 +338,9 @@ class AccurateStepCounterImpl {
       final startTime = result['startTime'] as DateTime;
       final endTime = result['endTime'] as DateTime;
 
-      dev.log('AccurateStepCounter: Syncing $missedSteps steps from terminated state');
+      dev.log(
+        'AccurateStepCounter: Syncing $missedSteps steps from terminated state',
+      );
       dev.log('AccurateStepCounter: Time range: $startTime to $endTime');
 
       // Notify via callback if registered

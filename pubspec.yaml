@@ -1,6 +1,6 @@
 name: accurate_step_counter
 description: A highly accurate step counter plugin using accelerometer-based detection with low-pass filtering and peak detection. Supports foreground, background, and terminated state tracking.
-version: 1.1.1
+version: 1.2.0
 homepage: https://github.com/rahulshahDEV/accurate_step_counter
 repository: https://github.com/rahulshahDEV/accurate_step_counter
 issue_tracker: https://github.com/rahulshahDEV/accurate_step_counter/issues
@@ -13,8 +13,6 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
-  plugin_platform_interface: ^2.0.2
-  sensors_plus: ^6.0.1
 
 dev_dependencies:
   flutter_test:
@@ -40,8 +38,6 @@ flutter:
     platforms:
       android:
         package: com.example.accurate_step_counter
-        pluginClass: AccurateStepCounterPlugin
-      ios:
         pluginClass: AccurateStepCounterPlugin
 
   # To add assets to your plugin package, add an assets section, like this:

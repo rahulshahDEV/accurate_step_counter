@@ -2,14 +2,18 @@ package com.example.accurate_step_counter
 
 import android.Manifest
 import android.content.Context
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.hardware.Sensor
 import android.hardware.SensorEvent
 import android.hardware.SensorEventListener
 import android.hardware.SensorManager
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import androidx.core.content.ContextCompat
 import io.flutter.embedding.engine.plugins.FlutterPlugin
+import io.flutter.plugin.common.EventChannel
 import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
 import io.flutter.plugin.common.MethodChannel.MethodCallHandler
@@ -22,11 +26,17 @@ import io.flutter.plugin.common.MethodChannel.Result
  */
 class AccurateStepCounterPlugin : FlutterPlugin, MethodCallHandler, SensorEventListener {
     private lateinit var channel: MethodChannel
+    private lateinit var eventChannel: EventChannel
     private lateinit var context: Context
+    private val mainHandler = Handler(Looper.getMainLooper())
 
     private var sensorManager: SensorManager? = null
     private var stepCounterSensor: Sensor? = null
     private var currentStepCount: Int = 0
+    
+    // Native step detector
+    private var nativeStepDetector: NativeStepDetector? = null
+    private var eventSink: EventChannel.EventSink? = null
 
     private val PREFS_NAME = "accurate_step_counter_prefs"
     private val STEP_COUNT_KEY = "last_step_count"
@@ -36,13 +46,46 @@ class AccurateStepCounterPlugin : FlutterPlugin, MethodCallHandler, SensorEventL
         android.util.Log.d("AccurateStepCounter", "Plugin attached to Flutter engine")
         channel = MethodChannel(flutterPluginBinding.binaryMessenger, "accurate_step_counter")
         channel.setMethodCallHandler(this)
+        
+        // Setup EventChannel for step events
+        eventChannel = EventChannel(flutterPluginBinding.binaryMessenger, "accurate_step_counter/step_events")
+        eventChannel.setStreamHandler(object : EventChannel.StreamHandler {
+            override fun onListen(arguments: Any?, events: EventChannel.EventSink?) {
+                android.util.Log.d("AccurateStepCounter", "EventChannel: onListen")
+                eventSink = events
+            }
+            
+            override fun onCancel(arguments: Any?) {
+                android.util.Log.d("AccurateStepCounter", "EventChannel: onCancel")
+                eventSink = null
+            }
+        })
+        
         context = flutterPluginBinding.applicationContext
         initializeSensorManager()
+        initializeNativeDetector()
     }
 
     override fun onDetachedFromEngine(binding: FlutterPlugin.FlutterPluginBinding) {
         channel.setMethodCallHandler(null)
+        eventChannel.setStreamHandler(null)
         sensorManager?.unregisterListener(this)
+        nativeStepDetector?.dispose()
+        nativeStepDetector = null
+    }
+    
+    private fun initializeNativeDetector() {
+        nativeStepDetector = NativeStepDetector(context)
+        nativeStepDetector?.onStepDetected = { stepCount ->
+            // Send step events via EventChannel on main thread
+            mainHandler.post {
+                eventSink?.success(mapOf(
+                    "stepCount" to stepCount,
+                    "timestamp" to System.currentTimeMillis()
+                ))
+            }
+        }
+        android.util.Log.d("AccurateStepCounter", "NativeStepDetector initialized, using hardware: ${nativeStepDetector?.isUsingHardwareDetector()}")
     }
 
     private fun initializeSensorManager() {
@@ -117,6 +160,110 @@ class AccurateStepCounterPlugin : FlutterPlugin, MethodCallHandler, SensorEventL
                     android.util.Log.d("AccurateStepCounter", "Sync completed with no data to sync")
                 }
                 result.success(syncData)
+            }
+            "getAndroidVersion" -> {
+                android.util.Log.d("AccurateStepCounter", "getAndroidVersion method called")
+                result.success(Build.VERSION.SDK_INT)
+            }
+            "startForegroundService" -> {
+                android.util.Log.d("AccurateStepCounter", "startForegroundService method called")
+                val title = call.argument<String>("title") ?: "Step Counter"
+                val text = call.argument<String>("text") ?: "Tracking your steps..."
+                
+                try {
+                    val intent = Intent(context, StepCounterForegroundService::class.java).apply {
+                        action = StepCounterForegroundService.ACTION_START
+                        putExtra(StepCounterForegroundService.EXTRA_NOTIFICATION_TITLE, title)
+                        putExtra(StepCounterForegroundService.EXTRA_NOTIFICATION_TEXT, text)
+                    }
+                    
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                        context.startForegroundService(intent)
+                    } else {
+                        context.startService(intent)
+                    }
+                    
+                    android.util.Log.d("AccurateStepCounter", "Foreground service started successfully")
+                    result.success(true)
+                } catch (e: Exception) {
+                    android.util.Log.e("AccurateStepCounter", "Failed to start foreground service: ${e.message}", e)
+                    result.error("SERVICE_ERROR", "Failed to start foreground service: ${e.message}", null)
+                }
+            }
+            "stopForegroundService" -> {
+                android.util.Log.d("AccurateStepCounter", "stopForegroundService method called")
+                try {
+                    val intent = Intent(context, StepCounterForegroundService::class.java).apply {
+                        action = StepCounterForegroundService.ACTION_STOP
+                    }
+                    context.stopService(intent)
+                    android.util.Log.d("AccurateStepCounter", "Foreground service stopped successfully")
+                    result.success(true)
+                } catch (e: Exception) {
+                    android.util.Log.e("AccurateStepCounter", "Failed to stop foreground service: ${e.message}", e)
+                    result.error("SERVICE_ERROR", "Failed to stop foreground service: ${e.message}", null)
+                }
+            }
+            "isForegroundServiceRunning" -> {
+                android.util.Log.d("AccurateStepCounter", "isForegroundServiceRunning method called")
+                result.success(StepCounterForegroundService.isRunning)
+            }
+            "getForegroundStepCount" -> {
+                android.util.Log.d("AccurateStepCounter", "getForegroundStepCount method called")
+                val stepCount = StepCounterForegroundService.currentStepCount
+                android.util.Log.d("AccurateStepCounter", "Foreground step count: $stepCount")
+                result.success(stepCount)
+            }
+            "resetForegroundStepCount" -> {
+                android.util.Log.d("AccurateStepCounter", "resetForegroundStepCount method called")
+                // Reset via SharedPreferences since we can't directly access the service instance
+                val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                prefs.edit().apply {
+                    putInt("foreground_step_count", 0)
+                    putInt("foreground_base_step", -1)
+                    apply()
+                }
+                result.success(true)
+            }
+            // Native step detection methods
+            "startNativeDetection" -> {
+                android.util.Log.d("AccurateStepCounter", "startNativeDetection method called")
+                val threshold = call.argument<Double>("threshold")
+                val filterAlpha = call.argument<Double>("filterAlpha")
+                val minTimeBetweenStepsMs = call.argument<Int>("minTimeBetweenStepsMs")
+                
+                val config = mutableMapOf<String, Any>()
+                threshold?.let { config["threshold"] = it }
+                filterAlpha?.let { config["filterAlpha"] = it }
+                minTimeBetweenStepsMs?.let { config["minTimeBetweenStepsMs"] = it }
+                
+                nativeStepDetector?.start(config)
+                result.success(true)
+            }
+            "stopNativeDetection" -> {
+                android.util.Log.d("AccurateStepCounter", "stopNativeDetection method called")
+                nativeStepDetector?.stop()
+                result.success(true)
+            }
+            "getNativeStepCount" -> {
+                android.util.Log.d("AccurateStepCounter", "getNativeStepCount method called")
+                val stepCount = nativeStepDetector?.getStepCount() ?: 0
+                result.success(stepCount)
+            }
+            "resetNativeStepCount" -> {
+                android.util.Log.d("AccurateStepCounter", "resetNativeStepCount method called")
+                nativeStepDetector?.reset()
+                result.success(true)
+            }
+            "isNativeDetectionActive" -> {
+                android.util.Log.d("AccurateStepCounter", "isNativeDetectionActive method called")
+                val isActive = nativeStepDetector?.isActive() ?: false
+                result.success(isActive)
+            }
+            "isUsingHardwareDetector" -> {
+                android.util.Log.d("AccurateStepCounter", "isUsingHardwareDetector method called")
+                val isHardware = nativeStepDetector?.isUsingHardwareDetector() ?: false
+                result.success(isHardware)
             }
             else -> {
                 android.util.Log.w("AccurateStepCounter", "Unknown method called: ${call.method}")
