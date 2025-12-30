@@ -3,194 +3,115 @@
 [![pub package](https://img.shields.io/pub/v/accurate_step_counter.svg)](https://pub.dev/packages/accurate_step_counter)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-A highly accurate Flutter plugin for step counting using native Android `TYPE_STEP_DETECTOR` sensor with accelerometer fallback. Designed for reliability across foreground, background, and terminated app states on Android.
+A highly accurate Flutter plugin for step counting using native Android `TYPE_STEP_DETECTOR` sensor with accelerometer fallback. Zero external dependencies. Designed for reliability across foreground, background, and terminated app states.
 
-## Features
+## ✨ Features
 
-✨ **Highly Accurate Detection**
+| Feature | Description |
+|---------|-------------|
+| 🎯 **Native Detection** | Uses Android's hardware-optimized `TYPE_STEP_DETECTOR` sensor |
+| 🔄 **Accelerometer Fallback** | Software algorithm for devices without step detector |
+| 📦 **Zero Dependencies** | Only requires Flutter SDK |
+| 🔋 **Battery Efficient** | Event-driven, not polling-based |
+| 📱 **All App States** | Foreground, background, and terminated state support |
+| ⚙️ **Configurable** | Presets for walking/running + custom parameters |
 
-- Native Android `TYPE_STEP_DETECTOR` sensor (hardware-optimized)
-- Accelerometer fallback with low-pass filtering and peak detection
-- Zero third-party dependencies
-- Configurable sensitivity parameters
+## 📱 Platform Support
 
-📱 **Comprehensive State Support**
+| Platform | Status |
+|----------|--------|
+| Android  | ✅ Full support (API 19+) |
+| iOS      | ❌ Not supported |
 
-- **Foreground**: Real-time step counting while app is active
-- **Background**: Continues tracking when app is in background
-- **Terminated**: Syncs steps taken while app was completely closed
-- Zero data loss across all app states
+> **Note**: This is an Android-only package. It won't crash on iOS but step detection won't work.
 
-🔧 **Flexible Configuration**
+## 🚀 Quick Start
 
-- Preset configurations for walking and running
-- Fine-tune threshold, filtering, and timing parameters
-- Enable/disable OS-level step counter synchronization
-
-🛡️ **Production Ready**
-
-- Robust error handling
-- Validated step data (prevents unrealistic counts)
-- Battery efficient
-- Well-tested and documented
-
-## Platform Support
-
-| Platform | Supported | Notes                             |
-| -------- | --------- | --------------------------------- |
-| Android  | ✅        | Full support with native sensors  |
-| iOS      | ❌        | Not supported                     |
-
-> **Note**: This is an Android-only package. The package will not crash on iOS,
-> but step detection will not function.
-
-## Installation
-
-Add this to your package's `pubspec.yaml` file:
+### 1. Install
 
 ```yaml
 dependencies:
   accurate_step_counter: ^1.2.0
 ```
 
-Then run:
+### 2. Add Permissions
 
-```bash
-flutter pub get
-```
-
-### Android Setup
-
-Add the following permissions to your `AndroidManifest.xml`:
+In `android/app/src/main/AndroidManifest.xml`:
 
 ```xml
-<!-- Required for step counter -->
 <uses-permission android:name="android.permission.ACTIVITY_RECOGNITION"/>
-
-<!-- Required for foreground service on Android ≤10 -->
 <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
 <uses-permission android:name="android.permission.FOREGROUND_SERVICE_HEALTH"/>
 <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
 ```
 
-For Android 10+ (API level 29+), you'll need to request the permission at runtime:
+### 3. Request Runtime Permission
 
 ```dart
 import 'package:permission_handler/permission_handler.dart';
 
-// Request permissions
+// Request activity recognition (required)
 await Permission.activityRecognition.request();
 
-// On Android 13+, also request notification permission for foreground service
-if (Platform.isAndroid) {
-  await Permission.notification.request();
-}
+// Request notification (for Android 13+ foreground service)
+await Permission.notification.request();
 ```
 
-## Quick Start
-
-### Basic Usage
+### 4. Start Counting!
 
 ```dart
 import 'package:accurate_step_counter/accurate_step_counter.dart';
 
-class MyStepCounter {
-  final _stepCounter = AccurateStepCounter();
+final stepCounter = AccurateStepCounter();
 
-  Future<void> startCounting() async {
-    // Listen to step events
-    _stepCounter.stepEventStream.listen((event) {
-      print('Steps: ${event.stepCount}');
-      print('Timestamp: ${event.timestamp}');
-    });
+// Listen to step events
+stepCounter.stepEventStream.listen((event) {
+  print('Steps: ${event.stepCount}');
+});
 
-    // Start counting
-    await _stepCounter.start();
-  }
+// Start counting
+await stepCounter.start();
 
-  Future<void> stopCounting() async {
-    await _stepCounter.stop();
-  }
+// Stop when done
+await stepCounter.stop();
 
-  void dispose() {
-    _stepCounter.dispose();
-  }
-}
+// Clean up
+await stepCounter.dispose();
 ```
 
-### With Custom Configuration
-
-```dart
-// Walking mode (default)
-await stepCounter.start(
-  config: StepDetectorConfig.walking(),
-);
-
-// Running mode (more sensitive)
-await stepCounter.start(
-  config: StepDetectorConfig.running(),
-);
-
-// Custom configuration
-await stepCounter.start(
-  config: StepDetectorConfig(
-    threshold: 1.2,              // Movement threshold (higher = less sensitive)
-    filterAlpha: 0.85,           // Low-pass filter smoothing (0.0 - 1.0)
-    minTimeBetweenStepsMs: 250,  // Minimum time between steps in milliseconds
-    enableOsLevelSync: true,     // Sync with OS step counter (Android only)
-  ),
-);
-```
-
-### Complete Example
+## 📖 Complete Example
 
 ```dart
 import 'package:flutter/material.dart';
 import 'package:accurate_step_counter/accurate_step_counter.dart';
 import 'dart:async';
 
-class StepCounterPage extends StatefulWidget {
+class StepCounterScreen extends StatefulWidget {
   @override
-  _StepCounterPageState createState() => _StepCounterPageState();
+  State<StepCounterScreen> createState() => _StepCounterScreenState();
 }
 
-class _StepCounterPageState extends State<StepCounterPage> {
+class _StepCounterScreenState extends State<StepCounterScreen> {
   final _stepCounter = AccurateStepCounter();
   StreamSubscription<StepCountEvent>? _subscription;
-  int _stepCount = 0;
-  bool _isTracking = false;
+  int _steps = 0;
+  bool _isRunning = false;
 
   @override
   void initState() {
     super.initState();
-    _initStepCounter();
-  }
-
-  void _initStepCounter() {
     _subscription = _stepCounter.stepEventStream.listen((event) {
-      setState(() {
-        _stepCount = event.stepCount;
-      });
+      setState(() => _steps = event.stepCount);
     });
   }
 
-  Future<void> _startTracking() async {
-    try {
-      await _stepCounter.start(config: StepDetectorConfig.walking());
-      setState(() => _isTracking = true);
-    } catch (e) {
-      print('Error starting: $e');
+  Future<void> _toggleTracking() async {
+    if (_isRunning) {
+      await _stepCounter.stop();
+    } else {
+      await _stepCounter.start();
     }
-  }
-
-  Future<void> _stopTracking() async {
-    await _stepCounter.stop();
-    setState(() => _isTracking = false);
-  }
-
-  void _resetCounter() {
-    _stepCounter.reset();
-    setState(() => _stepCount = 0);
+    setState(() => _isRunning = !_isRunning);
   }
 
   @override
@@ -203,31 +124,25 @@ class _StepCounterPageState extends State<StepCounterPage> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: Text('Step Counter')),
+      appBar: AppBar(title: const Text('Step Counter')),
       body: Center(
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            Text('Steps', style: TextStyle(fontSize: 24)),
-            Text('$_stepCount', style: TextStyle(fontSize: 72, fontWeight: FontWeight.bold)),
-            SizedBox(height: 40),
-            Row(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                ElevatedButton(
-                  onPressed: _isTracking ? null : _startTracking,
-                  child: Text('Start'),
-                ),
-                SizedBox(width: 16),
-                ElevatedButton(
-                  onPressed: _isTracking ? _stopTracking : null,
-                  child: Text('Stop'),
-                ),
-              ],
+            Text('$_steps', style: const TextStyle(fontSize: 80, fontWeight: FontWeight.bold)),
+            const Text('steps', style: TextStyle(fontSize: 24, color: Colors.grey)),
+            const SizedBox(height: 40),
+            ElevatedButton.icon(
+              onPressed: _toggleTracking,
+              icon: Icon(_isRunning ? Icons.stop : Icons.play_arrow),
+              label: Text(_isRunning ? 'Stop' : 'Start'),
             ),
-            ElevatedButton(
-              onPressed: _resetCounter,
-              child: Text('Reset'),
+            TextButton(
+              onPressed: () {
+                _stepCounter.reset();
+                setState(() => _steps = 0);
+              },
+              child: const Text('Reset'),
             ),
           ],
         ),
@@ -237,340 +152,280 @@ class _StepCounterPageState extends State<StepCounterPage> {
 }
 ```
 
-## API Reference
+## ⚙️ Configuration
+
+### Presets
+
+```dart
+// For walking (default)
+await stepCounter.start(config: StepDetectorConfig.walking());
+
+// For running (more sensitive, faster detection)
+await stepCounter.start(config: StepDetectorConfig.running());
+
+// Sensitive mode (may have false positives)
+await stepCounter.start(config: StepDetectorConfig.sensitive());
+
+// Conservative mode (fewer false positives)
+await stepCounter.start(config: StepDetectorConfig.conservative());
+```
+
+### Custom Configuration
+
+```dart
+await stepCounter.start(
+  config: StepDetectorConfig(
+    threshold: 1.2,                // Movement threshold (higher = less sensitive)
+    filterAlpha: 0.85,             // Smoothing factor (0.0 - 1.0)
+    minTimeBetweenStepsMs: 250,    // Minimum ms between steps
+    enableOsLevelSync: true,       // Sync with OS step counter
+    
+    // Foreground service options (Android ≤10)
+    useForegroundServiceOnOldDevices: true,
+    foregroundNotificationTitle: 'Step Tracker',
+    foregroundNotificationText: 'Counting your steps...',
+  ),
+);
+```
+
+### Configuration Parameters
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `threshold` | 1.0 | Movement threshold for step detection |
+| `filterAlpha` | 0.8 | Low-pass filter smoothing (0.0-1.0) |
+| `minTimeBetweenStepsMs` | 200 | Minimum time between steps |
+| `enableOsLevelSync` | true | Sync with OS step counter |
+| `useForegroundServiceOnOldDevices` | true | Use foreground service on Android ≤10 |
+| `foregroundNotificationTitle` | "Step Counter" | Notification title |
+| `foregroundNotificationText` | "Tracking your steps..." | Notification text |
+
+## 🔧 API Reference
 
 ### AccurateStepCounter
 
-Main class for step counting functionality.
-
-#### Properties
-
-- `stepEventStream` - Stream of `StepCountEvent` objects
-- `currentStepCount` - Current step count since `start()`
-- `isStarted` - Whether the step counter is currently active
-- `currentConfig` - Current configuration being used
-
-#### Methods
-
-##### `start({StepDetectorConfig? config})`
-
-Starts step detection.
-
-**Parameters:**
-
-- `config` - Optional configuration (defaults to walking mode)
-
-**Throws:**
-
-- `StateError` if already started
-
-**Example:**
-
 ```dart
-await stepCounter.start(config: StepDetectorConfig.walking());
-```
-
-##### `stop()`
-
-Stops step detection while preserving the current step count.
-
-**Example:**
-
-```dart
-await stepCounter.stop();
-```
-
-##### `reset()`
-
-Resets the step counter to zero. Does not stop detection if running.
-
-**Example:**
-
-```dart
-stepCounter.reset();
-```
-
-##### `dispose()`
-
-Disposes of all resources. Call when completely done with the step counter.
-
-**Example:**
-
-```dart
-await stepCounter.dispose();
-```
-
-##### `getOsStepCount()`
-
-Gets the OS-level step count (Android only). Returns `null` if unavailable or OS-level sync is disabled.
-
-**Example:**
-
-```dart
-final osSteps = await stepCounter.getOsStepCount();
-if (osSteps != null) {
-  print('OS reports: $osSteps steps');
-}
-```
-
-##### `saveState()`
-
-Manually saves the current state for recovery after app termination (Android only).
-
-**Example:**
-
-```dart
-await stepCounter.saveState();
-```
-
-### StepDetectorConfig
-
-Configuration for step detection sensitivity and behavior.
-
-#### Constructors
-
-##### `StepDetectorConfig()`
-
-Creates a default configuration for general walking.
-
-**Parameters:**
-
-- `threshold` (default: 1.0) - Movement threshold for step detection
-- `filterAlpha` (default: 0.8) - Low-pass filter coefficient (0.0 - 1.0)
-- `minTimeBetweenStepsMs` (default: 300) - Minimum milliseconds between steps
-- `enableOsLevelSync` (default: true) - Enable OS-level step counter sync
-
-##### `StepDetectorConfig.walking()`
-
-Preset configuration optimized for normal walking pace.
-
-##### `StepDetectorConfig.running()`
-
-Preset configuration optimized for running/jogging.
-
-### StepCountEvent
-
-Event emitted when steps are detected.
-
-#### Properties
-
-- `stepCount` - Total steps since `start()`
-- `timestamp` - DateTime when the step was detected
-
-## How It Works
-
-### Step Detection Algorithm
-
-1. **Accelerometer Data Collection**: Continuously monitors device accelerometer
-2. **Low-Pass Filtering**: Applies smoothing to reduce noise and false positives
-3. **Magnitude Calculation**: Computes movement magnitude from X, Y, Z axes
-4. **Peak Detection**: Identifies peaks that exceed the configured threshold
-5. **Step Validation**: Ensures minimum time between steps to prevent double-counting
-
-### State Management
-
-#### Foreground/Background
-
-- Uses accelerometer-based detection via `sensors_plus` package
-- Continues tracking even when app is in background
-- Periodically syncs to OS-level step counter (if enabled)
-
-#### Terminated State (Android 11+)
-
-- Saves current OS step count to SharedPreferences before termination
-- On app restart, compares saved count with current OS count
-- Validates and syncs any missed steps
-- Includes safety checks for device reboots and unrealistic step counts
-
-#### Foreground Service (Android ≤10)
-
-On Android 10 and below, the terminated state sync doesn't work reliably due to OS restrictions. The package automatically uses a **Foreground Service** to keep counting steps.
-
-**How it works:**
-- Automatically detects Android version on `start()`
-- Starts a persistent notification when needed
-- Keeps the CPU active with a wake lock
-- Steps are polled from the service every 500ms
-
-**Configuration:**
-
-```dart
-// Automatic mode (default) - foreground service used when needed
-await stepCounter.start(config: StepDetectorConfig.walking());
-
-// Check if using foreground service
-print('Using foreground service: ${stepCounter.isUsingForegroundService}');
-
-// Customize notification
-await stepCounter.start(config: StepDetectorConfig(
-  foregroundNotificationTitle: 'Walking Tracker',
-  foregroundNotificationText: 'Counting your daily steps...',
-));
-
-// Disable foreground service (not recommended for Android ≤10)
-await stepCounter.start(config: StepDetectorConfig(
-  useForegroundServiceOnOldDevices: false,
-));
-```
-
-> **Note**: On Android 13+, users must grant notification permission for the notification to appear.
-
-## Performance & Battery
-
-- **CPU Usage**: Minimal - uses native sensor APIs
-- **Battery Impact**: Low - sensor sampling optimized for efficiency
-- **Memory**: ~2-5 MB depending on configuration
-- **Background**: Works seamlessly with Android's Doze mode
-
-## Troubleshooting
-
-### Steps not being detected
-
-1. Ensure `ACTIVITY_RECOGNITION` permission is granted
-2. Verify device has accelerometer sensor
-3. Try adjusting threshold (lower = more sensitive)
-4. Check that app has not been force-stopped by system
-
-### Inaccurate step counts
-
-1. Calibrate by comparing with known step counts
-2. Adjust `threshold` parameter based on device/user
-3. Try different preset configurations (walking vs running)
-4. Ensure device is held in typical position during calibration
-
-### App crashes or errors
-
-1. Check Android version (requires API 19+)
-2. Verify sensor availability: `sensorManager.getDefaultSensor(TYPE_ACCELEROMETER)`
-3. Review logs for specific error messages
-4. Ensure proper lifecycle management (call `dispose()`)
-
-## Debugging & Logging
-
-The package includes comprehensive logging to help debug issues. View logs using:
-
-### Android Logcat
-
-```bash
-# View all plugin logs
-adb logcat -s AccurateStepCounter StepCounter StepSync
-
-# View only step sync logs (terminated state)
-adb logcat -s StepSync
-
-# View only sensor events
-adb logcat -s StepCounter
-```
-
-### Log Tags
-
-The package uses the following log tags:
-
-- **AccurateStepCounter**: Main plugin lifecycle and method calls
-- **StepCounter**: Sensor events and step counting
-- **StepSync**: Terminated state synchronization
-
-### Dart Logs
-
-Dart-side logs are available in Flutter DevTools or console:
-
-```bash
-# Run with verbose logging
-flutter run --verbose
-```
-
-### Example Log Output
-
-```
-D/AccurateStepCounter: Plugin attached to Flutter engine
-D/AccurateStepCounter: Initializing sensor manager
-D/AccurateStepCounter: Step counter sensor found: Step Counter Sensor
-D/AccurateStepCounter: Sensor vendor: Google, version: 1
-D/AccurateStepCounter: Sensor listener registered
-D/StepCounter: onSensorChanged: Sensor reported 1234 steps
-D/StepSync: === Starting syncStepsFromTerminatedState ===
-D/StepSync: Current OS step count: 1284
-D/StepSync: Last saved step count: 1234 at timestamp: 1234567890
-D/StepSync: Calculated: 50 missed steps over 10 minutes
-D/StepSync: Step rate: 0.083 steps/second
-D/StepSync: ✓ All validations passed!
-D/StepSync: Syncing 50 steps from terminated state
-```
-
-## Examples
-
-See the [example](example) directory for a complete working app demonstrating:
-
-- Basic step counting
-- Start/stop/reset functionality
-- Custom configurations
-- Stream subscription management
-- Proper lifecycle handling
-
-## Testing
-
-Run the tests:
-
-```bash
-cd accurate_step_counter
-flutter test
-```
-
-Run integration tests:
-
-```bash
-cd example
-flutter test integration_test
-```
-
-## Contributing
-
-Contributions are welcome! Please feel free to submit a Pull Request.
-
-## License
-
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-
-## Integration with Health Platforms
-
-This package focuses on accurate step counting and does not include built-in health platform integrations. If you need to sync steps to health platforms:
-
-- **Android Health Connect**: Use the [health](https://pub.dev/packages/health) package
-- **iOS HealthKit**: Use the [health](https://pub.dev/packages/health) package
-- **Custom backends**: Implement your own storage solution
-
-Example with health package (add it separately):
-
-```dart
-// Add health: ^13.1.4 to your app's pubspec.yaml
-import 'package:health/health.dart';
-
-stepCounter.onTerminatedStepsDetected = (steps, start, end) async {
-  final health = Health();
-  await health.writeHealthData(
-    value: steps.toDouble(),
-    type: HealthDataType.STEPS,
-    startTime: start,
-    endTime: end,
-  );
+final stepCounter = AccurateStepCounter();
+
+// Properties
+stepCounter.stepEventStream       // Stream<StepCountEvent>
+stepCounter.currentStepCount      // int
+stepCounter.isStarted             // bool
+stepCounter.isUsingForegroundService  // bool
+stepCounter.currentConfig         // StepDetectorConfig?
+
+// Methods
+await stepCounter.start({config});    // Start detection
+await stepCounter.stop();             // Stop detection
+stepCounter.reset();                  // Reset count to zero
+await stepCounter.dispose();          // Clean up resources
+
+// Check sensor type
+final isHardware = await stepCounter.isUsingNativeDetector();
+
+// Terminated state sync (automatic, but can be manual)
+stepCounter.onTerminatedStepsDetected = (steps, startTime, endTime) {
+  print('Synced $steps missed steps');
 };
 ```
 
-## Acknowledgments
+### StepCountEvent
 
-- Uses [sensors_plus](https://pub.dev/packages/sensors_plus) for accelerometer access
-- Inspired by research in mobile step detection algorithms
-- Thanks to all contributors and testers
+```dart
+final event = StepCountEvent(stepCount: 100, timestamp: DateTime.now());
 
-## Changelog
+event.stepCount   // int - Total steps since start()
+event.timestamp   // DateTime - When step was detected
+```
 
-See [CHANGELOG.md](CHANGELOG.md) for version history.
+## 🏗️ Architecture
 
-## Support
+### Overall Flow
 
-- 📖 [Documentation](https://pub.dev/documentation/accurate_step_counter)
-- 🐛 [Issue Tracker](https://github.com/rahulshahDEV/accurate_step_counter/issues)
-- 💬 [Discussions](https://github.com/rahulshahDEV/accurate_step_counter/discussions)
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                         Flutter App                              │
+├─────────────────────────────────────────────────────────────────┤
+│  AccurateStepCounter                                            │
+│       ├── stepEventStream (real-time steps)                     │
+│       ├── currentStepCount                                      │
+│       └── onTerminatedStepsDetected (missed steps callback)     │
+├─────────────────────────────────────────────────────────────────┤
+│  NativeStepDetector (Dart)                                      │
+│       ├── MethodChannel (commands)                              │
+│       └── EventChannel (step events)                            │
+└──────────────────────────┬──────────────────────────────────────┘
+                           │
+                    Platform Channel
+                           │
+┌──────────────────────────▼──────────────────────────────────────┐
+│                     Android Native (Kotlin)                      │
+├─────────────────────────────────────────────────────────────────┤
+│  AccurateStepCounterPlugin                                      │
+│       ├── NativeStepDetector.kt (sensor handling)               │
+│       ├── StepCounterForegroundService.kt (Android ≤10)         │
+│       └── SharedPreferences (state persistence)                 │
+├─────────────────────────────────────────────────────────────────┤
+│  Android Sensors                                                │
+│       ├── TYPE_STEP_DETECTOR (primary - hardware)               │
+│       └── TYPE_ACCELEROMETER (fallback - software)              │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Step Detection Priority
+
+```
+┌─────────────────────────────────────────────────┐
+│            Check: TYPE_STEP_DETECTOR            │
+│              (Hardware Sensor)                  │
+└──────────────────────┬──────────────────────────┘
+                       │
+           ┌───────────▼───────────┐
+           │     Available?        │
+           └───────────┬───────────┘
+                       │
+          ┌────────────┴────────────┐
+          │                         │
+    ┌─────▼─────┐            ┌──────▼──────┐
+    │    YES    │            │     NO      │
+    └─────┬─────┘            └──────┬──────┘
+          │                         │
+┌─────────▼─────────┐    ┌─────────▼─────────┐
+│  Hardware Step    │    │  Accelerometer    │
+│  Detection        │    │  + Algorithm      │
+│                   │    │                   │
+│  • Best accuracy  │    │  • Low-pass filter│
+│  • Battery saving │    │  • Peak detection │
+│  • Event-driven   │    │  • Configurable   │
+└───────────────────┘    └───────────────────┘
+```
+
+## 📱 App State Coverage
+
+### How Each State is Handled
+
+| App State | Android 11+ (API 30+) | Android ≤10 (API ≤29) |
+|-----------|----------------------|----------------------|
+| 🟢 **Foreground** | Native `TYPE_STEP_DETECTOR` | Native `TYPE_STEP_DETECTOR` |
+| 🟡 **Background** | Native detection continues | **Foreground Service** keeps counting |
+| 🔴 **Terminated** | OS sync on app relaunch | **Foreground Service** prevents termination |
+| 📢 **Notification** | ❌ **None** (not needed) | ✅ **Shows** (required by Android) |
+
+> **Important**: The persistent notification **only appears on Android 10 and below**. On Android 11+, no notification is shown because the native step detector works without needing a foreground service.
+
+### Detailed State Behavior
+
+#### 🟢 Foreground State
+```
+App Active → NativeStepDetector → TYPE_STEP_DETECTOR → EventChannel → Flutter UI
+```
+- Real-time step counting with immediate updates
+- Hardware-optimized detection
+- Full access to all sensors
+
+#### 🟡 Background State
+
+**Android 11+:**
+```
+App Minimized → Native detection continues → Steps buffered → UI updates when resumed
+```
+
+**Android ≤10:**
+```
+App Minimized → Foreground Service starts → Persistent notification shown
+                    ↓
+              Keeps CPU active via WakeLock
+                    ↓
+              Steps counted continuously
+                    ↓
+              Results polled every 500ms
+```
+
+#### 🔴 Terminated State
+
+**Android 11+:**
+```
+App Killed → OS continues counting via TYPE_STEP_COUNTER
+                    ↓
+             App Relaunched
+                    ↓
+       Compare saved count with current OS count
+                    ↓
+       Calculate missed steps
+                    ↓
+       Trigger onTerminatedStepsDetected callback
+```
+
+**Android ≤10:**
+```
+Foreground Service prevents true termination
+                    ↓
+       Service continues counting even if Activity destroyed
+                    ↓
+       No steps are ever missed
+```
+
+### Terminated State Sync (Android 11+)
+
+```dart
+// Automatic sync happens on start(), but you can handle it:
+stepCounter.onTerminatedStepsDetected = (missedSteps, startTime, endTime) {
+  print('You walked $missedSteps steps while app was closed!');
+  print('From: $startTime to $endTime');
+  
+  // Optionally save to database or sync to server
+  saveToDatabase(missedSteps, startTime, endTime);
+};
+```
+
+## 🔋 Battery & Performance
+
+| Metric | Value |
+|--------|-------|
+| Detection Method | Event-driven (not polling) |
+| CPU Usage | Minimal (~1-2%) |
+| Battery Impact | Low (uses hardware sensor) |
+| Memory | ~2-5 MB |
+| Foreground Service Battery | Moderate (only Android ≤10) |
+
+## 🐛 Debugging
+
+### View Logs
+
+```bash
+# All plugin logs
+adb logcat -s AccurateStepCounter NativeStepDetector StepSync
+
+# Only step events
+adb logcat -s NativeStepDetector
+```
+
+### Check Sensor Availability
+
+```dart
+final isHardware = await stepCounter.isUsingNativeDetector();
+print('Using hardware step detector: $isHardware');
+```
+
+## ❓ Troubleshooting
+
+| Issue | Solution |
+|-------|----------|
+| Steps not detected | Check `ACTIVITY_RECOGNITION` permission is granted |
+| Inaccurate counts | Try adjusting `threshold` parameter |
+| Stops in background | Enable foreground service or check battery optimization |
+| No notification (Android ≤10) | Grant notification permission |
+
+## 📄 License
+
+MIT License - see [LICENSE](LICENSE)
+
+## 🔗 Links
+
+- [📦 pub.dev](https://pub.dev/packages/accurate_step_counter)
+- [🐙 GitHub](https://github.com/rahulshahDEV/accurate_step_counter)
+- [📋 Changelog](CHANGELOG.md)
+- [🐛 Issues](https://github.com/rahulshahDEV/accurate_step_counter/issues)
 
 ---
 
