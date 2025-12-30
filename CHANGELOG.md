@@ -44,6 +44,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Step detection now handled entirely in native Kotlin code
   - Reduces package size and dependency complexity
 
+- 🗑️ **Removed `plugin_platform_interface`**: Now zero external dependencies
+  - Removed unused boilerplate platform interface files
+  - Package now only depends on Flutter SDK
+
+- 📱 **iOS Support Removed**: Package is now Android-only
+  - Removed iOS platform declaration and all iOS files
+  - Package will not crash on iOS but step detection won't function
+
 ### Technical Details
 - **New File**: `StepCounterForegroundService.kt` - Kotlin foreground service implementation
 - **New File**: `NativeStepDetector.kt` - Native step detection with TYPE_STEP_DETECTOR
