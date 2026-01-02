@@ -5,6 +5,45 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.1] - 2026-01-02
+
+### Added
+- ⚙️ **Configurable Foreground Service API Level**: New `foregroundServiceMaxApiLevel` config option
+  - Allows users to specify the maximum Android API level for foreground service usage
+  - Default: `29` (Android 10) - same behavior as before
+  - Set to higher values (e.g., `31` for Android 12) to use foreground service on newer devices
+  - Common API levels:
+    - 29 = Android 10 (default)
+    - 30 = Android 11
+    - 31 = Android 12
+    - 32 = Android 12L
+    - 33 = Android 13
+    - 34 = Android 14
+
+### Example Usage
+```dart
+// Use foreground service for Android 12 and below (API ≤ 31)
+await stepCounter.start(
+  config: StepDetectorConfig(
+    useForegroundServiceOnOldDevices: true,
+    foregroundServiceMaxApiLevel: 31,
+  ),
+);
+
+// Use default behavior (foreground service for Android ≤10 only)
+await stepCounter.start(); // Uses default API level 29
+```
+
+### Changed
+- 📖 Updated documentation to reflect configurable API level
+- 🔧 Improved logging to show configured max API level
+
+### Migration Guide
+No breaking changes! The default behavior remains the same (API ≤29).
+To use foreground service on newer Android versions, set `foregroundServiceMaxApiLevel` to the desired API level.
+
+---
+
 ## [1.2.0] - 2025-12-30
 
 ### Added
@@ -331,6 +370,7 @@ Want to contribute? Check out our [contributing guidelines](CONTRIBUTING.md).
 
 ## Version History
 
+- **1.2.1** (2026-01-02) - Configurable foreground service API level
 - **1.2.0** (2025-12-30) - Foreground service support for Android ≤10
 - **1.1.1** (2025-12-03) - Removed unnecessary health dependency, added logging
 - **1.1.0** (2025-01-27) - Fixed terminated state sync + added callback feature

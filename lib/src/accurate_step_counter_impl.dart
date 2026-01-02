@@ -88,16 +88,20 @@ class AccurateStepCounterImpl {
     _currentConfig = config ?? const StepDetectorConfig();
     _useForegroundService = false;
 
-    // Check if we should use foreground service (Android ≤10)
+    // Check if we should use foreground service based on configured API level
     if (Platform.isAndroid &&
         _currentConfig!.useForegroundServiceOnOldDevices) {
       final androidVersion = await _platform.getAndroidVersion();
-      dev.log('AccurateStepCounter: Android version is $androidVersion');
+      final maxApiLevel = _currentConfig!.foregroundServiceMaxApiLevel;
+      dev.log('AccurateStepCounter: Android API level is $androidVersion');
+      dev.log(
+        'AccurateStepCounter: Foreground service max API level is $maxApiLevel',
+      );
 
-      // Android 10 is API 29, use foreground service for API ≤29
-      if (androidVersion > 0 && androidVersion <= 29) {
+      // Use foreground service for API ≤ configured maxApiLevel
+      if (androidVersion > 0 && androidVersion <= maxApiLevel) {
         dev.log(
-          'AccurateStepCounter: Using foreground service for Android ≤10',
+          'AccurateStepCounter: Using foreground service for API ≤$maxApiLevel',
         );
         _useForegroundService = true;
 

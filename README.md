@@ -31,7 +31,7 @@ A highly accurate Flutter plugin for step counting using native Android `TYPE_ST
 
 ```yaml
 dependencies:
-  accurate_step_counter: ^1.2.0
+  accurate_step_counter: ^1.2.1
 ```
 
 ### 2. Add Permissions
@@ -180,8 +180,9 @@ await stepCounter.start(
     minTimeBetweenStepsMs: 250,    // Minimum ms between steps
     enableOsLevelSync: true,       // Sync with OS step counter
     
-    // Foreground service options (Android ≤10)
+    // Foreground service options
     useForegroundServiceOnOldDevices: true,
+    foregroundServiceMaxApiLevel: 29, // API level threshold (default: 29 = Android 10)
     foregroundNotificationTitle: 'Step Tracker',
     foregroundNotificationText: 'Counting your steps...',
   ),
@@ -196,7 +197,8 @@ await stepCounter.start(
 | `filterAlpha` | 0.8 | Low-pass filter smoothing (0.0-1.0) |
 | `minTimeBetweenStepsMs` | 200 | Minimum time between steps |
 | `enableOsLevelSync` | true | Sync with OS step counter |
-| `useForegroundServiceOnOldDevices` | true | Use foreground service on Android ≤10 |
+| `useForegroundServiceOnOldDevices` | true | Use foreground service on older Android |
+| `foregroundServiceMaxApiLevel` | 29 | Max API level for foreground service (29=Android 10, 31=Android 12, etc.) |
 | `foregroundNotificationTitle` | "Step Counter" | Notification title |
 | `foregroundNotificationText` | "Tracking your steps..." | Notification text |
 
@@ -311,7 +313,7 @@ event.timestamp   // DateTime - When step was detected
 | 🔴 **Terminated** | OS sync on app relaunch | **Foreground Service** prevents termination |
 | 📢 **Notification** | ❌ **None** (not needed) | ✅ **Shows** (required by Android) |
 
-> **Important**: The persistent notification **only appears on Android 10 and below**. On Android 11+, no notification is shown because the native step detector works without needing a foreground service.
+> **Important**: The persistent notification **only appears on Android devices with API level ≤ `foregroundServiceMaxApiLevel`** (default: 29 = Android 10). On newer devices, no notification is shown because the native step detector works without needing a foreground service.
 
 ### Detailed State Behavior
 

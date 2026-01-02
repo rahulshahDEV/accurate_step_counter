@@ -48,25 +48,43 @@ class StepDetectorConfig {
   /// Requires ACTIVITY_RECOGNITION permission on Android
   final bool enableOsLevelSync;
 
-  /// Whether to use foreground service on Android 10 and below
+  /// Whether to use foreground service on older Android versions
   ///
-  /// On Android ≤10, the terminated state sync doesn't work reliably.
+  /// On older Android versions, the terminated state sync doesn't work reliably.
   /// When this is enabled, a foreground service with persistent notification
   /// will be used to keep counting steps even when app is minimized.
   ///
+  /// The Android version threshold is controlled by [foregroundServiceMaxApiLevel].
   /// Defaults to true for reliable step counting on older devices.
   final bool useForegroundServiceOnOldDevices;
+
+  /// The maximum Android API level for which foreground service should be used
+  ///
+  /// When [useForegroundServiceOnOldDevices] is true and the device's API level
+  /// is less than or equal to this value, the foreground service will be used
+  /// instead of the normal TYPE_STEP_COUNTER sensor flow.
+  ///
+  /// Common API levels:
+  /// - 29 = Android 10 (default)
+  /// - 30 = Android 11
+  /// - 31 = Android 12
+  /// - 32 = Android 12L
+  /// - 33 = Android 13
+  /// - 34 = Android 14
+  ///
+  /// Defaults to 29 (Android 10).
+  final int foregroundServiceMaxApiLevel;
 
   /// Custom notification title when using foreground service
   ///
   /// Only used when [useForegroundServiceOnOldDevices] is true
-  /// and running on Android ≤10.
+  /// and running on Android with API level ≤ [foregroundServiceMaxApiLevel].
   final String foregroundNotificationTitle;
 
   /// Custom notification text when using foreground service
   ///
   /// Only used when [useForegroundServiceOnOldDevices] is true
-  /// and running on Android ≤10.
+  /// and running on Android with API level ≤ [foregroundServiceMaxApiLevel].
   final String foregroundNotificationText;
 
   /// Creates a new step detector configuration
@@ -95,9 +113,15 @@ class StepDetectorConfig {
     this.minTimeBetweenStepsMs = 200,
     this.enableOsLevelSync = true,
     this.useForegroundServiceOnOldDevices = true,
+    this.foregroundServiceMaxApiLevel = 29,
     this.foregroundNotificationTitle = 'Step Counter',
     this.foregroundNotificationText = 'Tracking your steps...',
   }) : assert(threshold > 0, 'Threshold must be positive'),
+       assert(
+         foregroundServiceMaxApiLevel >= 21 &&
+             foregroundServiceMaxApiLevel <= 50,
+         'foregroundServiceMaxApiLevel must be between 21 and 50',
+       ),
        assert(
          filterAlpha >= 0.0 && filterAlpha <= 1.0,
          'Filter alpha must be between 0.0 and 1.0',
@@ -162,6 +186,7 @@ class StepDetectorConfig {
     int? minTimeBetweenStepsMs,
     bool? enableOsLevelSync,
     bool? useForegroundServiceOnOldDevices,
+    int? foregroundServiceMaxApiLevel,
     String? foregroundNotificationTitle,
     String? foregroundNotificationText,
   }) {
@@ -174,6 +199,8 @@ class StepDetectorConfig {
       useForegroundServiceOnOldDevices:
           useForegroundServiceOnOldDevices ??
           this.useForegroundServiceOnOldDevices,
+      foregroundServiceMaxApiLevel:
+          foregroundServiceMaxApiLevel ?? this.foregroundServiceMaxApiLevel,
       foregroundNotificationTitle:
           foregroundNotificationTitle ?? this.foregroundNotificationTitle,
       foregroundNotificationText:
@@ -185,7 +212,8 @@ class StepDetectorConfig {
   String toString() {
     return 'StepDetectorConfig(threshold: $threshold, filterAlpha: $filterAlpha, '
         'minTimeBetweenStepsMs: $minTimeBetweenStepsMs, enableOsLevelSync: $enableOsLevelSync, '
-        'useForegroundServiceOnOldDevices: $useForegroundServiceOnOldDevices)';
+        'useForegroundServiceOnOldDevices: $useForegroundServiceOnOldDevices, '
+        'foregroundServiceMaxApiLevel: $foregroundServiceMaxApiLevel)';
   }
 
   @override
@@ -199,6 +227,7 @@ class StepDetectorConfig {
         other.enableOsLevelSync == enableOsLevelSync &&
         other.useForegroundServiceOnOldDevices ==
             useForegroundServiceOnOldDevices &&
+        other.foregroundServiceMaxApiLevel == foregroundServiceMaxApiLevel &&
         other.foregroundNotificationTitle == foregroundNotificationTitle &&
         other.foregroundNotificationText == foregroundNotificationText;
   }
@@ -210,6 +239,7 @@ class StepDetectorConfig {
         minTimeBetweenStepsMs.hashCode ^
         enableOsLevelSync.hashCode ^
         useForegroundServiceOnOldDevices.hashCode ^
+        foregroundServiceMaxApiLevel.hashCode ^
         foregroundNotificationTitle.hashCode ^
         foregroundNotificationText.hashCode;
   }
