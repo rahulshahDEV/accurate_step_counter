@@ -83,14 +83,13 @@ await stepCounter.dispose();
 
 ## 📖 Complete Example
 
-### Full-Featured Step Tracker App
+### Sweet & Simple - Works in ALL States (Foreground, Background, Terminated)
 
 ```dart
-import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart';
 import 'package:accurate_step_counter/accurate_step_counter.dart';
 import 'package:permission_handler/permission_handler.dart';
-import 'dart:async';
 
 void main() => runApp(const MyApp());
 
@@ -100,8 +99,6 @@ class MyApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Step Counter',
-      theme: ThemeData(primarySwatch: Colors.blue),
       home: const StepCounterPage(),
     );
   }
@@ -115,207 +112,56 @@ class StepCounterPage extends StatefulWidget {
 }
 
 class _StepCounterPageState extends State<StepCounterPage> with WidgetsBindingObserver {
-  // Step counter instance
   final _stepCounter = AccurateStepCounter();
-
-  // State variables
-  StreamSubscription<StepCountEvent>? _realtimeSubscription;
-  int _currentSteps = 0;
-  int _totalSteps = 0;
-  int _foregroundSteps = 0;
-  int _backgroundSteps = 0;
-  int _terminatedSteps = 0;
-  bool _isRunning = false;
-  bool _isHardwareDetector = false;
-  String _statusMessage = 'Ready to start';
+  int _steps = 0;
 
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
-    _initializeStepCounter();
+    _init();
+  }
+
+  Future<void> _init() async {
+    // Request permissions
+    await Permission.activityRecognition.request();
+    await Permission.notification.request();
+
+    // Initialize logging for persistent storage
+    await _stepCounter.initializeLogging(debugLogging: kDebugMode);
+
+    // Start counting with terminated state sync enabled
+    await _stepCounter.start(
+      config: StepDetectorConfig(enableOsLevelSync: true),
+    );
+
+    // Start auto-logging to database
+    await _stepCounter.startLogging(
+      config: StepRecordConfig.walking(),
+    );
+
+    // Listen to real-time step count
+    _stepCounter.stepEventStream.listen((event) {
+      setState(() => _steps = event.stepCount);
+    });
+
+    // Handle steps from terminated state
+    _stepCounter.onTerminatedStepsDetected = (steps, start, end) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Recovered $steps steps from terminated state!')),
+      );
+    };
   }
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     // CRITICAL: Track app state for proper source detection
     _stepCounter.setAppState(state);
-
-    setState(() {
-      switch (state) {
-        case AppLifecycleState.resumed:
-          _statusMessage = 'App in foreground';
-          break;
-        case AppLifecycleState.paused:
-          _statusMessage = 'App in background';
-          break;
-        case AppLifecycleState.inactive:
-          _statusMessage = 'App inactive';
-          break;
-        case AppLifecycleState.detached:
-          _statusMessage = 'App detached';
-          break;
-        case AppLifecycleState.hidden:
-          _statusMessage = 'App hidden';
-          break;
-      }
-    });
-  }
-
-  Future<void> _initializeStepCounter() async {
-    try {
-      // 1. Request permissions
-      final permissionStatus = await Permission.activityRecognition.request();
-      if (!permissionStatus.isGranted) {
-        setState(() => _statusMessage = 'Permission denied');
-        return;
-      }
-
-      // Android 13+ notification permission for foreground service
-      await Permission.notification.request();
-
-      // 2. Initialize logging database (with debug logging in debug builds)
-      await _stepCounter.initializeLogging(debugLogging: kDebugMode);
-      setState(() => _statusMessage = 'Logging initialized');
-
-      // 3. Check detector type
-      _isHardwareDetector = await _stepCounter.isUsingNativeDetector();
-
-      // 4. Start step counter with OS-level sync for terminated state
-      await _stepCounter.start(
-        config: StepDetectorConfig(
-          enableOsLevelSync: true,  // Enable terminated state sync
-          useForegroundServiceOnOldDevices: true,
-          foregroundNotificationTitle: 'Step Tracker',
-          foregroundNotificationText: 'Tracking your steps...',
-        ),
-      );
-
-      // 5. Start logging with walking preset
-      await _stepCounter.startLogging(
-        config: StepRecordConfig.walking(),
-      );
-
-      // 6. Handle terminated state steps
-      _stepCounter.onTerminatedStepsDetected = (steps, startTime, endTime) {
-        if (mounted) {
-          setState(() {
-            _statusMessage = 'Synced $steps steps from terminated state';
-          });
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text('Recovered $steps steps taken while app was closed'),
-              duration: const Duration(seconds: 3),
-            ),
-          );
-        }
-      };
-
-      // 7. Subscribe to real-time step events
-      _realtimeSubscription = _stepCounter.stepEventStream.listen((event) {
-        if (mounted) {
-          setState(() => _currentSteps = event.stepCount);
-        }
-      });
-
-      // 8. Watch total steps from database in real-time
-      _stepCounter.watchTotalSteps().listen((total) {
-        if (mounted) {
-          setState(() => _totalSteps = total);
-        }
-      });
-
-      setState(() {
-        _isRunning = true;
-        _statusMessage = _isHardwareDetector
-            ? 'Running (Hardware Detector)'
-            : 'Running (Accelerometer Fallback)';
-      });
-
-      // 9. Load initial stats
-      _refreshStats();
-    } catch (e) {
-      setState(() => _statusMessage = 'Error: $e');
-    }
-  }
-
-  Future<void> _refreshStats() async {
-    try {
-      final stats = await _stepCounter.getStepStats();
-      final fg = await _stepCounter.getStepsBySource(StepRecordSource.foreground);
-      final bg = await _stepCounter.getStepsBySource(StepRecordSource.background);
-      final term = await _stepCounter.getStepsBySource(StepRecordSource.terminated);
-
-      if (mounted) {
-        setState(() {
-          _foregroundSteps = fg;
-          _backgroundSteps = bg;
-          _terminatedSteps = term;
-        });
-      }
-    } catch (e) {
-      debugPrint('Error refreshing stats: $e');
-    }
-  }
-
-  Future<void> _toggleTracking() async {
-    if (_isRunning) {
-      await _stepCounter.stop();
-      await _stepCounter.stopLogging();
-      setState(() {
-        _isRunning = false;
-        _statusMessage = 'Stopped';
-      });
-    } else {
-      await _stepCounter.start();
-      await _stepCounter.startLogging(config: StepRecordConfig.walking());
-      setState(() {
-        _isRunning = true;
-        _statusMessage = 'Running';
-      });
-    }
-  }
-
-  Future<void> _resetCounter() async {
-    _stepCounter.reset();
-    setState(() => _currentSteps = 0);
-  }
-
-  Future<void> _clearLogs() async {
-    final confirm = await showDialog<bool>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('Clear All Logs?'),
-        content: const Text('This will permanently delete all step records from the database.'),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context, false),
-            child: const Text('Cancel'),
-          ),
-          TextButton(
-            onPressed: () => Navigator.pop(context, true),
-            child: const Text('Clear', style: TextStyle(color: Colors.red)),
-          ),
-        ],
-      ),
-    );
-
-    if (confirm == true) {
-      await _stepCounter.clearStepLogs();
-      _refreshStats();
-      setState(() {
-        _totalSteps = 0;
-        _foregroundSteps = 0;
-        _backgroundSteps = 0;
-        _terminatedSteps = 0;
-      });
-    }
   }
 
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
-    _realtimeSubscription?.cancel();
     _stepCounter.dispose();
     super.dispose();
   }
@@ -323,217 +169,64 @@ class _StepCounterPageState extends State<StepCounterPage> with WidgetsBindingOb
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(
-        title: const Text('Accurate Step Counter'),
-        actions: [
-          IconButton(
-            icon: const Icon(Icons.refresh),
-            onPressed: _refreshStats,
-            tooltip: 'Refresh Stats',
-          ),
-        ],
-      ),
-      body: SingleChildScrollView(
-        padding: const EdgeInsets.all(16),
+      appBar: AppBar(title: const Text('Step Counter - All States')),
+      body: Center(
         child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            // Status Card
-            Card(
-              child: Padding(
-                padding: const EdgeInsets.all(16),
-                child: Column(
-                  children: [
-                    Row(
-                      children: [
-                        Icon(
-                          _isRunning ? Icons.play_circle : Icons.stop_circle,
-                          color: _isRunning ? Colors.green : Colors.red,
-                          size: 32,
-                        ),
-                        const SizedBox(width: 12),
-                        Expanded(
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Text(
-                                _statusMessage,
-                                style: const TextStyle(
-                                  fontSize: 16,
-                                  fontWeight: FontWeight.bold,
-                                ),
-                              ),
-                              Text(
-                                _isHardwareDetector
-                                    ? 'Hardware Detector'
-                                    : 'Software Detector',
-                                style: TextStyle(
-                                  fontSize: 12,
-                                  color: Colors.grey[600],
-                                ),
-                              ),
-                            ],
-                          ),
-                        ),
-                      ],
-                    ),
-                  ],
-                ),
-              ),
+            // Real-time step count
+            Text(
+              '$_steps',
+              style: const TextStyle(fontSize: 72, fontWeight: FontWeight.bold),
+            ),
+            const Text('steps', style: TextStyle(fontSize: 24, color: Colors.grey)),
+            const SizedBox(height: 40),
+
+            // Works in foreground
+            const ListTile(
+              leading: Icon(Icons.phone_android, color: Colors.green),
+              title: Text('Foreground'),
+              subtitle: Text('Counts while app is open'),
             ),
 
-            const SizedBox(height: 20),
-
-            // Current Steps Display
-            Card(
-              color: Colors.blue[50],
-              child: Padding(
-                padding: const EdgeInsets.all(24),
-                child: Column(
-                  children: [
-                    const Text(
-                      'Current Session',
-                      style: TextStyle(
-                        fontSize: 16,
-                        color: Colors.blue,
-                        fontWeight: FontWeight.w500,
-                      ),
-                    ),
-                    const SizedBox(height: 8),
-                    Text(
-                      '$_currentSteps',
-                      style: const TextStyle(
-                        fontSize: 72,
-                        fontWeight: FontWeight.bold,
-                        color: Colors.blue,
-                      ),
-                    ),
-                    const Text(
-                      'steps',
-                      style: TextStyle(
-                        fontSize: 20,
-                        color: Colors.grey,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
+            // Works in background
+            const ListTile(
+              leading: Icon(Icons.layers, color: Colors.orange),
+              title: Text('Background'),
+              subtitle: Text('Counts when app is minimized'),
             ),
 
-            const SizedBox(height: 20),
-
-            // Database Statistics
-            Card(
-              child: Padding(
-                padding: const EdgeInsets.all(16),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    const Text(
-                      'Database Statistics',
-                      style: TextStyle(
-                        fontSize: 18,
-                        fontWeight: FontWeight.bold,
-                      ),
-                    ),
-                    const Divider(),
-                    _buildStatRow('Total Steps', _totalSteps, Icons.trending_up, Colors.blue),
-                    _buildStatRow('Foreground', _foregroundSteps, Icons.phone_android, Colors.green),
-                    _buildStatRow('Background', _backgroundSteps, Icons.layers, Colors.orange),
-                    _buildStatRow('Terminated', _terminatedSteps, Icons.power_off, Colors.red),
-                  ],
-                ),
-              ),
-            ),
-
-            const SizedBox(height: 20),
-
-            // Control Buttons
-            Row(
-              children: [
-                Expanded(
-                  child: ElevatedButton.icon(
-                    onPressed: _toggleTracking,
-                    icon: Icon(_isRunning ? Icons.stop : Icons.play_arrow),
-                    label: Text(_isRunning ? 'Stop' : 'Start'),
-                    style: ElevatedButton.styleFrom(
-                      padding: const EdgeInsets.symmetric(vertical: 16),
-                      backgroundColor: _isRunning ? Colors.red : Colors.green,
-                      foregroundColor: Colors.white,
-                    ),
-                  ),
-                ),
-                const SizedBox(width: 12),
-                ElevatedButton.icon(
-                  onPressed: _resetCounter,
-                  icon: const Icon(Icons.refresh),
-                  label: const Text('Reset'),
-                  style: ElevatedButton.styleFrom(
-                    padding: const EdgeInsets.symmetric(vertical: 16, horizontal: 20),
-                  ),
-                ),
-              ],
-            ),
-
-            const SizedBox(height: 12),
-
-            SizedBox(
-              width: double.infinity,
-              child: OutlinedButton.icon(
-                onPressed: _clearLogs,
-                icon: const Icon(Icons.delete_outline, color: Colors.red),
-                label: const Text('Clear Database', style: TextStyle(color: Colors.red)),
-                style: OutlinedButton.styleFrom(
-                  padding: const EdgeInsets.symmetric(vertical: 16),
-                  side: const BorderSide(color: Colors.red),
-                ),
-              ),
+            // Works in terminated state
+            const ListTile(
+              leading: Icon(Icons.power_off, color: Colors.red),
+              title: Text('Terminated'),
+              subtitle: Text('Recovers steps when app is killed & reopened'),
             ),
           ],
         ),
       ),
     );
   }
-
-  Widget _buildStatRow(String label, int value, IconData icon, Color color) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 8),
-      child: Row(
-        children: [
-          Icon(icon, color: color, size: 24),
-          const SizedBox(width: 12),
-          Expanded(
-            child: Text(
-              label,
-              style: const TextStyle(fontSize: 16),
-            ),
-          ),
-          Text(
-            '$value',
-            style: TextStyle(
-              fontSize: 18,
-              fontWeight: FontWeight.bold,
-              color: color,
-            ),
-          ),
-        ],
-      ),
-    );
-  }
 }
 ```
 
-### Key Features Demonstrated
+**That's it!** This simple example:
+- ✅ **Real-time counting** - Updates UI instantly
+- ✅ **Foreground state** - Counts while app is open
+- ✅ **Background state** - Continues counting when minimized
+- ✅ **Terminated state** - Recovers missed steps when app is killed & reopened
+- ✅ **Auto-logging** - Saves all steps to database with source tracking
+- ✅ **Lifecycle tracking** - `setAppState()` ensures proper source detection
 
-This example shows:
-- ✅ **Permission handling** - Requests both activity and notification permissions
-- ✅ **App lifecycle tracking** - Implements `WidgetsBindingObserver` for state detection
-- ✅ **Database logging** - Initializes and uses Hive database with debug logging
-- ✅ **Terminated state sync** - Handles missed steps with callback
-- ✅ **Real-time updates** - Shows current steps and database stats
-- ✅ **Source tracking** - Displays foreground/background/terminated breakdown
-- ✅ **Proper cleanup** - Disposes resources correctly
-- ✅ **User feedback** - Shows status messages and snackbars
-- ✅ **Full control** - Start, stop, reset, and clear functionality
+### How It Works in Each State
+
+| State | What Happens |
+|-------|--------------|
+| 🟢 **Foreground** | Real-time updates, steps logged as `foreground` |
+| 🟡 **Background** | Continues counting (service on Android ≤10), steps logged as `background` |
+| 🔴 **Terminated** | OS tracks steps, synced on relaunch (Android 11+), logged as `terminated` |
+
+**Try it:** Open app → Walk 50 steps → Press home → Walk 50 more → Force kill → Walk 50 more → Reopen app → See all steps recovered! 🎉
 
 ## ⚙️ Configuration
 
@@ -782,13 +475,29 @@ class _StepTrackerPageState extends State<StepTrackerPage>
 ### Query API
 
 ```dart
-// Aggregate total
-final total = await stepCounter.getTotalSteps();
+// Convenient date-based queries
+final todaySteps = await stepCounter.getTodaySteps();
+final yesterdaySteps = await stepCounter.getYesterdaySteps();
+final last2Days = await stepCounter.getTodayAndYesterdaySteps();
 
-// Today's steps
-final today = DateTime.now();
-final startOfDay = DateTime(today.year, today.month, today.day);
-final todaySteps = await stepCounter.getTotalSteps(from: startOfDay);
+// Custom date range
+final weekSteps = await stepCounter.getStepsInRange(
+  DateTime.now().subtract(Duration(days: 7)),
+  DateTime.now(),
+);
+
+// Specific date
+final jan15Steps = await stepCounter.getStepsInRange(
+  DateTime(2025, 1, 15),
+  DateTime(2025, 1, 15),
+);
+
+// All-time total (or with custom dates)
+final total = await stepCounter.getTotalSteps();
+final customRange = await stepCounter.getTotalSteps(
+  from: DateTime(2025, 1, 1),
+  to: DateTime.now(),
+);
 
 // By source
 final fgSteps = await stepCounter.getStepsBySource(StepLogSource.foreground);
@@ -800,7 +509,7 @@ final logs = await stepCounter.getStepLogs();
 
 // Statistics
 final stats = await stepCounter.getStepStats();
-// Returns: {totalSteps, entryCount, averagePerEntry, averagePerDay, 
+// Returns: {totalSteps, entryCount, averagePerEntry, averagePerDay,
 //           foregroundSteps, backgroundSteps, terminatedSteps}
 ```
 
@@ -1305,8 +1014,16 @@ stepCounter.onTerminatedStepsDetected = (steps, start, end) {
   print('Recovered $steps steps from $start to $end');
 };
 
-// Query Database
-final total = await stepCounter.getTotalSteps();
+// Query Database - Convenient date methods
+final todaySteps = await stepCounter.getTodaySteps();
+final yesterdaySteps = await stepCounter.getYesterdaySteps();
+final last2Days = await stepCounter.getTodayAndYesterdaySteps();
+final weekSteps = await stepCounter.getStepsInRange(
+  DateTime.now().subtract(Duration(days: 7)),
+  DateTime.now(),
+);
+
+// By source
 final fgSteps = await stepCounter.getStepsBySource(StepRecordSource.foreground);
 final bgSteps = await stepCounter.getStepsBySource(StepRecordSource.background);
 final termSteps = await stepCounter.getStepsBySource(StepRecordSource.terminated);

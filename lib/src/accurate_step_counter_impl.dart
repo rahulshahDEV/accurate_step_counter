@@ -675,6 +675,100 @@ class AccurateStepCounterImpl {
     return await _stepRecordStore.readTotalSteps(from: from, to: to);
   }
 
+  /// Get steps for today (from midnight to now)
+  ///
+  /// Convenience method that calculates today's date boundaries automatically.
+  ///
+  /// Example:
+  /// ```dart
+  /// final todaySteps = await stepCounter.getTodaySteps();
+  /// print('Steps today: $todaySteps');
+  /// ```
+  Future<int> getTodaySteps() async {
+    _ensureLoggingInitialized();
+    final now = DateTime.now();
+    final startOfToday = DateTime(now.year, now.month, now.day);
+    return await _stepRecordStore.readTotalSteps(from: startOfToday, to: now);
+  }
+
+  /// Get steps for yesterday (full day from midnight to midnight)
+  ///
+  /// Convenience method that calculates yesterday's date boundaries automatically.
+  ///
+  /// Example:
+  /// ```dart
+  /// final yesterdaySteps = await stepCounter.getYesterdaySteps();
+  /// print('Steps yesterday: $yesterdaySteps');
+  /// ```
+  Future<int> getYesterdaySteps() async {
+    _ensureLoggingInitialized();
+    final now = DateTime.now();
+    final startOfToday = DateTime(now.year, now.month, now.day);
+    final startOfYesterday = startOfToday.subtract(const Duration(days: 1));
+    return await _stepRecordStore.readTotalSteps(
+      from: startOfYesterday,
+      to: startOfToday,
+    );
+  }
+
+  /// Get combined steps for today and yesterday
+  ///
+  /// Convenience method for getting the last 2 days of steps.
+  ///
+  /// Example:
+  /// ```dart
+  /// final combinedSteps = await stepCounter.getTodayAndYesterdaySteps();
+  /// print('Steps (today + yesterday): $combinedSteps');
+  /// ```
+  Future<int> getTodayAndYesterdaySteps() async {
+    _ensureLoggingInitialized();
+    final now = DateTime.now();
+    final startOfToday = DateTime(now.year, now.month, now.day);
+    final startOfYesterday = startOfToday.subtract(const Duration(days: 1));
+    return await _stepRecordStore.readTotalSteps(
+      from: startOfYesterday,
+      to: now,
+    );
+  }
+
+  /// Get steps for a custom date range
+  ///
+  /// [startDate] - Start date (will be set to midnight)
+  /// [endDate] - End date (will be set to midnight or now if today)
+  ///
+  /// Example:
+  /// ```dart
+  /// // Get steps for last 7 days
+  /// final weekSteps = await stepCounter.getStepsInRange(
+  ///   DateTime.now().subtract(Duration(days: 7)),
+  ///   DateTime.now(),
+  /// );
+  ///
+  /// // Get steps for a specific date
+  /// final specificDate = DateTime(2025, 1, 15);
+  /// final stepsOnDate = await stepCounter.getStepsInRange(
+  ///   specificDate,
+  ///   specificDate,
+  /// );
+  /// ```
+  Future<int> getStepsInRange(DateTime startDate, DateTime endDate) async {
+    _ensureLoggingInitialized();
+
+    // Set start to midnight of startDate
+    final start = DateTime(startDate.year, startDate.month, startDate.day);
+
+    // Set end to midnight of endDate, or now if endDate is today
+    final now = DateTime.now();
+    final endOfEndDate = DateTime(endDate.year, endDate.month, endDate.day);
+    final isEndDateToday = endOfEndDate.year == now.year &&
+        endOfEndDate.month == now.month &&
+        endOfEndDate.day == now.day;
+
+    final end = isEndDateToday ? now : endOfEndDate.add(const Duration(days: 1));
+
+    return await _stepRecordStore.readTotalSteps(from: start, to: end);
+  }
+
   /// Get step count by source
   ///
   /// Example:
