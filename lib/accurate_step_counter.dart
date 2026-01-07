@@ -52,6 +52,7 @@ export 'src/models/step_count_event.dart' show StepCountEvent;
 export 'src/models/step_detector_config.dart' show StepDetectorConfig;
 export 'src/models/step_log_entry.dart' show StepLogEntry;
 export 'src/models/step_log_source.dart' show StepLogSource;
+export 'src/models/step_logging_config.dart' show StepLoggingConfig;
 export 'src/services/step_log_database.dart' show StepLogDatabase;
 
 // Main class for easier access

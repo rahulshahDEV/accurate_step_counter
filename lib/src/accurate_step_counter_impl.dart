@@ -8,6 +8,7 @@ import 'models/step_count_event.dart';
 import 'models/step_detector_config.dart';
 import 'models/step_log_entry.dart';
 import 'models/step_log_source.dart';
+import 'models/step_logging_config.dart';
 import 'platform/step_counter_platform.dart';
 import 'services/native_step_detector.dart';
 import 'services/step_log_database.dart';
@@ -333,30 +334,31 @@ class AccurateStepCounterImpl {
   /// Call [initializeLogging] first. Steps will be logged automatically
   /// as they are detected, with source tracking (foreground/background).
   ///
-  /// [logIntervalMs] - Minimum time between log entries in milliseconds.
-  ///                   Default is 5000ms (5 seconds) to prevent excessive writes.
+  /// Use [config] for convenient presets or custom configuration:
   ///
-  /// Example:
   /// ```dart
-  /// await stepCounter.initializeLogging();
-  /// await stepCounter.startLogging();
-  /// await stepCounter.start();
-  /// ```
+  /// // Using presets
+  /// await stepCounter.startLogging(config: StepLoggingConfig.walking());
+  /// await stepCounter.startLogging(config: StepLoggingConfig.running());
+  /// await stepCounter.startLogging(config: StepLoggingConfig.conservative());
   ///
-  /// With warmup validation:
-  /// ```dart
+  /// // Custom configuration
   /// await stepCounter.startLogging(
-  ///   warmupDurationMs: 8000,    // Wait 8 seconds before first log
-  ///   minStepsToValidate: 10,   // Need 10+ steps to confirm walking
-  ///   maxStepsPerSecond: 5.0,   // Reject unrealistic step rates
+  ///   config: StepLoggingConfig(
+  ///     warmupDurationMs: 8000,
+  ///     minStepsToValidate: 10,
+  ///     maxStepsPerSecond: 5.0,
+  ///   ),
   /// );
   /// ```
-  Future<void> startLogging({
-    int logIntervalMs = 5000,
-    int warmupDurationMs = 0,
-    int minStepsToValidate = 10,
-    double maxStepsPerSecond = 5.0,
-  }) async {
+  ///
+  /// Available presets:
+  /// - [StepLoggingConfig.walking] - Casual walking (5s warmup, 3 steps/sec max)
+  /// - [StepLoggingConfig.running] - Running/jogging (3s warmup, 5 steps/sec max)
+  /// - [StepLoggingConfig.sensitive] - High sensitivity (no warmup)
+  /// - [StepLoggingConfig.conservative] - Strict validation (10s warmup)
+  /// - [StepLoggingConfig.noValidation] - Raw logging (no validation)
+  Future<void> startLogging({StepLoggingConfig? config}) async {
     if (!_loggingInitialized) {
       throw StateError(
         'Logging not initialized. Call initializeLogging() first.',
@@ -365,12 +367,15 @@ class AccurateStepCounterImpl {
 
     if (_loggingEnabled) return;
 
+    // Use provided config or default
+    final cfg = config ?? const StepLoggingConfig();
+
     _loggingEnabled = true;
-    _logIntervalMs = logIntervalMs;
-    _warmupDurationMs = warmupDurationMs;
-    _minStepsToValidate = minStepsToValidate;
-    _maxStepsPerSecond = maxStepsPerSecond;
-    _isInWarmup = warmupDurationMs > 0;
+    _logIntervalMs = cfg.logIntervalMs;
+    _warmupDurationMs = cfg.warmupDurationMs;
+    _minStepsToValidate = cfg.minStepsToValidate;
+    _maxStepsPerSecond = cfg.maxStepsPerSecond;
+    _isInWarmup = cfg.warmupDurationMs > 0;
     _warmupStartTime = null;
     _warmupStartStepCount = 0;
     _lastLogTime = DateTime.now();
@@ -382,11 +387,9 @@ class AccurateStepCounterImpl {
     });
 
     if (_isInWarmup) {
-      dev.log(
-        'AccurateStepCounter: Step logging started with ${warmupDurationMs}ms warmup',
-      );
+      dev.log('AccurateStepCounter: Step logging started with $cfg');
     } else {
-      dev.log('AccurateStepCounter: Step logging started');
+      dev.log('AccurateStepCounter: Step logging started (no warmup)');
     }
   }
 
