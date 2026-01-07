@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Steps now correctly show stored value immediately on restart, not 0
   - Fixed `_initializeAggregatedMode()` to properly initialize session tracking
   - Fixed `writeStepsToAggregated()` to use new tracking variables
+  - Fixed `watchAggregatedStepCounter()` broadcast stream losing initial value on late subscription
 
 ### Added
 - 🚀 **Simplified API** - Health Connect-like one-call initialization
