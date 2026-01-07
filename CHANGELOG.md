@@ -41,25 +41,87 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Automatic step logging before app goes to background
   - Proper source detection based on lifecycle
 
-### Example Usage
-```dart
-// Initialize logging
-await stepCounter.initializeLogging();
-await stepCounter.start();
-await stepCounter.startLogging(config: StepLoggingConfig.walking());
+- 🐛 **Debug Logging Control**: New `debugLogging` parameter
+  - `initializeLogging(debugLogging: bool)` to control console output
+  - Set to `kDebugMode` for debug-only logging
+  - Default: `false` (no console messages)
 
-// Track lifecycle for proper source detection
-@override
-void didChangeAppLifecycleState(AppLifecycleState state) {
-  stepCounter.setAppState(state);
+### Complete Example
+```dart
+import 'package:flutter/foundation.dart';
+import 'package:flutter/material.dart';
+import 'package:accurate_step_counter/accurate_step_counter.dart';
+
+class StepTrackerPage extends StatefulWidget {
+  @override
+  State<StepTrackerPage> createState() => _StepTrackerPageState();
 }
 
-// Query steps
-final total = await stepCounter.getTotalSteps();
-final fgSteps = await stepCounter.getStepsBySource(StepLogSource.foreground);
+class _StepTrackerPageState extends State<StepTrackerPage> 
+    with WidgetsBindingObserver {
+  final _stepCounter = AccurateStepCounter();
+  int _totalSteps = 0;
 
-// Real-time updates
-stepCounter.watchTotalSteps().listen((t) => print('Total: $t'));
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    _init();
+  }
+
+  Future<void> _init() async {
+    // Initialize with debug logging (only in debug builds)
+    await _stepCounter.initializeLogging(debugLogging: kDebugMode);
+    
+    // Start step detection
+    await _stepCounter.start();
+    
+    // Start logging with walking preset
+    await _stepCounter.startLogging(config: StepLoggingConfig.walking());
+    
+    // Listen to total steps in real-time
+    _stepCounter.watchTotalSteps().listen((total) {
+      setState(() => _totalSteps = total);
+    });
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    _stepCounter.setAppState(state); // Track foreground/background
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    _stepCounter.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Center(
+      child: Text('Total: $_totalSteps steps'),
+    );
+  }
+}
+```
+
+### Query Examples
+```dart
+// Get total steps for today
+final today = DateTime.now();
+final startOfDay = DateTime(today.year, today.month, today.day);
+final todaySteps = await stepCounter.getTotalSteps(from: startOfDay);
+
+// Get steps by source
+final foreground = await stepCounter.getStepsBySource(StepLogSource.foreground);
+final background = await stepCounter.getStepsBySource(StepLogSource.background);
+final terminated = await stepCounter.getStepsBySource(StepLogSource.terminated);
+
+// Get detailed stats
+final stats = await stepCounter.getStepStats();
+print('Total: ${stats['totalSteps']}');
+print('Average per day: ${stats['averagePerDay']}');
 ```
 
 ### Dependencies Added

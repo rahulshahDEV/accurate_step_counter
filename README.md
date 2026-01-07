@@ -247,10 +247,14 @@ event.timestamp   // DateTime - When step was detected
 ### Setup
 
 ```dart
+import 'package:flutter/foundation.dart';
+import 'package:accurate_step_counter/accurate_step_counter.dart';
+
 final stepCounter = AccurateStepCounter();
 
 // Initialize logging database
-await stepCounter.initializeLogging();
+// debugLogging: kDebugMode = only show console logs in debug builds
+await stepCounter.initializeLogging(debugLogging: kDebugMode);
 
 // Start counting
 await stepCounter.start();
@@ -259,31 +263,139 @@ await stepCounter.start();
 await stepCounter.startLogging(config: StepLoggingConfig.walking());
 ```
 
-### Logging Presets
+### Debug Logging Parameter
+
+Control console output with the `debugLogging` parameter:
 
 ```dart
-// Casual walking (5s warmup, 3 steps/sec max)
-StepLoggingConfig.walking()
+// No console output (default - recommended for production)
+await stepCounter.initializeLogging(debugLogging: false);
 
-// Running/jogging (3s warmup, 5 steps/sec max)
-StepLoggingConfig.running()
+// Always show console logs
+await stepCounter.initializeLogging(debugLogging: true);
 
-// Quick detection (no warmup)
-StepLoggingConfig.sensitive()
+// Only in debug builds (recommended)
+await stepCounter.initializeLogging(debugLogging: kDebugMode);
+```
 
-// Strict accuracy (10s warmup)
-StepLoggingConfig.conservative()
+Console output examples when `debugLogging: true`:
+```
+AccurateStepCounter: Logging database initialized
+AccurateStepCounter: Warmup started
+AccurateStepCounter: Warmup validated - 15 steps at 1.87/s
+AccurateStepCounter: Logged 15 warmup steps (source: StepLogSource.foreground)
+```
 
-// Raw data (no validation)
-StepLoggingConfig.noValidation()
+### Logging Presets
+
+| Preset | Warmup | Min Steps | Max Rate | Use Case |
+|--------|--------|-----------|----------|----------|
+| `walking()` | 5s | 8 | 3/s | Casual walks |
+| `running()` | 3s | 10 | 5/s | Jogging/running |
+| `sensitive()` | 0s | 3 | 6/s | Quick detection |
+| `conservative()` | 10s | 15 | 2.5/s | Strict accuracy |
+| `noValidation()` | 0s | 1 | 100/s | Raw data |
+
+```dart
+// Use a preset
+await stepCounter.startLogging(config: StepLoggingConfig.walking());
 
 // Custom configuration
-StepLoggingConfig(
-  logIntervalMs: 5000,
-  warmupDurationMs: 8000,
-  minStepsToValidate: 10,
-  maxStepsPerSecond: 4.0,
-)
+await stepCounter.startLogging(
+  config: StepLoggingConfig(
+    logIntervalMs: 5000,       // Log every 5 seconds
+    warmupDurationMs: 8000,    // 8 second warmup period
+    minStepsToValidate: 10,    // Need 10+ steps to confirm walking
+    maxStepsPerSecond: 4.0,    // Reject rates above 4/second
+  ),
+);
+```
+
+### Complete Example
+
+```dart
+import 'package:flutter/foundation.dart';
+import 'package:flutter/material.dart';
+import 'package:accurate_step_counter/accurate_step_counter.dart';
+
+class StepTrackerPage extends StatefulWidget {
+  @override
+  State<StepTrackerPage> createState() => _StepTrackerPageState();
+}
+
+class _StepTrackerPageState extends State<StepTrackerPage> 
+    with WidgetsBindingObserver {
+  final _stepCounter = AccurateStepCounter();
+  int _totalSteps = 0;
+  int _foregroundSteps = 0;
+  int _backgroundSteps = 0;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    _init();
+  }
+
+  Future<void> _init() async {
+    // 1. Initialize logging (with debug output in debug builds)
+    await _stepCounter.initializeLogging(debugLogging: kDebugMode);
+    
+    // 2. Start step detection
+    await _stepCounter.start();
+    
+    // 3. Start logging with walking preset
+    await _stepCounter.startLogging(config: StepLoggingConfig.walking());
+    
+    // 4. Listen to total steps in real-time
+    _stepCounter.watchTotalSteps().listen((total) {
+      setState(() => _totalSteps = total);
+    });
+    
+    // 5. Handle terminated state sync
+    _stepCounter.onTerminatedStepsDetected = (steps, from, to) {
+      print('Synced $steps steps from terminated state');
+    };
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    // Track app state for proper source detection
+    _stepCounter.setAppState(state);
+  }
+
+  Future<void> _refreshStats() async {
+    final fg = await _stepCounter.getStepsBySource(StepLogSource.foreground);
+    final bg = await _stepCounter.getStepsBySource(StepLogSource.background);
+    setState(() {
+      _foregroundSteps = fg;
+      _backgroundSteps = bg;
+    });
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    _stepCounter.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      mainAxisAlignment: MainAxisAlignment.center,
+      children: [
+        Text('Total: $_totalSteps steps'),
+        Text('Foreground: $_foregroundSteps'),
+        Text('Background: $_backgroundSteps'),
+        ElevatedButton(
+          onPressed: _refreshStats,
+          child: Text('Refresh Stats'),
+        ),
+      ],
+    );
+  }
+}
 ```
 
 ### Query API
@@ -291,9 +403,11 @@ StepLoggingConfig(
 ```dart
 // Aggregate total
 final total = await stepCounter.getTotalSteps();
-final todaySteps = await stepCounter.getTotalSteps(
-  from: DateTime.now().subtract(Duration(hours: 12)),
-);
+
+// Today's steps
+final today = DateTime.now();
+final startOfDay = DateTime(today.year, today.month, today.day);
+final todaySteps = await stepCounter.getTotalSteps(from: startOfDay);
 
 // By source
 final fgSteps = await stepCounter.getStepsBySource(StepLogSource.foreground);
@@ -305,7 +419,8 @@ final logs = await stepCounter.getStepLogs();
 
 // Statistics
 final stats = await stepCounter.getStepStats();
-// Returns: totalSteps, entryCount, averagePerEntry, foregroundSteps, etc.
+// Returns: {totalSteps, entryCount, averagePerEntry, averagePerDay, 
+//           foregroundSteps, backgroundSteps, terminatedSteps}
 ```
 
 ### Real-Time Streams
@@ -316,23 +431,24 @@ stepCounter.watchTotalSteps().listen((total) {
   print('Total: $total');
 });
 
-// Watch all logs
-stepCounter.watchStepLogs().listen((logs) {
+// Watch all logs with filter
+stepCounter.watchStepLogs(source: StepLogSource.foreground).listen((logs) {
   for (final log in logs) {
-    print('${log.stepCount} from ${log.source}');
+    print('${log.stepCount} steps at ${log.toTime}');
   }
 });
 ```
 
-### Lifecycle Tracking
+### Data Management
 
 ```dart
-class _MyAppState extends State<MyApp> with WidgetsBindingObserver {
-  @override
-  void didChangeAppLifecycleState(AppLifecycleState state) {
-    stepCounter.setAppState(state); // Track foreground/background
-  }
-}
+// Clear all logs
+await stepCounter.clearStepLogs();
+
+// Delete logs older than 30 days
+await stepCounter.deleteStepLogsBefore(
+  DateTime.now().subtract(Duration(days: 30)),
+);
 ```
 
 ## 🏗️ Architecture
