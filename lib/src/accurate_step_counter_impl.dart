@@ -42,6 +42,12 @@ class AccurateStepCounterImpl {
   AppLifecycleState _appLifecycleState = AppLifecycleState.resumed;
   int _recordIntervalMs = 5000;
 
+  // Aggregated mode tracking
+  bool _aggregatedModeEnabled = false;
+  int _aggregatedOffset = 0;
+  final StreamController<int> _aggregatedStepController =
+      StreamController<int>.broadcast();
+
   // Warmup validation state
   bool _isInWarmup = false;
   DateTime? _warmupStartTime;
@@ -309,6 +315,7 @@ class AccurateStepCounterImpl {
     _stopForegroundStepPolling();
     await _stepRecordSubscription?.cancel();
     await _foregroundStepController.close();
+    await _aggregatedStepController.close();
     await _stepRecordStore.close();
     _currentConfig = null;
   }
@@ -360,6 +367,7 @@ class AccurateStepCounterImpl {
   /// await stepCounter.startLogging(config: StepRecordConfig.walking());
   /// await stepCounter.startLogging(config: StepRecordConfig.running());
   /// await stepCounter.startLogging(config: StepRecordConfig.conservative());
+  /// await stepCounter.startLogging(config: StepRecordConfig.aggregated());
   ///
   /// // Custom configuration
   /// await stepCounter.startLogging(
@@ -367,6 +375,7 @@ class AccurateStepCounterImpl {
   ///     warmupDurationMs: 8000,
   ///     minStepsToValidate: 10,
   ///     maxStepsPerSecond: 5.0,
+  ///     enableAggregatedMode: true,
   ///   ),
   /// );
   /// ```
@@ -377,6 +386,7 @@ class AccurateStepCounterImpl {
   /// - [StepRecordConfig.sensitive] - High sensitivity (no warmup)
   /// - [StepRecordConfig.conservative] - Strict validation (10s warmup)
   /// - [StepRecordConfig.noValidation] - Raw logging (no validation)
+  /// - [StepRecordConfig.aggregated] - Health Connect-like (continuous recording)
   Future<void> startLogging({StepRecordConfig? config}) async {
     if (!_storeInitialized) {
       throw StateError(
@@ -390,6 +400,7 @@ class AccurateStepCounterImpl {
     final cfg = config ?? const StepRecordConfig();
 
     _recordingEnabled = true;
+    _aggregatedModeEnabled = cfg.enableAggregatedMode;
     _recordIntervalMs = cfg.recordIntervalMs;
     _warmupDurationMs = cfg.warmupDurationMs;
     _minStepsToValidate = cfg.minStepsToValidate;
@@ -400,12 +411,23 @@ class AccurateStepCounterImpl {
     _lastRecordTime = DateTime.now();
     _lastRecordedStepCount = 0;
 
+    // Initialize aggregated mode with today's data
+    if (_aggregatedModeEnabled) {
+      await _initializeAggregatedMode();
+    }
+
     // Subscribe to step events for auto-logging
     _stepRecordSubscription = stepEventStream.listen((event) {
-      _autoLogSteps(event, _recordIntervalMs);
+      if (_aggregatedModeEnabled) {
+        _autoLogStepsContinuous(event);
+      } else {
+        _autoLogSteps(event, _recordIntervalMs);
+      }
     });
 
-    if (_isInWarmup) {
+    if (_aggregatedModeEnabled) {
+      _log('Aggregated step logging started - loaded $_aggregatedOffset steps from today');
+    } else if (_isInWarmup) {
       _log('Step logging started with $cfg');
     } else {
       _log('Step logging started (no warmup)');
@@ -417,7 +439,156 @@ class AccurateStepCounterImpl {
     await _stepRecordSubscription?.cancel();
     _stepRecordSubscription = null;
     _recordingEnabled = false;
+    _aggregatedModeEnabled = false;
     _log('Step logging stopped');
+  }
+
+  /// Initialize aggregated mode by loading today's steps
+  Future<void> _initializeAggregatedMode() async {
+    final now = DateTime.now();
+    final startOfToday = DateTime(now.year, now.month, now.day);
+
+    // Load today's steps from Hive
+    final todaySteps =
+        await _stepRecordStore.readTotalSteps(from: startOfToday, to: now);
+
+    // Set offset so live counter starts from stored count
+    _aggregatedOffset = todaySteps;
+
+    // Emit initial value to stream
+    if (!_aggregatedStepController.isClosed) {
+      _aggregatedStepController.add(todaySteps);
+    }
+
+    _log('Initialized aggregated mode: $todaySteps steps from today');
+  }
+
+  /// Auto-log steps continuously (write on every step) for aggregated mode
+  void _autoLogStepsContinuous(StepCountEvent event) {
+    final now = DateTime.now();
+
+    // === WARMUP PHASE ===
+    if (_isInWarmup) {
+      // Initialize warmup on first step event
+      if (_warmupStartTime == null) {
+        _warmupStartTime = now;
+        _warmupStartStepCount = event.stepCount;
+        _log('Warmup started');
+        return;
+      }
+
+      final warmupElapsed = now.difference(_warmupStartTime!);
+      if (warmupElapsed.inMilliseconds < _warmupDurationMs) {
+        // Still in warmup - don't log yet, just track
+        return;
+      }
+
+      // Warmup complete - validate walking
+      final warmupSteps = event.stepCount - _warmupStartStepCount;
+
+      // Validation 1: Minimum steps required
+      if (warmupSteps < _minStepsToValidate) {
+        // Not enough steps - reset and wait for real walking
+        dev.log(
+          'AccurateStepCounter: Warmup failed - only $warmupSteps steps (need $_minStepsToValidate)',
+        );
+        _warmupStartTime = now;
+        _warmupStartStepCount = event.stepCount;
+        return;
+      }
+
+      // Validation 2: Step rate check
+      final warmupSeconds = warmupElapsed.inMilliseconds / 1000.0;
+      final stepsPerSecond = warmupSteps / warmupSeconds;
+      if (stepsPerSecond > _maxStepsPerSecond) {
+        // Unrealistic rate - shake or noise, not walking
+        dev.log(
+          'AccurateStepCounter: Warmup failed - rate ${stepsPerSecond.toStringAsFixed(2)}/s exceeds max $_maxStepsPerSecond/s',
+        );
+        _warmupStartTime = now;
+        _warmupStartStepCount = event.stepCount;
+        return;
+      }
+
+      // ✓ Walking validated - log warmup steps as a single batch
+      dev.log(
+        'AccurateStepCounter: Warmup validated - $warmupSteps steps at ${stepsPerSecond.toStringAsFixed(2)}/s',
+      );
+
+      // Log warmup steps as a single batch entry (more efficient than individual)
+      final source = _determineSource();
+      final entry = StepRecord(
+        stepCount: warmupSteps,
+        fromTime: _warmupStartTime!,
+        toTime: now,
+        source: source,
+        confidence: event.confidence,
+      );
+      _stepRecordStore.insertRecord(entry);
+
+      _log('Logged $warmupSteps warmup steps');
+
+      // Exit warmup mode
+      _isInWarmup = false;
+      _lastRecordTime = now;
+      _lastRecordedStepCount = event.stepCount;
+
+      // Emit aggregated count
+      _aggregatedStepController.add(_aggregatedOffset + event.stepCount);
+      return;
+    }
+
+    // === CONTINUOUS LOGGING (after warmup) ===
+
+    if (_lastRecordedStepCount == 0) {
+      _lastRecordedStepCount = event.stepCount;
+      _lastRecordTime = now;
+      return;
+    }
+
+    final newSteps = event.stepCount - _lastRecordedStepCount;
+
+    if (newSteps > 0) {
+      // Validate step rate if there's a time gap
+      if (_lastRecordTime != null) {
+        final elapsed = now.difference(_lastRecordTime!);
+        final elapsedSeconds = elapsed.inMilliseconds / 1000.0;
+
+        if (elapsedSeconds > 0) {
+          final stepsPerSecond = newSteps / elapsedSeconds;
+
+          if (stepsPerSecond > _maxStepsPerSecond) {
+            // Unrealistic rate - skip this batch
+            dev.log(
+              'AccurateStepCounter: Skipping $newSteps steps - rate ${stepsPerSecond.toStringAsFixed(2)}/s too high',
+            );
+            _lastRecordTime = now;
+            _lastRecordedStepCount = event.stepCount;
+            return;
+          }
+        }
+      }
+
+      // Write steps to Hive immediately (not interval-based)
+      // This ensures every detected step event is persisted
+      final source = _determineSource();
+      final entry = StepRecord(
+        stepCount: newSteps,
+        fromTime: _lastRecordTime!,
+        toTime: now,
+        source: source,
+        confidence: event.confidence,
+      );
+      _stepRecordStore.insertRecord(entry);
+
+      _log('Logged $newSteps steps (source: $source)');
+
+      // Emit aggregated count (stored + current live)
+      _aggregatedStepController.add(_aggregatedOffset + event.stepCount);
+    }
+
+    _lastRecordTime = now;
+    _lastRecordedStepCount = event.stepCount;
   }
 
   /// Set the current app lifecycle state
@@ -844,6 +1015,168 @@ class AccurateStepCounterImpl {
   }) {
     _ensureLoggingInitialized();
     return _stepRecordStore.watchRecords(from: from, to: to, source: source);
+  }
+
+  /// Watch aggregated step count (stored + live) in real-time
+  ///
+  /// This is the Health Connect-like API that combines:
+  /// - All steps stored in Hive from today (midnight to now)
+  /// - Current live steps being detected
+  ///
+  /// When the app restarts:
+  /// - Automatically loads today's stored steps
+  /// - Continues counting from that point
+  /// - No double-counting, seamless aggregation
+  ///
+  /// IMPORTANT: You must call startLogging() with aggregated mode enabled:
+  /// ```dart
+  /// await stepCounter.startLogging(config: StepRecordConfig.aggregated());
+  /// ```
+  ///
+  /// Example usage:
+  /// ```dart
+  /// // Initialize
+  /// await stepCounter.initializeLogging();
+  /// await stepCounter.start();
+  /// await stepCounter.startLogging(config: StepRecordConfig.aggregated());
+  ///
+  /// // Watch aggregated count
+  /// stepCounter.watchAggregatedStepCounter().listen((totalSteps) {
+  ///   print('Total steps today: $totalSteps');
+  /// });
+  /// ```
+  ///
+  /// This stream emits:
+  /// - Initial value when subscribed (today's stored steps)
+  /// - Updates on every new step detected
+  /// - Updates when app is restarted (loads from Hive)
+  Stream<int> watchAggregatedStepCounter() {
+    _ensureLoggingInitialized();
+
+    if (!_aggregatedModeEnabled) {
+      throw StateError(
+        'Aggregated mode not enabled. Call startLogging() with '
+        'StepRecordConfig.aggregated() or set enableAggregatedMode: true',
+      );
+    }
+
+    // Return stream that combines stored + live
+    return _aggregatedStepController.stream;
+  }
+
+  /// Get current aggregated step count (stored + live)
+  ///
+  /// Synchronous getter for current aggregated count.
+  /// Use [watchAggregatedStepCounter] for real-time updates.
+  ///
+  /// Example:
+  /// ```dart
+  /// final totalSteps = stepCounter.aggregatedStepCount;
+  /// print('Current total: $totalSteps');
+  /// ```
+  int get aggregatedStepCount {
+    if (!_aggregatedModeEnabled) {
+      throw StateError(
+        'Aggregated mode not enabled. Call startLogging() with '
+        'StepRecordConfig.aggregated() or set enableAggregatedMode: true',
+      );
+    }
+    return _aggregatedOffset + currentStepCount;
+  }
+
+  /// Manually write steps to aggregated database
+  ///
+  /// This method allows you to insert steps directly into the database,
+  /// which will automatically update the aggregated count and notify
+  /// all listeners of [watchAggregatedStepCounter].
+  ///
+  /// Perfect for:
+  /// - Importing steps from external sources (Google Fit, Apple Health)
+  /// - Manually correcting step counts
+  /// - Syncing steps from other devices
+  /// - Batch importing historical data
+  ///
+  /// IMPORTANT: Only works when aggregated mode is enabled.
+  ///
+  /// Parameters:
+  /// - [stepCount] - Number of steps to write (must be positive)
+  /// - [fromTime] - Start time of the activity
+  /// - [toTime] - End time of the activity (defaults to now)
+  /// - [source] - Source of the steps (defaults to foreground)
+  ///
+  /// Example:
+  /// ```dart
+  /// // Write 100 steps from external source
+  /// await stepCounter.writeStepsToAggregated(
+  ///   stepCount: 100,
+  ///   fromTime: DateTime.now().subtract(Duration(hours: 1)),
+  ///   toTime: DateTime.now(),
+  ///   source: StepRecordSource.foreground,
+  /// );
+  ///
+  /// // Import from Google Fit
+  /// await stepCounter.writeStepsToAggregated(
+  ///   stepCount: 5000,
+  ///   fromTime: startOfDay,
+  ///   toTime: endOfDay,
+  /// );
+  /// ```
+  ///
+  /// After writing, the aggregated stream will automatically emit the new total.
+  Future<void> writeStepsToAggregated({
+    required int stepCount,
+    required DateTime fromTime,
+    DateTime? toTime,
+    StepRecordSource? source,
+  }) async {
+    _ensureLoggingInitialized();
+
+    if (!_aggregatedModeEnabled) {
+      throw StateError(
+        'Aggregated mode not enabled. Call startLogging() with '
+        'StepRecordConfig.aggregated() or set enableAggregatedMode: true',
+      );
+    }
+
+    if (stepCount <= 0) {
+      throw ArgumentError('Step count must be positive');
+    }
+
+    final endTime = toTime ?? DateTime.now();
+
+    if (endTime.isBefore(fromTime)) {
+      throw ArgumentError('toTime must be after fromTime');
+    }
+
+    // Write to database
+    final entry = StepRecord(
+      stepCount: stepCount,
+      fromTime: fromTime,
+      toTime: endTime,
+      source: source ?? StepRecordSource.foreground,
+    );
+
+    await _stepRecordStore.insertRecord(entry);
+    _log('Manually wrote $stepCount steps to aggregated database');
+
+    // Update offset to include the new steps
+    final now = DateTime.now();
+    final startOfToday = DateTime(now.year, now.month, now.day);
+
+    // Recalculate today's total from database
+    final todayTotal =
+        await _stepRecordStore.readTotalSteps(from: startOfToday, to: now);
+
+    // Update offset - this is the stored steps, live counter continues from sensor
+    _aggregatedOffset = todayTotal - currentStepCount;
+
+    // Emit updated aggregated count
+    final newAggregatedCount = _aggregatedOffset + currentStepCount;
+    if (!_aggregatedStepController.isClosed) {
+      _aggregatedStepController.add(newAggregatedCount);
+    }
+
+    _log('Aggregated count updated to $newAggregatedCount');
   }
 
   /// Get step statistics for a date range

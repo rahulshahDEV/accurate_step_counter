@@ -5,6 +5,67 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.0] - 2026-01-07
+
+### Added
+- 🔄 **Aggregated Step Counter Mode** - Health Connect-like behavior
+  - `StepRecordConfig.aggregated()` preset for easy setup
+  - `watchAggregatedStepCounter()` stream for real-time aggregated count (stored + live)
+  - `aggregatedStepCount` getter for synchronous access
+  - `enableAggregatedMode` flag in `StepRecordConfig`
+  - Automatically loads today's steps from Hive on app restart
+  - Writes to Hive on every step event (not interval-based)
+  - Works seamlessly across foreground, background, and terminated states
+  - No double-counting with intelligent offset tracking
+
+  **Example:**
+  ```dart
+  await stepCounter.initializeLogging();
+  await stepCounter.start();
+  await stepCounter.startLogging(config: StepRecordConfig.aggregated());
+
+  // Watch combined stored + live steps
+  stepCounter.watchAggregatedStepCounter().listen((totalSteps) {
+    print('Total steps today: $totalSteps');
+  });
+  ```
+
+- ✍️ **Manual Step Write API** - Import steps from external sources
+  - `writeStepsToAggregated()` method for manual step insertion
+  - Automatically updates aggregated stream and notifies all watchers
+  - Recalculates offset to maintain consistency
+  - Input validation (positive count, valid time range)
+  - Perfect for importing from Google Fit, Apple Health, wearables
+
+  **Example:**
+  ```dart
+  // Import steps from external source
+  await stepCounter.writeStepsToAggregated(
+    stepCount: 100,
+    fromTime: DateTime.now().subtract(Duration(hours: 1)),
+    toTime: DateTime.now(),
+    source: StepRecordSource.foreground,
+  );
+  // All watchers automatically notified! UI updates instantly ✅
+  ```
+
+- 📱 **Example App Enhancements**
+  - "Aggregated" preset button (teal/highlighted) in example app
+  - "Add 50 Steps Manually" button for testing manual write
+  - Large aggregated count display when in aggregated mode
+  - Visual indicator for aggregated vs traditional mode
+
+### Changed
+- Continuous step logging in aggregated mode (every step event vs interval-based)
+- Enhanced documentation in README.md with aggregated mode and manual write sections
+- Improved offset tracking algorithm for better accuracy
+
+### Technical Details
+- Aggregated mode uses smart offset tracking: `offset = storedSteps - liveCount`
+- On app restart: loads today's total from Hive, sets as offset, continues seamlessly
+- Manual writes recalculate offset and emit to stream atomically
+- Maintains backward compatibility with traditional interval-based logging
+
 ## [1.3.1] - 2026-01-07
 
 ### Fixed

@@ -33,6 +33,19 @@ class StepRecordConfig {
   /// Set to 0 to disable inactivity detection.
   final int inactivityTimeoutMs;
 
+  /// Enable aggregated step counter mode
+  ///
+  /// When true:
+  /// - Steps are written to Hive on EVERY step detected (not interval-based)
+  /// - On app start, loads today's steps from midnight to now
+  /// - Provides seamless aggregation like Health Connect
+  /// - Use watchAggregatedStepCounter() to get live + stored count
+  ///
+  /// When false:
+  /// - Uses interval-based batch recording (recordIntervalMs)
+  /// - Traditional logging behavior
+  final bool enableAggregatedMode;
+
   /// Creates a custom step recording configuration
   const StepRecordConfig({
     this.recordIntervalMs = 5000,
@@ -40,6 +53,7 @@ class StepRecordConfig {
     this.minStepsToValidate = 10,
     this.maxStepsPerSecond = 5.0,
     this.inactivityTimeoutMs = 0,
+    this.enableAggregatedMode = false,
   }) : assert(recordIntervalMs > 0, 'Record interval must be positive'),
        assert(warmupDurationMs >= 0, 'Warmup duration must be non-negative'),
        assert(minStepsToValidate > 0, 'Min steps must be positive'),
@@ -134,6 +148,25 @@ class StepRecordConfig {
     );
   }
 
+  /// Preset for aggregated mode (Health Connect-like)
+  ///
+  /// - Continuous recording (every step)
+  /// - 3 second warmup
+  /// - 5 steps minimum to validate
+  /// - Max 5 steps/second
+  /// - No inactivity timeout
+  /// - Aggregated mode enabled
+  factory StepRecordConfig.aggregated() {
+    return const StepRecordConfig(
+      recordIntervalMs: 1000, // Not used in aggregated mode
+      warmupDurationMs: 3000,
+      minStepsToValidate: 5,
+      maxStepsPerSecond: 5.0,
+      inactivityTimeoutMs: 0,
+      enableAggregatedMode: true,
+    );
+  }
+
   /// Creates a copy with modified fields
   StepRecordConfig copyWith({
     int? recordIntervalMs,
@@ -141,6 +174,7 @@ class StepRecordConfig {
     int? minStepsToValidate,
     double? maxStepsPerSecond,
     int? inactivityTimeoutMs,
+    bool? enableAggregatedMode,
   }) {
     return StepRecordConfig(
       recordIntervalMs: recordIntervalMs ?? this.recordIntervalMs,
@@ -148,6 +182,7 @@ class StepRecordConfig {
       minStepsToValidate: minStepsToValidate ?? this.minStepsToValidate,
       maxStepsPerSecond: maxStepsPerSecond ?? this.maxStepsPerSecond,
       inactivityTimeoutMs: inactivityTimeoutMs ?? this.inactivityTimeoutMs,
+      enableAggregatedMode: enableAggregatedMode ?? this.enableAggregatedMode,
     );
   }
 
@@ -155,7 +190,7 @@ class StepRecordConfig {
   String toString() {
     return 'StepRecordConfig(interval: ${recordIntervalMs}ms, warmup: ${warmupDurationMs}ms, '
         'minSteps: $minStepsToValidate, maxRate: $maxStepsPerSecond/s, '
-        'inactivity: ${inactivityTimeoutMs}ms)';
+        'inactivity: ${inactivityTimeoutMs}ms, aggregated: $enableAggregatedMode)';
   }
 }
 

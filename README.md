@@ -541,6 +541,295 @@ await stepCounter.deleteStepLogsBefore(
 );
 ```
 
+## 🔄 Aggregated Step Counter Mode (Health Connect-like)
+
+The aggregated mode provides **Health Connect-like behavior** where steps are persistently tracked and automatically recovered across app restarts.
+
+### Key Features
+
+✅ **Writes to Hive on every step event** (not interval-based)
+✅ **Works in foreground, background, AND terminated states**
+✅ **Automatically loads today's steps on app restart**
+✅ **Seamless aggregation** (stored + live) with no double-counting
+✅ **Real-time stream updates**
+
+### Quick Start
+
+```dart
+import 'package:accurate_step_counter/accurate_step_counter.dart';
+import 'package:flutter/material.dart';
+
+class AggregatedStepPage extends StatefulWidget {
+  @override
+  State<AggregatedStepPage> createState() => _AggregatedStepPageState();
+}
+
+class _AggregatedStepPageState extends State<AggregatedStepPage>
+    with WidgetsBindingObserver {
+  final _stepCounter = AccurateStepCounter();
+  int _aggregatedSteps = 0;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    _initStepCounter();
+  }
+
+  Future<void> _initStepCounter() async {
+    // 1. Initialize the Hive database
+    await _stepCounter.initializeLogging();
+
+    // 2. Start the step detector
+    await _stepCounter.start();
+
+    // 3. Start logging in AGGREGATED mode
+    await _stepCounter.startLogging(
+      config: StepRecordConfig.aggregated(),
+    );
+
+    // 4. Listen to aggregated count (stored + live)
+    _stepCounter.watchAggregatedStepCounter().listen((totalSteps) {
+      setState(() => _aggregatedSteps = totalSteps);
+    });
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    // Track app state for proper source detection
+    _stepCounter.setAppState(state);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: Text('Steps Today')),
+      body: Center(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Text(
+              '$_aggregatedSteps',
+              style: TextStyle(fontSize: 72, fontWeight: FontWeight.bold),
+            ),
+            Text('steps today'),
+          ],
+        ),
+      ),
+    );
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    _stepCounter.dispose();
+    super.dispose();
+  }
+}
+```
+
+### How It Works
+
+**On First Run:**
+```
+User opens app → startLogging(aggregated) → Load from Hive: 0 steps
+→ User takes 10 steps → Stream emits: 1, 2, 3... 10
+→ Each step written to Hive immediately
+```
+
+**On App Restart:**
+```
+User opens app → startLogging(aggregated) → Load from Hive: 10 steps
+→ Stream emits: 10 (initial value)
+→ User takes 5 more steps → Stream emits: 11, 12, 13, 14, 15
+→ Hive now contains: 15 steps total ✅
+```
+
+### Configuration
+
+```dart
+// Use the aggregated preset (recommended)
+await stepCounter.startLogging(
+  config: StepRecordConfig.aggregated(),
+);
+
+// Or customize
+await stepCounter.startLogging(
+  config: StepRecordConfig(
+    enableAggregatedMode: true,
+    warmupDurationMs: 3000,       // 3 second warmup
+    minStepsToValidate: 5,        // Need 5 steps to pass warmup
+    maxStepsPerSecond: 5.0,       // Max 5 steps/sec (running pace)
+  ),
+);
+```
+
+### API Methods
+
+```dart
+// Watch aggregated count (stored + live) in real-time
+stepCounter.watchAggregatedStepCounter().listen((totalSteps) {
+  print('Total steps today: $totalSteps');
+});
+
+// Get current aggregated count (synchronous)
+final currentTotal = stepCounter.aggregatedStepCount;
+```
+
+### Comparison: Traditional vs Aggregated
+
+| Feature | Traditional | Aggregated |
+|---------|------------|------------|
+| **Write frequency** | Every 5 seconds | Every step event |
+| **Persistence** | Interval-based | Foreground + Background + Terminated |
+| **App restart** | Starts from 0 | Loads today's total |
+| **Like Health Connect** | ❌ | ✅ |
+| **Real-time accuracy** | ±5 seconds | Instant |
+
+## ✍️ Manual Step Write API
+
+The `writeStepsToAggregated()` method allows you to manually insert steps directly into the database, perfect for importing from external sources or making manual corrections.
+
+### Features
+
+✅ **Instant database update**
+✅ **Automatic stream notification** - all watchers are updated
+✅ **Offset recalculation** - maintains consistency
+✅ **Input validation** - prevents invalid data
+
+### Basic Usage
+
+```dart
+// Write steps manually
+await stepCounter.writeStepsToAggregated(
+  stepCount: 100,
+  fromTime: DateTime.now().subtract(Duration(hours: 1)),
+  toTime: DateTime.now(),
+  source: StepRecordSource.foreground,
+);
+
+// Watchers are automatically notified!
+// Your UI will update instantly
+```
+
+### Use Cases
+
+#### 1. Import from Google Fit / Apple Health
+
+```dart
+// Fetch from external source
+final externalSteps = await fetchFromGoogleFit();
+
+// Write to aggregated database
+await stepCounter.writeStepsToAggregated(
+  stepCount: externalSteps,
+  fromTime: startOfDay,
+  toTime: DateTime.now(),
+  source: StepRecordSource.foreground,
+);
+```
+
+#### 2. Manual Correction
+
+```dart
+// User manually adds steps they took
+await stepCounter.writeStepsToAggregated(
+  stepCount: 500,
+  fromTime: DateTime.now().subtract(Duration(hours: 2)),
+  toTime: DateTime.now().subtract(Duration(hours: 1)),
+);
+```
+
+#### 3. Sync from Wearable
+
+```dart
+// Import from smart watch
+final watchSteps = await fetchFromSmartWatch();
+
+await stepCounter.writeStepsToAggregated(
+  stepCount: watchSteps,
+  fromTime: lastSyncTime,
+  toTime: DateTime.now(),
+  source: StepRecordSource.background,
+);
+```
+
+### Method Signature
+
+```dart
+Future<void> writeStepsToAggregated({
+  required int stepCount,        // Number of steps (must be > 0)
+  required DateTime fromTime,    // Start time
+  DateTime? toTime,              // End time (defaults to now)
+  StepRecordSource? source,      // Source (defaults to foreground)
+})
+```
+
+### How It Works
+
+```
+User calls writeStepsToAggregated(50)
+  ↓
+Write StepRecord(50) to Hive
+  ↓
+Recalculate offset from database
+  ↓
+Emit new total to stream
+  ↓
+ALL watchAggregatedStepCounter() listeners notified
+  ↓
+UI updates automatically! ✅
+```
+
+### Example: Before and After
+
+**Before Manual Write:**
+```
+Database (Hive): 100 steps
+Live counter: 5 steps
+Offset: 100
+Aggregated: 100 + 5 = 105 steps
+```
+
+**After Writing 50 Steps:**
+```dart
+await stepCounter.writeStepsToAggregated(stepCount: 50, ...);
+```
+
+```
+Database (Hive): 150 steps (100 + 50) ✅
+Live counter: 5 steps (unchanged)
+Offset: 145 (recalculated) ✅
+Aggregated: 145 + 5 = 150 steps ✅
+Stream emits: 150 → UI updates! ✅
+```
+
+### Validation
+
+```dart
+// ❌ Error: Step count must be positive
+await stepCounter.writeStepsToAggregated(
+  stepCount: 0,
+  fromTime: DateTime.now(),
+);
+// Throws: ArgumentError('Step count must be positive')
+
+// ❌ Error: toTime must be after fromTime
+await stepCounter.writeStepsToAggregated(
+  stepCount: 100,
+  fromTime: DateTime.now(),
+  toTime: DateTime.now().subtract(Duration(hours: 1)),
+);
+// Throws: ArgumentError('toTime must be after fromTime')
+```
+
+### Testing in Example App
+
+1. Run the example app: `flutter run`
+2. Tap the **"Aggregated"** button (teal/highlighted)
+3. Tap **"Add 50 Steps Manually"** (purple button)
+4. Watch the aggregated count increase by 50 instantly ✅
+
 ## 🏗️ Architecture
 
 ### Overall System Flow
