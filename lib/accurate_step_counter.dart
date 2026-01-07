@@ -50,6 +50,9 @@ library;
 export 'src/accurate_step_counter_impl.dart' show AccurateStepCounterImpl;
 export 'src/models/step_count_event.dart' show StepCountEvent;
 export 'src/models/step_detector_config.dart' show StepDetectorConfig;
+export 'src/models/step_log_entry.dart' show StepLogEntry;
+export 'src/models/step_log_source.dart' show StepLogSource;
+export 'src/services/step_log_database.dart' show StepLogDatabase;
 
 // Main class for easier access
 import 'src/accurate_step_counter_impl.dart';

@@ -2,10 +2,15 @@ import 'dart:async';
 import 'dart:developer' as dev;
 import 'dart:io';
 
+import 'package:flutter/widgets.dart';
+
 import 'models/step_count_event.dart';
 import 'models/step_detector_config.dart';
+import 'models/step_log_entry.dart';
+import 'models/step_log_source.dart';
 import 'platform/step_counter_platform.dart';
 import 'services/native_step_detector.dart';
+import 'services/step_log_database.dart';
 
 /// Implementation of the AccurateStepCounter plugin
 ///
@@ -23,9 +28,33 @@ class AccurateStepCounterImpl {
       StreamController<StepCountEvent>.broadcast();
   int _lastForegroundStepCount = 0;
 
+  // Step logging
+  final StepLogDatabase _stepLogDatabase = StepLogDatabase();
+  bool _loggingEnabled = false;
+  bool _loggingInitialized = false;
+  StreamSubscription<StepCountEvent>? _stepLogSubscription;
+  DateTime? _lastLogTime;
+  int _lastLoggedStepCount = 0;
+
+  // App lifecycle state tracking for proper source detection
+  AppLifecycleState _appLifecycleState = AppLifecycleState.resumed;
+  int _logIntervalMs = 5000;
+
   /// Callback for handling missed steps from terminated state
   /// Parameters: (missedSteps, startTime, endTime)
   Function(int, DateTime, DateTime)? onTerminatedStepsDetected;
+
+  /// Whether step logging to local database is enabled
+  bool get isLoggingEnabled => _loggingEnabled;
+
+  /// Whether the step log database has been initialized
+  bool get isLoggingInitialized => _loggingInitialized;
+
+  /// Current app lifecycle state (used for source detection)
+  AppLifecycleState get appLifecycleState => _appLifecycleState;
+
+  /// Whether the app is currently in the foreground
+  bool get isAppInForeground => _appLifecycleState == AppLifecycleState.resumed;
 
   /// Stream of step count events
   ///
@@ -262,8 +291,367 @@ class AccurateStepCounterImpl {
     await stop();
     await _nativeDetector.dispose();
     _stopForegroundStepPolling();
+    await _stepLogSubscription?.cancel();
     await _foregroundStepController.close();
+    await _stepLogDatabase.close();
     _currentConfig = null;
+  }
+
+  // ============================================================
+  // Step Logging API (Health Connect-like)
+  // ============================================================
+
+  /// Initialize the step logging database
+  ///
+  /// Must be called before using any logging features. Can be called
+  /// multiple times safely - subsequent calls are no-ops.
+  ///
+  /// Example:
+  /// ```dart
+  /// final stepCounter = AccurateStepCounter();
+  /// await stepCounter.initializeLogging();
+  /// await stepCounter.start(enableLogging: true);
+  /// ```
+  Future<void> initializeLogging() async {
+    if (_loggingInitialized) return;
+
+    await _stepLogDatabase.initialize();
+    _loggingInitialized = true;
+    dev.log('AccurateStepCounter: Logging database initialized');
+  }
+
+  /// Start auto-logging steps to the local database
+  ///
+  /// Call [initializeLogging] first. Steps will be logged automatically
+  /// as they are detected, with source tracking (foreground/background).
+  ///
+  /// [logIntervalMs] - Minimum time between log entries in milliseconds.
+  ///                   Default is 5000ms (5 seconds) to prevent excessive writes.
+  ///
+  /// Example:
+  /// ```dart
+  /// await stepCounter.initializeLogging();
+  /// await stepCounter.startLogging();
+  /// await stepCounter.start();
+  /// ```
+  Future<void> startLogging({int logIntervalMs = 5000}) async {
+    if (!_loggingInitialized) {
+      throw StateError(
+        'Logging not initialized. Call initializeLogging() first.',
+      );
+    }
+
+    if (_loggingEnabled) return;
+
+    _loggingEnabled = true;
+    _logIntervalMs = logIntervalMs;
+    _lastLogTime = DateTime.now();
+    _lastLoggedStepCount = 0;
+
+    // Subscribe to step events for auto-logging
+    _stepLogSubscription = stepEventStream.listen((event) {
+      _autoLogSteps(event, _logIntervalMs);
+    });
+
+    dev.log('AccurateStepCounter: Step logging started');
+  }
+
+  /// Stop auto-logging steps
+  Future<void> stopLogging() async {
+    await _stepLogSubscription?.cancel();
+    _stepLogSubscription = null;
+    _loggingEnabled = false;
+    dev.log('AccurateStepCounter: Step logging stopped');
+  }
+
+  /// Set the current app lifecycle state
+  ///
+  /// Call this from your WidgetsBindingObserver to properly track
+  /// foreground vs background state for step logging.
+  ///
+  /// Example:
+  /// ```dart
+  /// class _MyAppState extends State<MyApp> with WidgetsBindingObserver {
+  ///   final stepCounter = AccurateStepCounter();
+  ///
+  ///   @override
+  ///   void initState() {
+  ///     super.initState();
+  ///     WidgetsBinding.instance.addObserver(this);
+  ///   }
+  ///
+  ///   @override
+  ///   void didChangeAppLifecycleState(AppLifecycleState state) {
+  ///     stepCounter.setAppState(state);
+  ///   }
+  /// }
+  /// ```
+  void setAppState(AppLifecycleState state) {
+    _appLifecycleState = state;
+    dev.log('AccurateStepCounter: App state changed to $state');
+
+    // If logging is enabled and app goes to background, log current steps
+    if (_loggingEnabled &&
+        state != AppLifecycleState.resumed &&
+        _lastLogTime != null) {
+      // Force log current batch before going to background
+      final currentCount = currentStepCount;
+      if (currentCount > _lastLoggedStepCount) {
+        final entry = StepLogEntry(
+          stepCount: currentCount - _lastLoggedStepCount,
+          fromTime: _lastLogTime!,
+          toTime: DateTime.now(),
+          source: StepLogSource.foreground,
+        );
+        _stepLogDatabase.logSteps(entry);
+        _lastLogTime = DateTime.now();
+        _lastLoggedStepCount = currentCount;
+        dev.log('AccurateStepCounter: Logged steps before background');
+      }
+    }
+  }
+
+  /// Auto-log steps based on interval
+  void _autoLogSteps(StepCountEvent event, int intervalMs) {
+    final now = DateTime.now();
+
+    if (_lastLogTime == null) {
+      _lastLogTime = now;
+      _lastLoggedStepCount = event.stepCount;
+      return;
+    }
+
+    final elapsed = now.difference(_lastLogTime!);
+    if (elapsed.inMilliseconds >= intervalMs) {
+      final newSteps = event.stepCount - _lastLoggedStepCount;
+
+      if (newSteps > 0) {
+        // Determine source based on current mode and app lifecycle state
+        // - Foreground service (old Android): always background
+        // - Native detection (new Android): depends on app lifecycle state
+        final StepLogSource source;
+        if (_useForegroundService) {
+          // Old Android with foreground service - counts in background
+          source = StepLogSource.background;
+        } else if (_appLifecycleState == AppLifecycleState.resumed) {
+          // New Android, app in foreground
+          source = StepLogSource.foreground;
+        } else {
+          // New Android, app in background (paused, inactive, etc.)
+          source = StepLogSource.background;
+        }
+
+        final entry = StepLogEntry(
+          stepCount: newSteps,
+          fromTime: _lastLogTime!,
+          toTime: now,
+          source: source,
+          confidence: event.confidence,
+        );
+
+        _stepLogDatabase.logSteps(entry);
+        dev.log(
+          'AccurateStepCounter: Logged $newSteps steps (source: $source)',
+        );
+      }
+
+      _lastLogTime = now;
+      _lastLoggedStepCount = event.stepCount;
+    }
+  }
+
+  /// Log steps from terminated state sync
+  Future<void> _logTerminatedSteps(
+    int stepCount,
+    DateTime fromTime,
+    DateTime toTime,
+  ) async {
+    if (!_loggingEnabled || !_loggingInitialized) return;
+
+    final entry = StepLogEntry(
+      stepCount: stepCount,
+      fromTime: fromTime,
+      toTime: toTime,
+      source: StepLogSource.terminated,
+    );
+
+    await _stepLogDatabase.logSteps(entry);
+    dev.log('AccurateStepCounter: Logged $stepCount terminated steps');
+  }
+
+  /// Manually log a step entry
+  ///
+  /// Useful for recording steps from external sources or correcting data.
+  ///
+  /// Example:
+  /// ```dart
+  /// await stepCounter.logSteps(StepLogEntry(
+  ///   stepCount: 100,
+  ///   fromTime: DateTime.now().subtract(Duration(hours: 1)),
+  ///   toTime: DateTime.now(),
+  ///   source: StepLogSource.foreground,
+  /// ));
+  /// ```
+  Future<void> logSteps(StepLogEntry entry) async {
+    if (!_loggingInitialized) {
+      throw StateError(
+        'Logging not initialized. Call initializeLogging() first.',
+      );
+    }
+    await _stepLogDatabase.logSteps(entry);
+  }
+
+  /// Get total step count from logs (aggregate)
+  ///
+  /// [from] - Optional start time filter (inclusive)
+  /// [to] - Optional end time filter (inclusive)
+  ///
+  /// Example:
+  /// ```dart
+  /// // Get all-time total
+  /// final total = await stepCounter.getTotalSteps();
+  ///
+  /// // Get today's total
+  /// final today = DateTime.now();
+  /// final startOfDay = DateTime(today.year, today.month, today.day);
+  /// final todaySteps = await stepCounter.getTotalSteps(
+  ///   from: startOfDay,
+  ///   to: today,
+  /// );
+  /// ```
+  Future<int> getTotalSteps({DateTime? from, DateTime? to}) async {
+    _ensureLoggingInitialized();
+    return await _stepLogDatabase.getTotalSteps(from: from, to: to);
+  }
+
+  /// Get step count by source
+  ///
+  /// Example:
+  /// ```dart
+  /// final fgSteps = await stepCounter.getStepsBySource(StepLogSource.foreground);
+  /// final bgSteps = await stepCounter.getStepsBySource(StepLogSource.background);
+  /// final termSteps = await stepCounter.getStepsBySource(StepLogSource.terminated);
+  /// ```
+  Future<int> getStepsBySource(
+    StepLogSource source, {
+    DateTime? from,
+    DateTime? to,
+  }) async {
+    _ensureLoggingInitialized();
+    return await _stepLogDatabase.getStepsBySource(source, from: from, to: to);
+  }
+
+  /// Get all step log entries
+  ///
+  /// [from] - Optional start time filter
+  /// [to] - Optional end time filter
+  /// [source] - Optional source filter
+  ///
+  /// Example:
+  /// ```dart
+  /// final allLogs = await stepCounter.getStepLogs();
+  /// final bgLogs = await stepCounter.getStepLogs(source: StepLogSource.background);
+  /// ```
+  Future<List<StepLogEntry>> getStepLogs({
+    DateTime? from,
+    DateTime? to,
+    StepLogSource? source,
+  }) async {
+    _ensureLoggingInitialized();
+    return await _stepLogDatabase.getStepLogs(
+      from: from,
+      to: to,
+      source: source,
+    );
+  }
+
+  /// Watch total step count in real-time
+  ///
+  /// Emits updates whenever new steps are logged.
+  ///
+  /// Example:
+  /// ```dart
+  /// stepCounter.watchTotalSteps().listen((total) {
+  ///   print('Total steps: $total');
+  /// });
+  /// ```
+  Stream<int> watchTotalSteps({DateTime? from, DateTime? to}) {
+    _ensureLoggingInitialized();
+    return _stepLogDatabase.watchTotalSteps(from: from, to: to);
+  }
+
+  /// Watch all step logs in real-time
+  ///
+  /// Emits updates whenever logs are added or modified.
+  ///
+  /// Example:
+  /// ```dart
+  /// stepCounter.watchStepLogs().listen((logs) {
+  ///   for (final log in logs) {
+  ///     print('${log.stepCount} steps from ${log.source}');
+  ///   }
+  /// });
+  /// ```
+  Stream<List<StepLogEntry>> watchStepLogs({
+    DateTime? from,
+    DateTime? to,
+    StepLogSource? source,
+  }) {
+    _ensureLoggingInitialized();
+    return _stepLogDatabase.watchStepLogs(from: from, to: to, source: source);
+  }
+
+  /// Get step statistics for a date range
+  ///
+  /// Returns a map with various statistics including:
+  /// - totalSteps, entryCount, averagePerEntry, averagePerDay
+  /// - foregroundSteps, backgroundSteps, terminatedSteps
+  ///
+  /// Example:
+  /// ```dart
+  /// final stats = await stepCounter.getStepStats();
+  /// print('Total: ${stats['totalSteps']}');
+  /// print('Daily average: ${stats['averagePerDay']}');
+  /// ```
+  Future<Map<String, dynamic>> getStepStats({
+    DateTime? from,
+    DateTime? to,
+  }) async {
+    _ensureLoggingInitialized();
+    return await _stepLogDatabase.getStepStats(from: from, to: to);
+  }
+
+  /// Clear all step logs
+  ///
+  /// Use with caution - this permanently deletes all logged data.
+  Future<void> clearStepLogs() async {
+    _ensureLoggingInitialized();
+    await _stepLogDatabase.clearLogs();
+    dev.log('AccurateStepCounter: All step logs cleared');
+  }
+
+  /// Delete step logs older than a specific date
+  ///
+  /// Example:
+  /// ```dart
+  /// // Delete logs older than 30 days
+  /// await stepCounter.deleteStepLogsBefore(
+  ///   DateTime.now().subtract(Duration(days: 30)),
+  /// );
+  /// ```
+  Future<void> deleteStepLogsBefore(DateTime date) async {
+    _ensureLoggingInitialized();
+    await _stepLogDatabase.deleteLogsBefore(date);
+    dev.log('AccurateStepCounter: Deleted logs before $date');
+  }
+
+  /// Ensure logging is initialized, throw if not
+  void _ensureLoggingInitialized() {
+    if (!_loggingInitialized) {
+      throw StateError(
+        'Logging not initialized. Call initializeLogging() first.',
+      );
+    }
   }
 
   /// Get steps from OS-level step counter (Android only)
@@ -351,6 +739,9 @@ class AccurateStepCounterImpl {
       if (onTerminatedStepsDetected != null) {
         onTerminatedStepsDetected!(missedSteps, startTime, endTime);
       }
+
+      // Log terminated steps to database if logging is enabled
+      await _logTerminatedSteps(missedSteps, startTime, endTime);
 
       return result;
     } catch (e) {
