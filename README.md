@@ -629,6 +629,81 @@ print('Using hardware step detector: $isHardware');
 | Stops in background | Enable foreground service or check battery optimization |
 | No notification (Android ≤10) | Grant notification permission |
 
+## 🧪 Testing & Verification
+
+### Quick Setup Verification
+
+Run this code to verify everything is configured correctly:
+
+```dart
+Future<void> verifySetup() async {
+  final stepCounter = AccurateStepCounter();
+
+  // 1. Check permission
+  final hasPermission = await stepCounter.hasActivityRecognitionPermission();
+  print('✓ Permission: $hasPermission');
+
+  // 2. Initialize logging
+  await stepCounter.initializeLogging(debugLogging: true);
+  print('✓ Logging initialized: ${stepCounter.isLoggingInitialized}');
+
+  // 3. Start counter
+  await stepCounter.start();
+  print('✓ Started: ${stepCounter.isStarted}');
+
+  // 4. Check detector
+  final isHardware = await stepCounter.isUsingNativeDetector();
+  print('✓ Hardware detector: $isHardware');
+
+  // 5. Enable logging
+  await stepCounter.startLogging(config: StepRecordConfig.walking());
+  print('✓ Logging enabled: ${stepCounter.isLoggingEnabled}');
+}
+```
+
+### Real-Life Test Scenarios
+
+The package includes **7 comprehensive test scenarios** covering all app states:
+
+1. **Morning Walk** - Foreground state counting
+2. **Background Mode** - Shopping while app is backgrounded
+3. **Terminated State Recovery** - App killed and relaunched
+4. **All-Day Tracking** - Mixed states throughout the day
+5. **Running Workout** - High-intensity activity
+6. **Device Reboot** - Handling sensor resets
+7. **Permission Handling** - Edge cases and failures
+
+See **[TESTING_SCENARIOS.md](TESTING_SCENARIOS.md)** for detailed testing instructions.
+
+### Automated Test Runner
+
+Use the included test script for easy testing:
+
+```bash
+chmod +x test_runner.sh
+./test_runner.sh
+```
+
+The script will:
+- ✅ Check device connection
+- ✅ Build and install the example app
+- ✅ Grant required permissions
+- ✅ Run scenario tests
+- ✅ Monitor logs in real-time
+
+### Manual Testing Checklist
+
+```
+[ ] Foreground counting (100 steps, ±5% accuracy)
+[ ] Background counting (proper source tracking)
+[ ] Terminated state sync (missed steps recovered)
+[ ] Warmup validation (prevents false positives)
+[ ] Real-time stream updates
+[ ] Database logging persists
+[ ] Notification shows on Android ≤10
+[ ] No crashes or errors
+```
+
 ## 📄 License
 
 MIT License - see [LICENSE](LICENSE)
@@ -639,6 +714,7 @@ MIT License - see [LICENSE](LICENSE)
 - [🐙 GitHub](https://github.com/rahulshahDEV/accurate_step_counter)
 - [📋 Changelog](CHANGELOG.md)
 - [🐛 Issues](https://github.com/rahulshahDEV/accurate_step_counter/issues)
+- [🧪 Testing Guide](TESTING_SCENARIOS.md)
 
 ---
 

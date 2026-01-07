@@ -6,12 +6,12 @@ import 'package:flutter/widgets.dart';
 
 import 'models/step_count_event.dart';
 import 'models/step_detector_config.dart';
-import 'models/step_log_entry.dart';
-import 'models/step_log_source.dart';
-import 'models/step_logging_config.dart';
+import 'models/step_record.dart';
+import 'models/step_record_config.dart';
+import 'models/step_record_source.dart';
 import 'platform/step_counter_platform.dart';
 import 'services/native_step_detector.dart';
-import 'services/step_log_database.dart';
+import 'services/step_record_store.dart';
 
 /// Implementation of the AccurateStepCounter plugin
 ///
@@ -29,18 +29,18 @@ class AccurateStepCounterImpl {
       StreamController<StepCountEvent>.broadcast();
   int _lastForegroundStepCount = 0;
 
-  // Step logging
-  final StepLogDatabase _stepLogDatabase = StepLogDatabase();
-  bool _loggingEnabled = false;
-  bool _loggingInitialized = false;
+  // Step recording
+  final StepRecordStore _stepRecordStore = StepRecordStore();
+  bool _recordingEnabled = false;
+  bool _storeInitialized = false;
   bool _debugLogging = false;
-  StreamSubscription<StepCountEvent>? _stepLogSubscription;
-  DateTime? _lastLogTime;
-  int _lastLoggedStepCount = 0;
+  StreamSubscription<StepCountEvent>? _stepRecordSubscription;
+  DateTime? _lastRecordTime;
+  int _lastRecordedStepCount = 0;
 
   // App lifecycle state tracking for proper source detection
   AppLifecycleState _appLifecycleState = AppLifecycleState.resumed;
-  int _logIntervalMs = 5000;
+  int _recordIntervalMs = 5000;
 
   // Warmup validation state
   bool _isInWarmup = false;
@@ -50,15 +50,21 @@ class AccurateStepCounterImpl {
   double _maxStepsPerSecond = 5.0;
   int _warmupStartStepCount = 0;
 
+  // Inactivity detection state
+  int _inactivityTimeoutMs = 0;
+  DateTime? _lastStepTime;
+  Timer? _inactivityTimer;
+  bool _isSessionPaused = false;
+
   /// Callback for handling missed steps from terminated state
   /// Parameters: (missedSteps, startTime, endTime)
   Function(int, DateTime, DateTime)? onTerminatedStepsDetected;
 
   /// Whether step logging to local database is enabled
-  bool get isLoggingEnabled => _loggingEnabled;
+  bool get isLoggingEnabled => _recordingEnabled;
 
   /// Whether the step log database has been initialized
-  bool get isLoggingInitialized => _loggingInitialized;
+  bool get isLoggingInitialized => _storeInitialized;
 
   /// Current app lifecycle state (used for source detection)
   AppLifecycleState get appLifecycleState => _appLifecycleState;
@@ -301,9 +307,9 @@ class AccurateStepCounterImpl {
     await stop();
     await _nativeDetector.dispose();
     _stopForegroundStepPolling();
-    await _stepLogSubscription?.cancel();
+    await _stepRecordSubscription?.cancel();
     await _foregroundStepController.close();
-    await _stepLogDatabase.close();
+    await _stepRecordStore.close();
     _currentConfig = null;
   }
 
@@ -327,11 +333,11 @@ class AccurateStepCounterImpl {
   /// await stepCounter.start();
   /// ```
   Future<void> initializeLogging({bool debugLogging = false}) async {
-    if (_loggingInitialized) return;
+    if (_storeInitialized) return;
 
     _debugLogging = debugLogging;
-    await _stepLogDatabase.initialize();
-    _loggingInitialized = true;
+    await _stepRecordStore.initialize();
+    _storeInitialized = true;
     _log('Logging database initialized');
   }
 
@@ -351,13 +357,13 @@ class AccurateStepCounterImpl {
   ///
   /// ```dart
   /// // Using presets
-  /// await stepCounter.startLogging(config: StepLoggingConfig.walking());
-  /// await stepCounter.startLogging(config: StepLoggingConfig.running());
-  /// await stepCounter.startLogging(config: StepLoggingConfig.conservative());
+  /// await stepCounter.startLogging(config: StepRecordConfig.walking());
+  /// await stepCounter.startLogging(config: StepRecordConfig.running());
+  /// await stepCounter.startLogging(config: StepRecordConfig.conservative());
   ///
   /// // Custom configuration
   /// await stepCounter.startLogging(
-  ///   config: StepLoggingConfig(
+  ///   config: StepRecordConfig(
   ///     warmupDurationMs: 8000,
   ///     minStepsToValidate: 10,
   ///     maxStepsPerSecond: 5.0,
@@ -366,37 +372,37 @@ class AccurateStepCounterImpl {
   /// ```
   ///
   /// Available presets:
-  /// - [StepLoggingConfig.walking] - Casual walking (5s warmup, 3 steps/sec max)
-  /// - [StepLoggingConfig.running] - Running/jogging (3s warmup, 5 steps/sec max)
-  /// - [StepLoggingConfig.sensitive] - High sensitivity (no warmup)
-  /// - [StepLoggingConfig.conservative] - Strict validation (10s warmup)
-  /// - [StepLoggingConfig.noValidation] - Raw logging (no validation)
-  Future<void> startLogging({StepLoggingConfig? config}) async {
-    if (!_loggingInitialized) {
+  /// - [StepRecordConfig.walking] - Casual walking (5s warmup, 3 steps/sec max)
+  /// - [StepRecordConfig.running] - Running/jogging (3s warmup, 5 steps/sec max)
+  /// - [StepRecordConfig.sensitive] - High sensitivity (no warmup)
+  /// - [StepRecordConfig.conservative] - Strict validation (10s warmup)
+  /// - [StepRecordConfig.noValidation] - Raw logging (no validation)
+  Future<void> startLogging({StepRecordConfig? config}) async {
+    if (!_storeInitialized) {
       throw StateError(
         'Logging not initialized. Call initializeLogging() first.',
       );
     }
 
-    if (_loggingEnabled) return;
+    if (_recordingEnabled) return;
 
     // Use provided config or default
-    final cfg = config ?? const StepLoggingConfig();
+    final cfg = config ?? const StepRecordConfig();
 
-    _loggingEnabled = true;
-    _logIntervalMs = cfg.logIntervalMs;
+    _recordingEnabled = true;
+    _recordIntervalMs = cfg.recordIntervalMs;
     _warmupDurationMs = cfg.warmupDurationMs;
     _minStepsToValidate = cfg.minStepsToValidate;
     _maxStepsPerSecond = cfg.maxStepsPerSecond;
     _isInWarmup = cfg.warmupDurationMs > 0;
     _warmupStartTime = null;
     _warmupStartStepCount = 0;
-    _lastLogTime = DateTime.now();
-    _lastLoggedStepCount = 0;
+    _lastRecordTime = DateTime.now();
+    _lastRecordedStepCount = 0;
 
     // Subscribe to step events for auto-logging
-    _stepLogSubscription = stepEventStream.listen((event) {
-      _autoLogSteps(event, _logIntervalMs);
+    _stepRecordSubscription = stepEventStream.listen((event) {
+      _autoLogSteps(event, _recordIntervalMs);
     });
 
     if (_isInWarmup) {
@@ -408,9 +414,9 @@ class AccurateStepCounterImpl {
 
   /// Stop auto-logging steps
   Future<void> stopLogging() async {
-    await _stepLogSubscription?.cancel();
-    _stepLogSubscription = null;
-    _loggingEnabled = false;
+    await _stepRecordSubscription?.cancel();
+    _stepRecordSubscription = null;
+    _recordingEnabled = false;
     _log('Step logging stopped');
   }
 
@@ -441,21 +447,21 @@ class AccurateStepCounterImpl {
     _log('App state changed to $state');
 
     // If logging is enabled and app goes to background, log current steps
-    if (_loggingEnabled &&
+    if (_recordingEnabled &&
         state != AppLifecycleState.resumed &&
-        _lastLogTime != null) {
+        _lastRecordTime != null) {
       // Force log current batch before going to background
       final currentCount = currentStepCount;
-      if (currentCount > _lastLoggedStepCount) {
-        final entry = StepLogEntry(
-          stepCount: currentCount - _lastLoggedStepCount,
-          fromTime: _lastLogTime!,
+      if (currentCount > _lastRecordedStepCount) {
+        final entry = StepRecord(
+          stepCount: currentCount - _lastRecordedStepCount,
+          fromTime: _lastRecordTime!,
           toTime: DateTime.now(),
-          source: StepLogSource.foreground,
+          source: StepRecordSource.foreground,
         );
-        _stepLogDatabase.logSteps(entry);
-        _lastLogTime = DateTime.now();
-        _lastLoggedStepCount = currentCount;
+        _stepRecordStore.insertRecord(entry);
+        _lastRecordTime = DateTime.now();
+        _lastRecordedStepCount = currentCount;
         _log('Logged steps before background');
       }
     }
@@ -514,7 +520,7 @@ class AccurateStepCounterImpl {
       );
 
       final source = _determineSource();
-      final entry = StepLogEntry(
+      final entry = StepRecord(
         stepCount: warmupSteps,
         fromTime: _warmupStartTime!,
         toTime: now,
@@ -522,29 +528,29 @@ class AccurateStepCounterImpl {
         confidence: event.confidence,
       );
 
-      _stepLogDatabase.logSteps(entry);
+      _stepRecordStore.insertRecord(entry);
       dev.log(
         'AccurateStepCounter: Logged $warmupSteps warmup steps (source: $source)',
       );
 
       // Exit warmup mode
       _isInWarmup = false;
-      _lastLogTime = now;
-      _lastLoggedStepCount = event.stepCount;
+      _lastRecordTime = now;
+      _lastRecordedStepCount = event.stepCount;
       return;
     }
 
     // === NORMAL LOGGING (after warmup) ===
 
-    if (_lastLogTime == null) {
-      _lastLogTime = now;
-      _lastLoggedStepCount = event.stepCount;
+    if (_lastRecordTime == null) {
+      _lastRecordTime = now;
+      _lastRecordedStepCount = event.stepCount;
       return;
     }
 
-    final elapsed = now.difference(_lastLogTime!);
+    final elapsed = now.difference(_lastRecordTime!);
     if (elapsed.inMilliseconds >= intervalMs) {
-      final newSteps = event.stepCount - _lastLoggedStepCount;
+      final newSteps = event.stepCount - _lastRecordedStepCount;
 
       if (newSteps > 0) {
         // Validate step rate
@@ -556,42 +562,42 @@ class AccurateStepCounterImpl {
           dev.log(
             'AccurateStepCounter: Skipping $newSteps steps - rate ${stepsPerSecond.toStringAsFixed(2)}/s too high',
           );
-          _lastLogTime = now;
-          _lastLoggedStepCount = event.stepCount;
+          _lastRecordTime = now;
+          _lastRecordedStepCount = event.stepCount;
           return;
         }
 
         final source = _determineSource();
-        final entry = StepLogEntry(
+        final entry = StepRecord(
           stepCount: newSteps,
-          fromTime: _lastLogTime!,
+          fromTime: _lastRecordTime!,
           toTime: now,
           source: source,
           confidence: event.confidence,
         );
 
-        _stepLogDatabase.logSteps(entry);
+        _stepRecordStore.insertRecord(entry);
         dev.log(
           'AccurateStepCounter: Logged $newSteps steps (source: $source)',
         );
       }
 
-      _lastLogTime = now;
-      _lastLoggedStepCount = event.stepCount;
+      _lastRecordTime = now;
+      _lastRecordedStepCount = event.stepCount;
     }
   }
 
   /// Determine the step log source based on current mode and app state
-  StepLogSource _determineSource() {
+  StepRecordSource _determineSource() {
     if (_useForegroundService) {
       // Old Android with foreground service - counts in background
-      return StepLogSource.background;
+      return StepRecordSource.background;
     } else if (_appLifecycleState == AppLifecycleState.resumed) {
       // New Android, app in foreground
-      return StepLogSource.foreground;
+      return StepRecordSource.foreground;
     } else {
       // New Android, app in background (paused, inactive, etc.)
-      return StepLogSource.background;
+      return StepRecordSource.background;
     }
   }
 
@@ -606,21 +612,21 @@ class AccurateStepCounterImpl {
   ) async {
     // Only require initialized, not enabled - terminated steps should
     // always be logged if database is ready, regardless of auto-logging state
-    if (!_loggingInitialized) {
+    if (!_storeInitialized) {
       dev.log(
         'AccurateStepCounter: Skipping terminated steps log - database not initialized',
       );
       return;
     }
 
-    final entry = StepLogEntry(
+    final entry = StepRecord(
       stepCount: stepCount,
       fromTime: fromTime,
       toTime: toTime,
-      source: StepLogSource.terminated,
+      source: StepRecordSource.terminated,
     );
 
-    await _stepLogDatabase.logSteps(entry);
+    await _stepRecordStore.insertRecord(entry);
     _log('Logged $stepCount terminated steps');
   }
 
@@ -630,20 +636,20 @@ class AccurateStepCounterImpl {
   ///
   /// Example:
   /// ```dart
-  /// await stepCounter.logSteps(StepLogEntry(
+  /// await stepCounter.insertRecord(StepRecord(
   ///   stepCount: 100,
   ///   fromTime: DateTime.now().subtract(Duration(hours: 1)),
   ///   toTime: DateTime.now(),
-  ///   source: StepLogSource.foreground,
+  ///   source: StepRecordSource.foreground,
   /// ));
   /// ```
-  Future<void> logSteps(StepLogEntry entry) async {
-    if (!_loggingInitialized) {
+  Future<void> insertRecord(StepRecord entry) async {
+    if (!_storeInitialized) {
       throw StateError(
         'Logging not initialized. Call initializeLogging() first.',
       );
     }
-    await _stepLogDatabase.logSteps(entry);
+    await _stepRecordStore.insertRecord(entry);
   }
 
   /// Get total step count from logs (aggregate)
@@ -666,24 +672,24 @@ class AccurateStepCounterImpl {
   /// ```
   Future<int> getTotalSteps({DateTime? from, DateTime? to}) async {
     _ensureLoggingInitialized();
-    return await _stepLogDatabase.getTotalSteps(from: from, to: to);
+    return await _stepRecordStore.readTotalSteps(from: from, to: to);
   }
 
   /// Get step count by source
   ///
   /// Example:
   /// ```dart
-  /// final fgSteps = await stepCounter.getStepsBySource(StepLogSource.foreground);
-  /// final bgSteps = await stepCounter.getStepsBySource(StepLogSource.background);
-  /// final termSteps = await stepCounter.getStepsBySource(StepLogSource.terminated);
+  /// final fgSteps = await stepCounter.getStepsBySource(StepRecordSource.foreground);
+  /// final bgSteps = await stepCounter.getStepsBySource(StepRecordSource.background);
+  /// final termSteps = await stepCounter.getStepsBySource(StepRecordSource.terminated);
   /// ```
   Future<int> getStepsBySource(
-    StepLogSource source, {
+    StepRecordSource source, {
     DateTime? from,
     DateTime? to,
   }) async {
     _ensureLoggingInitialized();
-    return await _stepLogDatabase.getStepsBySource(source, from: from, to: to);
+    return await _stepRecordStore.readStepsBySource(source, from: from, to: to);
   }
 
   /// Get all step log entries
@@ -695,15 +701,15 @@ class AccurateStepCounterImpl {
   /// Example:
   /// ```dart
   /// final allLogs = await stepCounter.getStepLogs();
-  /// final bgLogs = await stepCounter.getStepLogs(source: StepLogSource.background);
+  /// final bgLogs = await stepCounter.getStepLogs(source: StepRecordSource.background);
   /// ```
-  Future<List<StepLogEntry>> getStepLogs({
+  Future<List<StepRecord>> getStepLogs({
     DateTime? from,
     DateTime? to,
-    StepLogSource? source,
+    StepRecordSource? source,
   }) async {
     _ensureLoggingInitialized();
-    return await _stepLogDatabase.getStepLogs(
+    return await _stepRecordStore.readRecords(
       from: from,
       to: to,
       source: source,
@@ -722,7 +728,7 @@ class AccurateStepCounterImpl {
   /// ```
   Stream<int> watchTotalSteps({DateTime? from, DateTime? to}) {
     _ensureLoggingInitialized();
-    return _stepLogDatabase.watchTotalSteps(from: from, to: to);
+    return _stepRecordStore.watchTotalSteps(from: from, to: to);
   }
 
   /// Watch all step logs in real-time
@@ -737,13 +743,13 @@ class AccurateStepCounterImpl {
   ///   }
   /// });
   /// ```
-  Stream<List<StepLogEntry>> watchStepLogs({
+  Stream<List<StepRecord>> watchStepLogs({
     DateTime? from,
     DateTime? to,
-    StepLogSource? source,
+    StepRecordSource? source,
   }) {
     _ensureLoggingInitialized();
-    return _stepLogDatabase.watchStepLogs(from: from, to: to, source: source);
+    return _stepRecordStore.watchRecords(from: from, to: to, source: source);
   }
 
   /// Get step statistics for a date range
@@ -763,7 +769,7 @@ class AccurateStepCounterImpl {
     DateTime? to,
   }) async {
     _ensureLoggingInitialized();
-    return await _stepLogDatabase.getStepStats(from: from, to: to);
+    return await _stepRecordStore.getStats(from: from, to: to);
   }
 
   /// Clear all step logs
@@ -771,7 +777,7 @@ class AccurateStepCounterImpl {
   /// Use with caution - this permanently deletes all logged data.
   Future<void> clearStepLogs() async {
     _ensureLoggingInitialized();
-    await _stepLogDatabase.clearLogs();
+    await _stepRecordStore.deleteAllRecords();
     _log('All step logs cleared');
   }
 
@@ -786,13 +792,13 @@ class AccurateStepCounterImpl {
   /// ```
   Future<void> deleteStepLogsBefore(DateTime date) async {
     _ensureLoggingInitialized();
-    await _stepLogDatabase.deleteLogsBefore(date);
+    await _stepRecordStore.deleteRecordsBefore(date);
     _log('Deleted logs before $date');
   }
 
   /// Ensure logging is initialized, throw if not
   void _ensureLoggingInitialized() {
-    if (!_loggingInitialized) {
+    if (!_storeInitialized) {
       throw StateError(
         'Logging not initialized. Call initializeLogging() first.',
       );
