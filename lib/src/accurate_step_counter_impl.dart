@@ -40,6 +40,14 @@ class AccurateStepCounterImpl {
   AppLifecycleState _appLifecycleState = AppLifecycleState.resumed;
   int _logIntervalMs = 5000;
 
+  // Warmup validation state
+  bool _isInWarmup = false;
+  DateTime? _warmupStartTime;
+  int _warmupDurationMs = 0;
+  int _minStepsToValidate = 10;
+  double _maxStepsPerSecond = 5.0;
+  int _warmupStartStepCount = 0;
+
   /// Callback for handling missed steps from terminated state
   /// Parameters: (missedSteps, startTime, endTime)
   Function(int, DateTime, DateTime)? onTerminatedStepsDetected;
@@ -334,7 +342,21 @@ class AccurateStepCounterImpl {
   /// await stepCounter.startLogging();
   /// await stepCounter.start();
   /// ```
-  Future<void> startLogging({int logIntervalMs = 5000}) async {
+  ///
+  /// With warmup validation:
+  /// ```dart
+  /// await stepCounter.startLogging(
+  ///   warmupDurationMs: 8000,    // Wait 8 seconds before first log
+  ///   minStepsToValidate: 10,   // Need 10+ steps to confirm walking
+  ///   maxStepsPerSecond: 5.0,   // Reject unrealistic step rates
+  /// );
+  /// ```
+  Future<void> startLogging({
+    int logIntervalMs = 5000,
+    int warmupDurationMs = 0,
+    int minStepsToValidate = 10,
+    double maxStepsPerSecond = 5.0,
+  }) async {
     if (!_loggingInitialized) {
       throw StateError(
         'Logging not initialized. Call initializeLogging() first.',
@@ -345,6 +367,12 @@ class AccurateStepCounterImpl {
 
     _loggingEnabled = true;
     _logIntervalMs = logIntervalMs;
+    _warmupDurationMs = warmupDurationMs;
+    _minStepsToValidate = minStepsToValidate;
+    _maxStepsPerSecond = maxStepsPerSecond;
+    _isInWarmup = warmupDurationMs > 0;
+    _warmupStartTime = null;
+    _warmupStartStepCount = 0;
     _lastLogTime = DateTime.now();
     _lastLoggedStepCount = 0;
 
@@ -353,7 +381,13 @@ class AccurateStepCounterImpl {
       _autoLogSteps(event, _logIntervalMs);
     });
 
-    dev.log('AccurateStepCounter: Step logging started');
+    if (_isInWarmup) {
+      dev.log(
+        'AccurateStepCounter: Step logging started with ${warmupDurationMs}ms warmup',
+      );
+    } else {
+      dev.log('AccurateStepCounter: Step logging started');
+    }
   }
 
   /// Stop auto-logging steps
@@ -411,9 +445,80 @@ class AccurateStepCounterImpl {
     }
   }
 
-  /// Auto-log steps based on interval
+  /// Auto-log steps based on interval with warmup validation
   void _autoLogSteps(StepCountEvent event, int intervalMs) {
     final now = DateTime.now();
+
+    // === WARMUP PHASE ===
+    if (_isInWarmup) {
+      // Initialize warmup on first step event
+      if (_warmupStartTime == null) {
+        _warmupStartTime = now;
+        _warmupStartStepCount = event.stepCount;
+        dev.log('AccurateStepCounter: Warmup started');
+        return;
+      }
+
+      final warmupElapsed = now.difference(_warmupStartTime!);
+      if (warmupElapsed.inMilliseconds < _warmupDurationMs) {
+        // Still in warmup - don't log yet, just track
+        return;
+      }
+
+      // Warmup complete - validate walking
+      final warmupSteps = event.stepCount - _warmupStartStepCount;
+
+      // Validation 1: Minimum steps required
+      if (warmupSteps < _minStepsToValidate) {
+        // Not enough steps - reset and wait for real walking
+        dev.log(
+          'AccurateStepCounter: Warmup failed - only $warmupSteps steps (need $_minStepsToValidate)',
+        );
+        _warmupStartTime = now;
+        _warmupStartStepCount = event.stepCount;
+        return;
+      }
+
+      // Validation 2: Step rate check
+      final warmupSeconds = warmupElapsed.inMilliseconds / 1000.0;
+      final stepsPerSecond = warmupSteps / warmupSeconds;
+      if (stepsPerSecond > _maxStepsPerSecond) {
+        // Unrealistic rate - shake or noise, not walking
+        dev.log(
+          'AccurateStepCounter: Warmup failed - rate ${stepsPerSecond.toStringAsFixed(2)}/s exceeds max $_maxStepsPerSecond/s',
+        );
+        _warmupStartTime = now;
+        _warmupStartStepCount = event.stepCount;
+        return;
+      }
+
+      // ✓ Walking validated - log warmup steps
+      dev.log(
+        'AccurateStepCounter: Warmup validated - $warmupSteps steps at ${stepsPerSecond.toStringAsFixed(2)}/s',
+      );
+
+      final source = _determineSource();
+      final entry = StepLogEntry(
+        stepCount: warmupSteps,
+        fromTime: _warmupStartTime!,
+        toTime: now,
+        source: source,
+        confidence: event.confidence,
+      );
+
+      _stepLogDatabase.logSteps(entry);
+      dev.log(
+        'AccurateStepCounter: Logged $warmupSteps warmup steps (source: $source)',
+      );
+
+      // Exit warmup mode
+      _isInWarmup = false;
+      _lastLogTime = now;
+      _lastLoggedStepCount = event.stepCount;
+      return;
+    }
+
+    // === NORMAL LOGGING (after warmup) ===
 
     if (_lastLogTime == null) {
       _lastLogTime = now;
@@ -426,21 +531,21 @@ class AccurateStepCounterImpl {
       final newSteps = event.stepCount - _lastLoggedStepCount;
 
       if (newSteps > 0) {
-        // Determine source based on current mode and app lifecycle state
-        // - Foreground service (old Android): always background
-        // - Native detection (new Android): depends on app lifecycle state
-        final StepLogSource source;
-        if (_useForegroundService) {
-          // Old Android with foreground service - counts in background
-          source = StepLogSource.background;
-        } else if (_appLifecycleState == AppLifecycleState.resumed) {
-          // New Android, app in foreground
-          source = StepLogSource.foreground;
-        } else {
-          // New Android, app in background (paused, inactive, etc.)
-          source = StepLogSource.background;
+        // Validate step rate
+        final elapsedSeconds = elapsed.inMilliseconds / 1000.0;
+        final stepsPerSecond = newSteps / elapsedSeconds;
+
+        if (stepsPerSecond > _maxStepsPerSecond) {
+          // Unrealistic rate - skip this batch
+          dev.log(
+            'AccurateStepCounter: Skipping $newSteps steps - rate ${stepsPerSecond.toStringAsFixed(2)}/s too high',
+          );
+          _lastLogTime = now;
+          _lastLoggedStepCount = event.stepCount;
+          return;
         }
 
+        final source = _determineSource();
         final entry = StepLogEntry(
           stepCount: newSteps,
           fromTime: _lastLogTime!,
@@ -460,13 +565,37 @@ class AccurateStepCounterImpl {
     }
   }
 
+  /// Determine the step log source based on current mode and app state
+  StepLogSource _determineSource() {
+    if (_useForegroundService) {
+      // Old Android with foreground service - counts in background
+      return StepLogSource.background;
+    } else if (_appLifecycleState == AppLifecycleState.resumed) {
+      // New Android, app in foreground
+      return StepLogSource.foreground;
+    } else {
+      // New Android, app in background (paused, inactive, etc.)
+      return StepLogSource.background;
+    }
+  }
+
   /// Log steps from terminated state sync
+  ///
+  /// Note: Only requires logging to be initialized, not enabled,
+  /// so terminated steps are logged even before startLogging() is called.
   Future<void> _logTerminatedSteps(
     int stepCount,
     DateTime fromTime,
     DateTime toTime,
   ) async {
-    if (!_loggingEnabled || !_loggingInitialized) return;
+    // Only require initialized, not enabled - terminated steps should
+    // always be logged if database is ready, regardless of auto-logging state
+    if (!_loggingInitialized) {
+      dev.log(
+        'AccurateStepCounter: Skipping terminated steps log - database not initialized',
+      );
+      return;
+    }
 
     final entry = StepLogEntry(
       stepCount: stepCount,
