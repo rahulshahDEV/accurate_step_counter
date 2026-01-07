@@ -5,6 +5,75 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.0] - 2026-01-07
+
+### Added
+- 💾 **Hive Database Logging**: Local persistent storage for step data
+  - `StepLogEntry` model with Hive adapter for efficient storage
+  - `StepLogSource` enum: `foreground`, `background`, `terminated`
+  - `StepLogDatabase` service with Health Connect-like API
+
+- 🔥 **Warmup Validation**: Buffer and validate walking before logging
+  - Configurable warmup duration before first log
+  - Minimum step threshold to confirm real walking
+  - Step rate validation to reject shaking/noise
+  - Buffered steps logged once walking is validated
+
+- ⚙️ **Logging Config Presets**: New `StepLoggingConfig` class
+  - `walking()` - Casual walking (5s warmup, 3 steps/sec max)
+  - `running()` - Jogging/running (3s warmup, 5 steps/sec max)
+  - `sensitive()` - Quick detection (no warmup)
+  - `conservative()` - Strict accuracy (10s warmup)
+  - `noValidation()` - Raw data logging
+
+- 📊 **New Query APIs**:
+  - `getTotalSteps({from, to})` - Aggregate step count
+  - `getStepsBySource(source, {from, to})` - Steps by source type
+  - `getStepLogs({from, to, source})` - Get all log entries
+  - `getStepStats({from, to})` - Statistics breakdown
+
+- 📡 **Real-Time Streams**:
+  - `watchTotalSteps({from, to})` - Live total updates
+  - `watchStepLogs({from, to, source})` - Live log entries
+
+- 🔄 **App Lifecycle Tracking**:
+  - `setAppState(state)` - Track foreground/background state
+  - Automatic step logging before app goes to background
+  - Proper source detection based on lifecycle
+
+### Example Usage
+```dart
+// Initialize logging
+await stepCounter.initializeLogging();
+await stepCounter.start();
+await stepCounter.startLogging(config: StepLoggingConfig.walking());
+
+// Track lifecycle for proper source detection
+@override
+void didChangeAppLifecycleState(AppLifecycleState state) {
+  stepCounter.setAppState(state);
+}
+
+// Query steps
+final total = await stepCounter.getTotalSteps();
+final fgSteps = await stepCounter.getStepsBySource(StepLogSource.foreground);
+
+// Real-time updates
+stepCounter.watchTotalSteps().listen((t) => print('Total: $t'));
+```
+
+### Dependencies Added
+- `hive: ^2.2.3` - Local NoSQL database
+- `hive_flutter: ^1.1.0` - Flutter integration
+- `hive_generator: ^2.0.1` (dev) - Code generation
+- `build_runner: ^2.4.12` (dev) - Build tool
+
+### Migration Guide
+No breaking changes! The new logging features are opt-in.
+To use logging, call `initializeLogging()` before `start()`.
+
+---
+
 ## [1.2.1] - 2026-01-02
 
 ### Added

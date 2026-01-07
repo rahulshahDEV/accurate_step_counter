@@ -3,7 +3,7 @@
 [![pub package](https://img.shields.io/pub/v/accurate_step_counter.svg)](https://pub.dev/packages/accurate_step_counter)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-A highly accurate Flutter plugin for step counting using native Android `TYPE_STEP_DETECTOR` sensor with accelerometer fallback. Zero external dependencies. Designed for reliability across foreground, background, and terminated app states.
+A highly accurate Flutter plugin for step counting using native Android `TYPE_STEP_DETECTOR` sensor with accelerometer fallback. Includes local Hive database logging with warmup validation. Zero external dependencies. Designed for reliability across foreground, background, and terminated app states.
 
 ## ✨ Features
 
@@ -11,7 +11,9 @@ A highly accurate Flutter plugin for step counting using native Android `TYPE_ST
 |---------|-------------|
 | 🎯 **Native Detection** | Uses Android's hardware-optimized `TYPE_STEP_DETECTOR` sensor |
 | 🔄 **Accelerometer Fallback** | Software algorithm for devices without step detector |
-| 📦 **Zero Dependencies** | Only requires Flutter SDK |
+| 💾 **Hive Logging** | Local persistent storage with source tracking (foreground/background/terminated) |
+| 🔥 **Warmup Validation** | Buffer steps during warmup, validate walking before logging |
+| 📦 **Zero Dependencies** | Only requires Flutter SDK + Hive |
 | 🔋 **Battery Efficient** | Event-driven, not polling-based |
 | 📱 **All App States** | Foreground, background, and terminated state support |
 | ⚙️ **Configurable** | Presets for walking/running + custom parameters |
@@ -31,7 +33,7 @@ A highly accurate Flutter plugin for step counting using native Android `TYPE_ST
 
 ```yaml
 dependencies:
-  accurate_step_counter: ^1.2.1
+  accurate_step_counter: ^1.3.0
 ```
 
 ### 2. Add Permissions
@@ -238,6 +240,99 @@ final event = StepCountEvent(stepCount: 100, timestamp: DateTime.now());
 
 event.stepCount   // int - Total steps since start()
 event.timestamp   // DateTime - When step was detected
+```
+
+## 💾 Hive Step Logging
+
+### Setup
+
+```dart
+final stepCounter = AccurateStepCounter();
+
+// Initialize logging database
+await stepCounter.initializeLogging();
+
+// Start counting
+await stepCounter.start();
+
+// Start logging with a preset
+await stepCounter.startLogging(config: StepLoggingConfig.walking());
+```
+
+### Logging Presets
+
+```dart
+// Casual walking (5s warmup, 3 steps/sec max)
+StepLoggingConfig.walking()
+
+// Running/jogging (3s warmup, 5 steps/sec max)
+StepLoggingConfig.running()
+
+// Quick detection (no warmup)
+StepLoggingConfig.sensitive()
+
+// Strict accuracy (10s warmup)
+StepLoggingConfig.conservative()
+
+// Raw data (no validation)
+StepLoggingConfig.noValidation()
+
+// Custom configuration
+StepLoggingConfig(
+  logIntervalMs: 5000,
+  warmupDurationMs: 8000,
+  minStepsToValidate: 10,
+  maxStepsPerSecond: 4.0,
+)
+```
+
+### Query API
+
+```dart
+// Aggregate total
+final total = await stepCounter.getTotalSteps();
+final todaySteps = await stepCounter.getTotalSteps(
+  from: DateTime.now().subtract(Duration(hours: 12)),
+);
+
+// By source
+final fgSteps = await stepCounter.getStepsBySource(StepLogSource.foreground);
+final bgSteps = await stepCounter.getStepsBySource(StepLogSource.background);
+final termSteps = await stepCounter.getStepsBySource(StepLogSource.terminated);
+
+// Get all logs
+final logs = await stepCounter.getStepLogs();
+
+// Statistics
+final stats = await stepCounter.getStepStats();
+// Returns: totalSteps, entryCount, averagePerEntry, foregroundSteps, etc.
+```
+
+### Real-Time Streams
+
+```dart
+// Watch total steps
+stepCounter.watchTotalSteps().listen((total) {
+  print('Total: $total');
+});
+
+// Watch all logs
+stepCounter.watchStepLogs().listen((logs) {
+  for (final log in logs) {
+    print('${log.stepCount} from ${log.source}');
+  }
+});
+```
+
+### Lifecycle Tracking
+
+```dart
+class _MyAppState extends State<MyApp> with WidgetsBindingObserver {
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    stepCounter.setAppState(state); // Track foreground/background
+  }
+}
 ```
 
 ## 🏗️ Architecture

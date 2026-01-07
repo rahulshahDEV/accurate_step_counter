@@ -33,6 +33,7 @@ class AccurateStepCounterImpl {
   final StepLogDatabase _stepLogDatabase = StepLogDatabase();
   bool _loggingEnabled = false;
   bool _loggingInitialized = false;
+  bool _debugLogging = false;
   StreamSubscription<StepCountEvent>? _stepLogSubscription;
   DateTime? _lastLogTime;
   int _lastLoggedStepCount = 0;
@@ -131,7 +132,7 @@ class AccurateStepCounterImpl {
         _currentConfig!.useForegroundServiceOnOldDevices) {
       final androidVersion = await _platform.getAndroidVersion();
       final maxApiLevel = _currentConfig!.foregroundServiceMaxApiLevel;
-      dev.log('AccurateStepCounter: Android API level is $androidVersion');
+      _log('Android API level is $androidVersion');
       dev.log(
         'AccurateStepCounter: Foreground service max API level is $maxApiLevel',
       );
@@ -251,7 +252,7 @@ class AccurateStepCounterImpl {
         }
       }
     } catch (e) {
-      dev.log('AccurateStepCounter: Error polling foreground step count: $e');
+      _log('Error polling foreground step count: $e');
     }
   }
 
@@ -315,18 +316,30 @@ class AccurateStepCounterImpl {
   /// Must be called before using any logging features. Can be called
   /// multiple times safely - subsequent calls are no-ops.
   ///
+  /// [debugLogging] - If true, logs debug messages to console. Default: false.
+  /// Set to `kDebugMode` to only log in debug builds.
+  ///
   /// Example:
   /// ```dart
-  /// final stepCounter = AccurateStepCounter();
-  /// await stepCounter.initializeLogging();
-  /// await stepCounter.start(enableLogging: true);
+  /// import 'package:flutter/foundation.dart';
+  ///
+  /// await stepCounter.initializeLogging(debugLogging: kDebugMode);
+  /// await stepCounter.start();
   /// ```
-  Future<void> initializeLogging() async {
+  Future<void> initializeLogging({bool debugLogging = false}) async {
     if (_loggingInitialized) return;
 
+    _debugLogging = debugLogging;
     await _stepLogDatabase.initialize();
     _loggingInitialized = true;
-    dev.log('AccurateStepCounter: Logging database initialized');
+    _log('Logging database initialized');
+  }
+
+  /// Internal logging helper - only logs if debugLogging is enabled
+  void _log(String message) {
+    if (_debugLogging) {
+      dev.log('AccurateStepCounter: $message');
+    }
   }
 
   /// Start auto-logging steps to the local database
@@ -387,9 +400,9 @@ class AccurateStepCounterImpl {
     });
 
     if (_isInWarmup) {
-      dev.log('AccurateStepCounter: Step logging started with $cfg');
+      _log('Step logging started with $cfg');
     } else {
-      dev.log('AccurateStepCounter: Step logging started (no warmup)');
+      _log('Step logging started (no warmup)');
     }
   }
 
@@ -398,7 +411,7 @@ class AccurateStepCounterImpl {
     await _stepLogSubscription?.cancel();
     _stepLogSubscription = null;
     _loggingEnabled = false;
-    dev.log('AccurateStepCounter: Step logging stopped');
+    _log('Step logging stopped');
   }
 
   /// Set the current app lifecycle state
@@ -425,7 +438,7 @@ class AccurateStepCounterImpl {
   /// ```
   void setAppState(AppLifecycleState state) {
     _appLifecycleState = state;
-    dev.log('AccurateStepCounter: App state changed to $state');
+    _log('App state changed to $state');
 
     // If logging is enabled and app goes to background, log current steps
     if (_loggingEnabled &&
@@ -443,7 +456,7 @@ class AccurateStepCounterImpl {
         _stepLogDatabase.logSteps(entry);
         _lastLogTime = DateTime.now();
         _lastLoggedStepCount = currentCount;
-        dev.log('AccurateStepCounter: Logged steps before background');
+        _log('Logged steps before background');
       }
     }
   }
@@ -458,7 +471,7 @@ class AccurateStepCounterImpl {
       if (_warmupStartTime == null) {
         _warmupStartTime = now;
         _warmupStartStepCount = event.stepCount;
-        dev.log('AccurateStepCounter: Warmup started');
+        _log('Warmup started');
         return;
       }
 
@@ -608,7 +621,7 @@ class AccurateStepCounterImpl {
     );
 
     await _stepLogDatabase.logSteps(entry);
-    dev.log('AccurateStepCounter: Logged $stepCount terminated steps');
+    _log('Logged $stepCount terminated steps');
   }
 
   /// Manually log a step entry
@@ -759,7 +772,7 @@ class AccurateStepCounterImpl {
   Future<void> clearStepLogs() async {
     _ensureLoggingInitialized();
     await _stepLogDatabase.clearLogs();
-    dev.log('AccurateStepCounter: All step logs cleared');
+    _log('All step logs cleared');
   }
 
   /// Delete step logs older than a specific date
@@ -774,7 +787,7 @@ class AccurateStepCounterImpl {
   Future<void> deleteStepLogsBefore(DateTime date) async {
     _ensureLoggingInitialized();
     await _stepLogDatabase.deleteLogsBefore(date);
-    dev.log('AccurateStepCounter: Deleted logs before $date');
+    _log('Deleted logs before $date');
   }
 
   /// Ensure logging is initialized, throw if not
@@ -854,7 +867,7 @@ class AccurateStepCounterImpl {
       final result = await _platform.syncStepsFromTerminated();
 
       if (result == null) {
-        dev.log('AccurateStepCounter: No steps to sync from terminated state');
+        _log('No steps to sync from terminated state');
         return null;
       }
 
@@ -865,7 +878,7 @@ class AccurateStepCounterImpl {
       dev.log(
         'AccurateStepCounter: Syncing $missedSteps steps from terminated state',
       );
-      dev.log('AccurateStepCounter: Time range: $startTime to $endTime');
+      _log('Time range: $startTime to $endTime');
 
       // Notify via callback if registered
       if (onTerminatedStepsDetected != null) {
@@ -877,7 +890,7 @@ class AccurateStepCounterImpl {
 
       return result;
     } catch (e) {
-      dev.log('AccurateStepCounter: Error syncing steps after termination: $e');
+      _log('Error syncing steps after termination: $e');
       return null;
     }
   }
