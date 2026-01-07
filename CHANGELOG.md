@@ -5,6 +5,94 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.0] - 2026-01-07
+
+### Fixed
+- 🔥 **Critical Bug Fix**: Aggregated step count now persists correctly after app restart
+  - **Root Cause**: `aggregatedStepCount` was calculating `_aggregatedOffset + currentStepCount` where `currentStepCount` resets to 0 after restart
+  - **Solution**: Separated tracking of stored steps (from DB) vs. session steps (from current run)
+  - Steps now correctly show stored value immediately on restart, not 0
+  - Fixed `_initializeAggregatedMode()` to properly initialize session tracking
+  - Fixed `writeStepsToAggregated()` to use new tracking variables
+
+### Added
+- 🚀 **Simplified API** - Health Connect-like one-call initialization
+  - `initSteps()` - One method to initialize database + start detector + enable logging
+  - `getTodayStepCount()` - Async fetch of today's total steps
+  - `getYesterdayStepCount()` - Async fetch of yesterday's total steps
+  - `getStepCount(start, end)` - Async fetch for custom date range
+  - `watchTodaySteps()` - Real-time stream of today's steps
+
+  **New Simplified Usage:**
+  ```dart
+  final stepCounter = AccurateStepCounter();
+  
+  // One-line setup!
+  await stepCounter.initSteps();
+  
+  // Get today's steps
+  final todaySteps = await stepCounter.getTodayStepCount();
+  
+  // Watch real-time updates
+  stepCounter.watchTodaySteps().listen((steps) {
+    print('Steps today: $steps');
+  });
+  
+  // Get yesterday's steps
+  final yesterdaySteps = await stepCounter.getYesterdayStepCount();
+  
+  // Custom date range
+  final weekSteps = await stepCounter.getStepCount(
+    start: DateTime.now().subtract(Duration(days: 7)),
+    end: DateTime.now(),
+  );
+  ```
+
+### Changed
+- 📱 **Example App Rewritten** - Now uses simplified API
+  - Demonstrates `initSteps()` one-call initialization
+  - Shows `watchTodaySteps()` for real-time updates
+  - Includes `getTodayStepCount()` and `getYesterdayStepCount()` examples
+  - Auto-refreshes data when coming back to foreground
+  - Cleaner, more focused UI with test scenarios
+
+- 🔧 **Internal Tracking Refactored**
+  - Replaced `_aggregatedOffset` with separate `_aggregatedStoredSteps` and `_currentSessionSteps`
+  - `_sessionBaseStepCount` tracks native detector baseline at start
+  - Clearer separation between database values and live detection
+
+### Technical Details
+- **Before (Broken):**
+  ```
+  aggregatedStepCount = _aggregatedOffset + currentStepCount
+  After restart: currentStepCount = 0 → Shows 0!
+  ```
+
+- **After (Fixed):**
+  ```
+  aggregatedStepCount = _aggregatedStoredSteps + _currentSessionSteps
+  After restart: _aggregatedStoredSteps = 100, _currentSessionSteps = 0 → Shows 100!
+  ```
+
+### Migration Guide
+No breaking changes! The old API (`initializeLogging`, `start`, `startLogging`) still works.
+
+**Recommended upgrade:**
+```dart
+// Old way (still works)
+await stepCounter.initializeLogging();
+await stepCounter.start();
+await stepCounter.startLogging(config: StepRecordConfig.aggregated());
+
+// New way (simpler!)
+await stepCounter.initSteps();
+```
+
+### Known Issues
+- None identified in this release
+
+---
+
 ## [1.4.0] - 2026-01-07
 
 ### Added

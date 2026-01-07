@@ -19,56 +19,85 @@ class _StepCounterTestAppState extends State<StepCounterTestApp>
   final _stepCounter = AccurateStepCounter();
 
   // State
+  int _todaySteps = 0;
+  int _yesterdaySteps = 0;
   int _liveStepCount = 0;
-  int _loggedSteps = 0;
-  int _aggregatedSteps = 0;
   int _fgSteps = 0;
   int _bgSteps = 0;
   int _termSteps = 0;
-  bool _isTracking = false;
-  bool _isAggregatedMode = false;
-  String _currentPreset = 'None';
+  bool _isInitialized = false;
   String _appState = 'resumed';
   final List<String> _logMessages = [];
 
+  StreamSubscription<int>? _todaySubscription;
   StreamSubscription<StepCountEvent>? _stepSubscription;
-  StreamSubscription<int>? _totalSubscription;
-  StreamSubscription<int>? _aggregatedSubscription;
 
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
-    _initLogging();
+    _initStepCounter();
   }
 
-  Future<void> _initLogging() async {
-    await _stepCounter.initializeLogging();
-    _log('Database initialized');
+  /// Initialize step counter using the simplified API
+  Future<void> _initStepCounter() async {
+    try {
+      // Simple one-line initialization!
+      await _stepCounter.initSteps(debugLogging: true);
 
-    // Listen to live steps
-    _stepSubscription = _stepCounter.stepEventStream.listen((event) {
-      setState(() => _liveStepCount = event.stepCount);
+      setState(() => _isInitialized = true);
+      _log('Step counter initialized successfully!');
+
+      // Watch today's steps in real-time
+      _todaySubscription = _stepCounter.watchTodaySteps().listen((steps) {
+        setState(() => _todaySteps = steps);
+        _log('Today steps updated: $steps');
+        _updateSourceStats();
+      });
+
+      // Also listen to raw step events for debugging
+      _stepSubscription = _stepCounter.stepEventStream.listen((event) {
+        setState(() => _liveStepCount = event.stepCount);
+      });
+
+      // Set callback for terminated steps
+      _stepCounter.onTerminatedStepsDetected = (steps, from, to) {
+        _log(
+          'TERMINATED: $steps steps synced from ${from.toString().split('.')[0]} to ${to.toString().split('.')[0]}',
+        );
+      };
+
+      // Load initial data
+      await _refreshData();
+    } catch (e) {
+      _log('Error initializing: $e');
+    }
+  }
+
+  /// Refresh all step data
+  Future<void> _refreshData() async {
+    if (!_isInitialized) return;
+
+    final today = await _stepCounter.getTodayStepCount();
+    final yesterday = await _stepCounter.getYesterdayStepCount();
+
+    setState(() {
+      _todaySteps = today;
+      _yesterdaySteps = yesterday;
     });
 
-    // Listen to logged total
-    _totalSubscription = _stepCounter.watchTotalSteps().listen((total) {
-      setState(() => _loggedSteps = total);
-      _updateSourceStats();
-    });
-
-    // Set callback for terminated steps
-    _stepCounter.onTerminatedStepsDetected = (steps, from, to) {
-      _log('TERMINATED: $steps steps synced');
-    };
-
-    _updateSourceStats();
+    await _updateSourceStats();
+    _log('Data refreshed - Today: $today, Yesterday: $yesterday');
   }
 
   Future<void> _updateSourceStats() async {
+    if (!_isInitialized) return;
+
     final fg = await _stepCounter.getStepsBySource(StepRecordSource.foreground);
     final bg = await _stepCounter.getStepsBySource(StepRecordSource.background);
-    final term = await _stepCounter.getStepsBySource(StepRecordSource.terminated);
+    final term = await _stepCounter.getStepsBySource(
+      StepRecordSource.terminated,
+    );
     setState(() {
       _fgSteps = fg;
       _bgSteps = bg;
@@ -81,88 +110,68 @@ class _StepCounterTestAppState extends State<StepCounterTestApp>
     _stepCounter.setAppState(state);
     setState(() => _appState = state.name);
     _log('App state: ${state.name}');
+
+    // Refresh data when coming back to foreground
+    if (state == AppLifecycleState.resumed) {
+      _refreshData();
+    }
   }
 
   void _log(String message) {
     final now = DateTime.now();
-    final time = '${now.hour}:${now.minute}:${now.second}';
+    final time =
+        '${now.hour.toString().padLeft(2, '0')}:${now.minute.toString().padLeft(2, '0')}:${now.second.toString().padLeft(2, '0')}';
     setState(() {
       _logMessages.insert(0, '[$time] $message');
-      if (_logMessages.length > 20) _logMessages.removeLast();
+      if (_logMessages.length > 30) _logMessages.removeLast();
     });
   }
 
-  Future<void> _startWithPreset(String preset, StepRecordConfig config) async {
-    if (_isTracking) await _stop();
-
+  Future<void> _testCustomRange() async {
     try {
-      await _stepCounter.start(config: StepDetectorConfig.walking());
-      await _stepCounter.startLogging(config: config);
+      // Test: Get last 7 days
+      final weekSteps = await _stepCounter.getStepCount(
+        start: DateTime.now().subtract(const Duration(days: 7)),
+        end: DateTime.now(),
+      );
+      _log('Last 7 days: $weekSteps steps');
 
-      // Check if aggregated mode is enabled
-      final isAggregated = config.enableAggregatedMode;
-
-      setState(() {
-        _isTracking = true;
-        _isAggregatedMode = isAggregated;
-        _currentPreset = preset;
-      });
-
-      // Listen to aggregated stream if enabled
-      if (isAggregated) {
-        await _aggregatedSubscription?.cancel();
-        _aggregatedSubscription =
-            _stepCounter.watchAggregatedStepCounter().listen((count) {
-          setState(() => _aggregatedSteps = count);
-        });
-        _log('Started with $preset preset (AGGREGATED MODE)');
-      } else {
-        _log('Started with $preset preset');
-      }
+      // Test: Get last 30 days
+      final monthSteps = await _stepCounter.getStepCount(
+        start: DateTime.now().subtract(const Duration(days: 30)),
+        end: DateTime.now(),
+      );
+      _log('Last 30 days: $monthSteps steps');
     } catch (e) {
-      _log('Error: $e');
+      _log('Error getting custom range: $e');
     }
   }
 
-  Future<void> _stop() async {
-    await _aggregatedSubscription?.cancel();
-    await _stepCounter.stopLogging();
-    await _stepCounter.stop();
-    setState(() {
-      _isTracking = false;
-      _isAggregatedMode = false;
-      _currentPreset = 'None';
-    });
-    _log('Stopped');
-  }
-
-  Future<void> _clearLogs() async {
+  Future<void> _clearAllData() async {
     await _stepCounter.clearStepLogs();
     _stepCounter.reset();
     setState(() {
+      _todaySteps = 0;
+      _yesterdaySteps = 0;
       _liveStepCount = 0;
-      _aggregatedSteps = 0;
+      _fgSteps = 0;
+      _bgSteps = 0;
+      _termSteps = 0;
     });
-    _log('Logs cleared');
-    _updateSourceStats();
+    _log('All step data cleared');
   }
 
-  Future<void> _manuallyAddSteps() async {
-    if (!_isAggregatedMode) {
-      _log('Error: Manual add only works in aggregated mode');
-      return;
-    }
-
+  Future<void> _addTestSteps() async {
     try {
-      // Write 50 steps to the database
+      // Manually add 50 test steps
       await _stepCounter.writeStepsToAggregated(
         stepCount: 50,
         fromTime: DateTime.now().subtract(const Duration(minutes: 5)),
         toTime: DateTime.now(),
         source: StepRecordSource.foreground,
       );
-      _log('Manually added 50 steps');
-      _updateSourceStats();
+      _log('Added 50 test steps');
+      await _refreshData();
     } catch (e) {
       _log('Error adding steps: $e');
     }
@@ -171,9 +180,8 @@ class _StepCounterTestAppState extends State<StepCounterTestApp>
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    _todaySubscription?.cancel();
     _stepSubscription?.cancel();
-    _totalSubscription?.cancel();
-    _aggregatedSubscription?.cancel();
     _stepCounter.dispose();
     super.dispose();
   }
@@ -202,16 +210,20 @@ class _StepCounterTestAppState extends State<StepCounterTestApp>
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              // Stats Card
-              _buildStatsCard(),
+              // Main Stats
+              _buildMainStatsCard(),
               const SizedBox(height: 16),
 
-              // Preset Buttons
-              _buildPresetSection(),
+              // Source Breakdown
+              _buildSourceBreakdownCard(),
               const SizedBox(height: 16),
 
-              // Control Buttons
-              _buildControlButtons(),
+              // Action Buttons
+              _buildActionButtons(),
+              const SizedBox(height: 16),
+
+              // Test Scenarios
+              _buildTestScenarios(),
               const SizedBox(height: 16),
 
               // Log Output
@@ -223,46 +235,73 @@ class _StepCounterTestAppState extends State<StepCounterTestApp>
     );
   }
 
-  Widget _buildStatsCard() {
+  Widget _buildMainStatsCard() {
     return Card(
       child: Padding(
         padding: const EdgeInsets.all(16),
         child: Column(
           children: [
-            if (_isAggregatedMode)
-              Column(
-                children: [
-                  Text(
-                    'Aggregated: $_aggregatedSteps',
-                    style: const TextStyle(
-                      fontSize: 32,
-                      fontWeight: FontWeight.bold,
-                      color: Colors.tealAccent,
-                    ),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                const Text('Today\'s Steps', style: TextStyle(fontSize: 16)),
+                Text(
+                  '$_todaySteps',
+                  style: const TextStyle(
+                    fontSize: 48,
+                    fontWeight: FontWeight.bold,
+                    color: Colors.tealAccent,
                   ),
-                  const Text(
-                    '(Today\'s stored + Live)',
-                    style: TextStyle(fontSize: 12, color: Colors.grey),
-                  ),
-                  const Divider(),
-                ],
-              )
-            else
-              Text(
-                'Live: $_liveStepCount | Logged: $_loggedSteps',
-                style: const TextStyle(fontSize: 24, fontWeight: FontWeight.bold),
-              ),
+                ),
+              ],
+            ),
             const Divider(),
             Row(
               mainAxisAlignment: MainAxisAlignment.spaceAround,
               children: [
-                _statItem('FG', _fgSteps, Colors.green),
-                _statItem('BG', _bgSteps, Colors.orange),
-                _statItem('TERM', _termSteps, Colors.red),
+                _buildMiniStat('Yesterday', '$_yesterdaySteps'),
+                _buildMiniStat('Live Count', '$_liveStepCount'),
+                _buildMiniStat(
+                  'Status',
+                  _isInitialized ? 'Active' : 'Initializing...',
+                ),
               ],
             ),
-            const SizedBox(height: 8),
-            Text('Preset: $_currentPreset'),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildMiniStat(String label, String value) {
+    return Column(
+      children: [
+        Text(label, style: const TextStyle(fontSize: 12, color: Colors.grey)),
+        Text(value, style: const TextStyle(fontSize: 18)),
+      ],
+    );
+  }
+
+  Widget _buildSourceBreakdownCard() {
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              'Source Breakdown',
+              style: TextStyle(fontWeight: FontWeight.bold),
+            ),
+            const SizedBox(height: 12),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceAround,
+              children: [
+                _statItem('Foreground', _fgSteps, Colors.green),
+                _statItem('Background', _bgSteps, Colors.orange),
+                _statItem('Terminated', _termSteps, Colors.red),
+              ],
+            ),
           ],
         ),
       ),
@@ -277,7 +316,7 @@ class _StepCounterTestAppState extends State<StepCounterTestApp>
           '$value',
           style: TextStyle(
             color: color,
-            fontSize: 20,
+            fontSize: 24,
             fontWeight: FontWeight.bold,
           ),
         ),
@@ -285,7 +324,59 @@ class _StepCounterTestAppState extends State<StepCounterTestApp>
     );
   }
 
-  Widget _buildPresetSection() {
+  Widget _buildActionButtons() {
+    return Column(
+      children: [
+        Row(
+          children: [
+            Expanded(
+              child: ElevatedButton.icon(
+                onPressed: _refreshData,
+                icon: const Icon(Icons.refresh),
+                label: const Text('Refresh'),
+              ),
+            ),
+            const SizedBox(width: 8),
+            Expanded(
+              child: ElevatedButton.icon(
+                onPressed: _clearAllData,
+                icon: const Icon(Icons.delete),
+                label: const Text('Clear All'),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: Colors.red[700],
+                ),
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 8),
+        Row(
+          children: [
+            Expanded(
+              child: ElevatedButton.icon(
+                onPressed: _addTestSteps,
+                icon: const Icon(Icons.add),
+                label: const Text('Add 50 Steps'),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: Colors.purple[700],
+                ),
+              ),
+            ),
+            const SizedBox(width: 8),
+            Expanded(
+              child: ElevatedButton.icon(
+                onPressed: _testCustomRange,
+                icon: const Icon(Icons.date_range),
+                label: const Text('Test Ranges'),
+              ),
+            ),
+          ],
+        ),
+      ],
+    );
+  }
+
+  Widget _buildTestScenarios() {
     return Card(
       child: Padding(
         padding: const EdgeInsets.all(12),
@@ -293,89 +384,22 @@ class _StepCounterTestAppState extends State<StepCounterTestApp>
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             const Text(
-              'Start with Preset:',
+              'Test Scenarios',
               style: TextStyle(fontWeight: FontWeight.bold),
             ),
             const SizedBox(height: 8),
-            Wrap(
-              spacing: 8,
-              runSpacing: 8,
-              children: [
-                _presetButton('Aggregated', StepRecordConfig.aggregated(),
-                    isSpecial: true),
-                _presetButton('Walking', StepRecordConfig.walking()),
-                _presetButton('Running', StepRecordConfig.running()),
-                _presetButton('Sensitive', StepRecordConfig.sensitive()),
-                _presetButton('Conservative', StepRecordConfig.conservative()),
-                _presetButton(
-                  'No Validation',
-                  StepRecordConfig.noValidation(),
-                ),
-              ],
+            const Text(
+              '1. Fresh start: Open app, walk 20 steps\n'
+              '2. Restart test: Close app, reopen - count should persist\n'
+              '3. Background: Put app in background, walk, return\n'
+              '4. Terminated: Force-kill app, walk, reopen\n'
+              '5. Day boundary: Walk before/after midnight\n'
+              '6. Custom range: Test week/month queries',
+              style: TextStyle(fontSize: 12, color: Colors.grey),
             ),
           ],
         ),
       ),
-    );
-  }
-
-  Widget _presetButton(String name, StepRecordConfig config,
-      {bool isSpecial = false}) {
-    final isActive = _currentPreset == name;
-    return ElevatedButton(
-      onPressed: () => _startWithPreset(name, config),
-      style: ElevatedButton.styleFrom(
-        backgroundColor: isActive
-            ? (isSpecial ? Colors.tealAccent : Colors.teal)
-            : (isSpecial ? Colors.teal[800] : null),
-      ),
-      child: Text(
-        name,
-        style: TextStyle(
-          fontWeight: isSpecial ? FontWeight.bold : FontWeight.normal,
-        ),
-      ),
-    );
-  }
-
-  Widget _buildControlButtons() {
-    return Column(
-      children: [
-        Row(
-          children: [
-            Expanded(
-              child: ElevatedButton.icon(
-                onPressed: _isTracking ? _stop : null,
-                icon: const Icon(Icons.stop),
-                label: const Text('Stop'),
-                style: ElevatedButton.styleFrom(backgroundColor: Colors.red[700]),
-              ),
-            ),
-            const SizedBox(width: 8),
-            Expanded(
-              child: ElevatedButton.icon(
-                onPressed: _clearLogs,
-                icon: const Icon(Icons.delete),
-                label: const Text('Clear'),
-              ),
-            ),
-          ],
-        ),
-        if (_isAggregatedMode) ...[
-          const SizedBox(height: 8),
-          SizedBox(
-            width: double.infinity,
-            child: ElevatedButton.icon(
-              onPressed: _manuallyAddSteps,
-              icon: const Icon(Icons.add),
-              label: const Text('Add 50 Steps Manually'),
-              style: ElevatedButton.styleFrom(
-                backgroundColor: Colors.purple[700],
-              ),
-            ),
-          ),
-        ],
-      ],
     );
   }
 
@@ -402,7 +426,7 @@ class _StepCounterTestAppState extends State<StepCounterTestApp>
                     _logMessages[index],
                     style: const TextStyle(
                       fontFamily: 'monospace',
-                      fontSize: 12,
+                      fontSize: 11,
                       color: Colors.greenAccent,
                     ),
                   );

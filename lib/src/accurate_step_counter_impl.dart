@@ -44,7 +44,15 @@ class AccurateStepCounterImpl {
 
   // Aggregated mode tracking
   bool _aggregatedModeEnabled = false;
-  int _aggregatedOffset = 0;
+
+  /// Steps loaded from database at initialization (today's stored steps)
+  int _aggregatedStoredSteps = 0;
+
+  /// Steps counted in current session (since last init/restart)
+  int _currentSessionSteps = 0;
+
+  /// Base step count from native detector at session start
+  int _sessionBaseStepCount = 0;
   final StreamController<int> _aggregatedStepController =
       StreamController<int>.broadcast();
 
@@ -55,12 +63,6 @@ class AccurateStepCounterImpl {
   int _minStepsToValidate = 10;
   double _maxStepsPerSecond = 5.0;
   int _warmupStartStepCount = 0;
-
-  // Inactivity detection state
-  int _inactivityTimeoutMs = 0;
-  DateTime? _lastStepTime;
-  Timer? _inactivityTimer;
-  bool _isSessionPaused = false;
 
   /// Callback for handling missed steps from terminated state
   /// Parameters: (missedSteps, startTime, endTime)
@@ -321,7 +323,137 @@ class AccurateStepCounterImpl {
   }
 
   // ============================================================
-  // Step Logging API (Health Connect-like)
+  // Simplified API (Health Connect-like)
+  // ============================================================
+
+  /// Initialize step counting with one simple call
+  ///
+  /// This is the recommended way to start step counting. It:
+  /// 1. Initializes the database
+  /// 2. Starts the native step detector
+  /// 3. Enables aggregated logging mode
+  ///
+  /// After calling this, use [getTodayStepCount], [getYesterdayStepCount],
+  /// or [watchTodaySteps] to access step data.
+  ///
+  /// Example:
+  /// ```dart
+  /// final stepCounter = AccurateStepCounter();
+  ///
+  /// // One-time setup
+  /// await stepCounter.initSteps();
+  ///
+  /// // Get today's steps
+  /// final todaySteps = await stepCounter.getTodayStepCount();
+  ///
+  /// // Watch real-time updates
+  /// stepCounter.watchTodaySteps().listen((steps) {
+  ///   print('Steps today: $steps');
+  /// });
+  /// ```
+  Future<void> initSteps({bool debugLogging = false}) async {
+    await initializeLogging(debugLogging: debugLogging);
+    await start(config: StepDetectorConfig.walking());
+    await startLogging(config: StepRecordConfig.aggregated());
+  }
+
+  /// Get today's step count (since midnight)
+  ///
+  /// Returns the total steps recorded today, including steps from
+  /// foreground, background, and terminated states.
+  ///
+  /// Works even if step detection is not currently active.
+  ///
+  /// Example:
+  /// ```dart
+  /// final todaySteps = await stepCounter.getTodayStepCount();
+  /// print('Steps today: $todaySteps');
+  /// ```
+  Future<int> getTodayStepCount() async {
+    _ensureLoggingInitialized();
+    final now = DateTime.now();
+    final startOfToday = DateTime(now.year, now.month, now.day);
+    return await _stepRecordStore.readTotalSteps(from: startOfToday, to: now);
+  }
+
+  /// Get yesterday's step count
+  ///
+  /// Returns the total steps recorded yesterday (full 24-hour period).
+  ///
+  /// Example:
+  /// ```dart
+  /// final yesterdaySteps = await stepCounter.getYesterdayStepCount();
+  /// print('Steps yesterday: $yesterdaySteps');
+  /// ```
+  Future<int> getYesterdayStepCount() async {
+    _ensureLoggingInitialized();
+    final now = DateTime.now();
+    final startOfToday = DateTime(now.year, now.month, now.day);
+    final startOfYesterday = startOfToday.subtract(const Duration(days: 1));
+    return await _stepRecordStore.readTotalSteps(
+      from: startOfYesterday,
+      to: startOfToday,
+    );
+  }
+
+  /// Get step count for a custom date range
+  ///
+  /// [start] - Start of the date range (will be set to midnight)
+  /// [end] - End of the date range (will be set to end of day or now if today)
+  ///
+  /// Example:
+  /// ```dart
+  /// // Get steps for last 7 days
+  /// final weekSteps = await stepCounter.getStepCount(
+  ///   start: DateTime.now().subtract(Duration(days: 7)),
+  ///   end: DateTime.now(),
+  /// );
+  /// ```
+  Future<int> getStepCount({
+    required DateTime start,
+    required DateTime end,
+  }) async {
+    _ensureLoggingInitialized();
+
+    // Set start to midnight of start date
+    final startMidnight = DateTime(start.year, start.month, start.day);
+
+    // Set end to midnight of end date, or now if end is today
+    final now = DateTime.now();
+    final endMidnight = DateTime(end.year, end.month, end.day);
+    final isEndToday =
+        endMidnight.year == now.year &&
+        endMidnight.month == now.month &&
+        endMidnight.day == now.day;
+
+    final endTime = isEndToday ? now : endMidnight.add(const Duration(days: 1));
+
+    return await _stepRecordStore.readTotalSteps(
+      from: startMidnight,
+      to: endTime,
+    );
+  }
+
+  /// Watch today's step count in real-time
+  ///
+  /// Returns a stream that emits the current total immediately,
+  /// then updates whenever new steps are logged.
+  ///
+  /// Example:
+  /// ```dart
+  /// stepCounter.watchTodaySteps().listen((steps) {
+  ///   print('Steps today: $steps');
+  /// });
+  /// ```
+  Stream<int> watchTodaySteps() {
+    _ensureLoggingInitialized();
+    final now = DateTime.now();
+    final startOfToday = DateTime(now.year, now.month, now.day);
+    return _stepRecordStore.watchTotalSteps(from: startOfToday);
+  }
+
+  // ============================================================
+  // Step Logging API (Advanced - Health Connect-like)
   // ============================================================
 
   /// Initialize the step logging database
@@ -426,7 +558,9 @@ class AccurateStepCounterImpl {
     });
 
     if (_aggregatedModeEnabled) {
-      _log('Aggregated step logging started - loaded $_aggregatedOffset steps from today');
+      _log(
+        'Aggregated step logging started - loaded $_aggregatedStoredSteps steps from today',
+      );
     } else if (_isInWarmup) {
       _log('Step logging started with $cfg');
     } else {
@@ -449,15 +583,20 @@ class AccurateStepCounterImpl {
     final startOfToday = DateTime(now.year, now.month, now.day);
 
     // Load today's steps from Hive
-    final todaySteps =
-        await _stepRecordStore.readTotalSteps(from: startOfToday, to: now);
+    final todaySteps = await _stepRecordStore.readTotalSteps(
+      from: startOfToday,
+      to: now,
+    );
 
-    // Set offset so live counter starts from stored count
-    _aggregatedOffset = todaySteps;
+    // Store today's steps from database
+    _aggregatedStoredSteps = todaySteps;
+    // Reset session tracking
+    _currentSessionSteps = 0;
+    _sessionBaseStepCount = currentStepCount;
 
-    // Emit initial value to stream
+    // Emit initial value to stream immediately (this is the fix!)
     if (!_aggregatedStepController.isClosed) {
-      _aggregatedStepController.add(todaySteps);
+      _aggregatedStepController.add(_aggregatedStoredSteps);
     }
 
     _log('Initialized aggregated mode: $todaySteps steps from today');
@@ -533,8 +672,13 @@ class AccurateStepCounterImpl {
       _lastRecordTime = now;
       _lastRecordedStepCount = event.stepCount;
 
-      // Emit aggregated count
-      _aggregatedStepController.add(_aggregatedOffset + event.stepCount);
+      // Update session steps tracking
+      _currentSessionSteps = event.stepCount - _sessionBaseStepCount;
+
+      // Emit aggregated count (stored from DB + new session steps)
+      _aggregatedStepController.add(
+        _aggregatedStoredSteps + _currentSessionSteps,
+      );
       return;
     }
 
@@ -583,8 +727,13 @@ class AccurateStepCounterImpl {
 
       _log('Logged $newSteps steps (source: $source)');
 
-      // Emit aggregated count (stored + current live)
-      _aggregatedStepController.add(_aggregatedOffset + event.stepCount);
+      // Update session steps tracking
+      _currentSessionSteps = event.stepCount - _sessionBaseStepCount;
+
+      // Emit aggregated count (stored from DB + new session steps)
+      _aggregatedStepController.add(
+        _aggregatedStoredSteps + _currentSessionSteps,
+      );
     }
 
     _lastRecordTime = now;
@@ -931,11 +1080,14 @@ class AccurateStepCounterImpl {
     // Set end to midnight of endDate, or now if endDate is today
     final now = DateTime.now();
     final endOfEndDate = DateTime(endDate.year, endDate.month, endDate.day);
-    final isEndDateToday = endOfEndDate.year == now.year &&
+    final isEndDateToday =
+        endOfEndDate.year == now.year &&
         endOfEndDate.month == now.month &&
         endOfEndDate.day == now.day;
 
-    final end = isEndDateToday ? now : endOfEndDate.add(const Duration(days: 1));
+    final end = isEndDateToday
+        ? now
+        : endOfEndDate.add(const Duration(days: 1));
 
     return await _stepRecordStore.readTotalSteps(from: start, to: end);
   }
@@ -1081,7 +1233,8 @@ class AccurateStepCounterImpl {
         'StepRecordConfig.aggregated() or set enableAggregatedMode: true',
       );
     }
-    return _aggregatedOffset + currentStepCount;
+    // Return stored steps + current session steps (not raw currentStepCount!)
+    return _aggregatedStoredSteps + _currentSessionSteps;
   }
 
   /// Manually write steps to aggregated database
@@ -1159,19 +1312,21 @@ class AccurateStepCounterImpl {
     await _stepRecordStore.insertRecord(entry);
     _log('Manually wrote $stepCount steps to aggregated database');
 
-    // Update offset to include the new steps
+    // Update stored steps to include the new manually added steps
     final now = DateTime.now();
     final startOfToday = DateTime(now.year, now.month, now.day);
 
     // Recalculate today's total from database
-    final todayTotal =
-        await _stepRecordStore.readTotalSteps(from: startOfToday, to: now);
+    final todayTotal = await _stepRecordStore.readTotalSteps(
+      from: startOfToday,
+      to: now,
+    );
 
-    // Update offset - this is the stored steps, live counter continues from sensor
-    _aggregatedOffset = todayTotal - currentStepCount;
+    // Update stored steps count
+    _aggregatedStoredSteps = todayTotal;
 
     // Emit updated aggregated count
-    final newAggregatedCount = _aggregatedOffset + currentStepCount;
+    final newAggregatedCount = _aggregatedStoredSteps + _currentSessionSteps;
     if (!_aggregatedStepController.isClosed) {
       _aggregatedStepController.add(newAggregatedCount);
     }
