@@ -1212,8 +1212,17 @@ class AccurateStepCounterImpl {
       );
     }
 
-    // Return stream that combines stored + live
-    return _aggregatedStepController.stream;
+    // Use async* generator to emit initial value first, then forward stream
+    Stream<int> streamWithInitial() async* {
+      // Emit current value immediately on subscribe
+      yield _aggregatedStoredSteps + _currentSessionSteps;
+      // Then forward all future events
+      await for (final value in _aggregatedStepController.stream) {
+        yield value;
+      }
+    }
+
+    return streamWithInitial();
   }
 
   /// Get current aggregated step count (stored + live)
