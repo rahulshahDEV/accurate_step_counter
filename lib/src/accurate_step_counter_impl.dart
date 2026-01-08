@@ -169,8 +169,11 @@ class AccurateStepCounterImpl {
         if (_currentConfig!.enableOsLevelSync) {
           await _platform.initialize();
 
-          // Sync any steps from previous session (if service was running)
-          await _syncStepsFromForegroundService();
+          // NOTE: We do NOT sync foreground service steps here because:
+          // 1. If app was active, steps were already logged via polling/EventChannel
+          // 2. If app was terminated, the foreground service continues its session
+          //    and the steps will be counted when polling resumes
+          // 3. Syncing here would cause duplicate step counting
         }
 
         // Start the foreground service immediately (NOT on termination)
