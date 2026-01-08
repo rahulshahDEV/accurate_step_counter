@@ -143,12 +143,9 @@ class AccurateStepCounterImpl {
     }
 
     _currentConfig = config ?? const StepDetectorConfig();
-
-    // HYBRID ARCHITECTURE:
-    // - Always use native detector for foreground/background (realtime)
-    // - Configure foreground service to auto-start when app is terminated on older APIs
     _useForegroundService = false;
 
+    // For Android, check if we should use foreground service
     if (Platform.isAndroid) {
       final androidVersion = await _platform.getAndroidVersion();
       final maxApiLevel = _currentConfig!.foregroundServiceMaxApiLevel;
@@ -157,32 +154,48 @@ class AccurateStepCounterImpl {
         'AccurateStepCounter: Foreground service max API level is $maxApiLevel',
       );
 
-      // Configure foreground service to auto-start when app terminates (older APIs only)
-      if (_currentConfig!.useForegroundServiceOnOldDevices) {
-        await _platform.configureForegroundServiceOnTerminated(
-          enabled: true,
-          maxApiLevel: maxApiLevel,
+      // Use PERSISTENT foreground service for Android ≤ configured level
+      // This ensures OEM battery optimization (MIUI, Samsung) doesn't kill the service
+      if (_currentConfig!.useForegroundServiceOnOldDevices &&
+          androidVersion > 0 &&
+          androidVersion <= maxApiLevel) {
+        dev.log(
+          'AccurateStepCounter: Using PERSISTENT foreground service for API ≤$maxApiLevel (OEM-compatible)',
+        );
+        _useForegroundService = true;
+
+        // Initialize platform for OS-level sync and foreground service
+        if (_currentConfig!.enableOsLevelSync) {
+          await _platform.initialize();
+
+          // Sync any steps from previous session (if service was running)
+          await _syncStepsFromForegroundService();
+        }
+
+        // Start the foreground service immediately (NOT on termination)
+        // This keeps the service running in ALL states for OEM compatibility
+        await _platform.startForegroundService(
           title: _currentConfig!.foregroundNotificationTitle,
           text: _currentConfig!.foregroundNotificationText,
         );
-        dev.log(
-          'AccurateStepCounter: Configured foreground service for terminated state (API ≤$maxApiLevel)',
-        );
+
+        // Start polling for step count updates (realtime UI updates)
+        _startForegroundStepPolling();
+
+        _isStarted = true;
+        return;
       }
 
-      // Initialize platform channel for OS-level sync (if enabled)
+      // For Android 11+, use native detector + OS-level sync for terminated state
       if (_currentConfig!.enableOsLevelSync) {
         await _platform.initialize();
-
-        // Sync steps from foreground service (if it was running from previous termination)
-        await _syncStepsFromForegroundService();
 
         // Sync steps from terminated state (TYPE_STEP_COUNTER)
         await _syncStepsFromTerminatedState();
       }
     }
 
-    // Always start native step detection for realtime behavior
+    // For Android 11+ or iOS, start native step detection
     await _nativeDetector.start(config: _currentConfig);
 
     _isStarted = true;

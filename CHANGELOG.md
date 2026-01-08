@@ -5,6 +5,31 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.7.1] - 2026-01-08
+
+### Changed
+- 📱 **OEM-Compatible Foreground Service** - Fixed for MIUI, Samsung, and other aggressive OEM devices
+  - Reverted to **persistent foreground service** for Android ≤ configured level (default: API 29)
+  - Service starts **immediately** on `start()` for all app states (foreground, background, terminated)
+  - Prevents OEM battery optimization from killing the step tracker
+  - Realtime UI updates via polling (every 500ms)
+
+### Why This Change?
+The hybrid architecture in v1.7.0 (auto-starting service on termination) was getting blocked by:
+- MIUI's aggressive battery optimization
+- Samsung's battery management
+- Other OEM-specific power saving features
+
+This version ensures reliable step tracking on all Android devices by keeping the foreground service running persistently on older Android versions.
+
+### Behavior
+| Android Version | All App States |
+|-----------------|----------------|
+| **≤ configured API** | Foreground service with notification (realtime polling) |
+| **> configured API** | Native detector + TYPE_STEP_COUNTER sync |
+
+---
+
 ## [1.7.0] - 2026-01-08
 
 ### Added

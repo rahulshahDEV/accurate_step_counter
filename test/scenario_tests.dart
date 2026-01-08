@@ -620,4 +620,340 @@ void main() {
       expect(config.foregroundServiceMaxApiLevel, 32);
     });
   });
+
+  // ============================================================
+  // REAL-LIFE TEST SCENARIOS
+  // ============================================================
+
+  group('Scenario 9: Android ≤10 Foreground Service Mode', () {
+    late AccurateStepCounter stepCounter;
+
+    setUp(() {
+      stepCounter = AccurateStepCounter();
+    });
+
+    tearDown(() async {
+      await stepCounter.dispose();
+    });
+
+    test('9.1 Config for foreground service mode is correct', () {
+      // Simulate Android 10 config
+      final config = StepDetectorConfig(
+        useForegroundServiceOnOldDevices: true,
+        foregroundServiceMaxApiLevel: 29,
+        foregroundNotificationTitle: 'Step Counter',
+        foregroundNotificationText: 'Tracking your steps...',
+      );
+
+      expect(config.useForegroundServiceOnOldDevices, true);
+      expect(config.foregroundServiceMaxApiLevel, 29);
+      expect(config.foregroundNotificationTitle, 'Step Counter');
+      expect(config.foregroundNotificationText, 'Tracking your steps...');
+    });
+
+    test('9.2 Steps logged correctly in foreground service mode', () async {
+      await stepCounter.initializeLogging(debugLogging: false);
+
+      final now = DateTime.now();
+
+      // Simulate steps from foreground service (background source when using service)
+      await stepCounter.insertRecord(
+        StepRecord(
+          stepCount: 150,
+          fromTime: now.subtract(const Duration(hours: 1)),
+          toTime: now,
+          source: StepRecordSource.background,
+        ),
+      );
+
+      final total = await stepCounter.getTotalSteps();
+      expect(total, 150);
+
+      final bgSteps = await stepCounter.getStepsBySource(
+        StepRecordSource.background,
+      );
+      expect(bgSteps, 150);
+    });
+
+    test('9.3 Session restart does not duplicate steps', () async {
+      await stepCounter.initializeLogging(debugLogging: false);
+
+      final now = DateTime.now();
+
+      // First session - 100 steps
+      await stepCounter.insertRecord(
+        StepRecord(
+          stepCount: 100,
+          fromTime: now.subtract(const Duration(hours: 2)),
+          toTime: now.subtract(const Duration(hours: 1)),
+          source: StepRecordSource.background,
+        ),
+      );
+
+      // Second session - 50 NEW steps (not cumulative)
+      await stepCounter.insertRecord(
+        StepRecord(
+          stepCount: 50,
+          fromTime: now.subtract(const Duration(hours: 1)),
+          toTime: now,
+          source: StepRecordSource.background,
+        ),
+      );
+
+      // Total should be 150 (no duplication)
+      final total = await stepCounter.getTotalSteps();
+      expect(total, 150);
+
+      // Should have 2 records
+      final logs = await stepCounter.getStepLogs();
+      expect(logs.length, 2);
+    });
+
+    test('9.4 Terminated steps sync on restart', () async {
+      await stepCounter.initializeLogging(debugLogging: false);
+
+      final now = DateTime.now();
+
+      // Simulate terminated sync (steps from foreground service while app was killed)
+      await stepCounter.insertRecord(
+        StepRecord(
+          stepCount: 200,
+          fromTime: now.subtract(const Duration(hours: 3)),
+          toTime: now,
+          source: StepRecordSource.terminated,
+        ),
+      );
+
+      final total = await stepCounter.getTotalSteps();
+      expect(total, 200);
+
+      final terminatedSteps = await stepCounter.getStepsBySource(
+        StepRecordSource.terminated,
+      );
+      expect(terminatedSteps, 200);
+    });
+  });
+
+  group('Scenario 10: Android 11+ Native Detector Mode', () {
+    late AccurateStepCounter stepCounter;
+
+    setUp(() {
+      stepCounter = AccurateStepCounter();
+    });
+
+    tearDown(() async {
+      await stepCounter.dispose();
+    });
+
+    test('10.1 Config for native detector mode is correct', () {
+      // Default config works for Android 11+
+      final config = const StepDetectorConfig();
+
+      expect(config.enableOsLevelSync, true);
+      expect(config.useForegroundServiceOnOldDevices, true);
+      // Android 11+ (API 30+) won't trigger foreground service
+    });
+
+    test('10.2 Foreground steps logged correctly', () async {
+      await stepCounter.initializeLogging(debugLogging: false);
+
+      final now = DateTime.now();
+
+      // Steps while app in foreground
+      await stepCounter.insertRecord(
+        StepRecord(
+          stepCount: 100,
+          fromTime: now.subtract(const Duration(minutes: 30)),
+          toTime: now,
+          source: StepRecordSource.foreground,
+        ),
+      );
+
+      final fgSteps = await stepCounter.getStepsBySource(
+        StepRecordSource.foreground,
+      );
+      expect(fgSteps, 100);
+    });
+
+    test('10.3 Background steps logged correctly', () async {
+      await stepCounter.initializeLogging(debugLogging: false);
+
+      final now = DateTime.now();
+
+      // Steps while app in background
+      await stepCounter.insertRecord(
+        StepRecord(
+          stepCount: 75,
+          fromTime: now.subtract(const Duration(minutes: 20)),
+          toTime: now,
+          source: StepRecordSource.background,
+        ),
+      );
+
+      final bgSteps = await stepCounter.getStepsBySource(
+        StepRecordSource.background,
+      );
+      expect(bgSteps, 75);
+    });
+
+    test('10.4 Terminated state sync logged correctly', () async {
+      await stepCounter.initializeLogging(debugLogging: false);
+
+      final now = DateTime.now();
+
+      // Steps synced from TYPE_STEP_COUNTER after app termination
+      await stepCounter.insertRecord(
+        StepRecord(
+          stepCount: 500,
+          fromTime: now.subtract(const Duration(hours: 8)),
+          toTime: now,
+          source: StepRecordSource.terminated,
+        ),
+      );
+
+      final terminatedSteps = await stepCounter.getStepsBySource(
+        StepRecordSource.terminated,
+      );
+      expect(terminatedSteps, 500);
+    });
+
+    test('10.5 All sources combined correctly', () async {
+      await stepCounter.initializeLogging(debugLogging: false);
+
+      final now = DateTime.now();
+
+      // Mixed sources
+      await stepCounter.insertRecord(
+        StepRecord(
+          stepCount: 100,
+          fromTime: now.subtract(const Duration(hours: 4)),
+          toTime: now.subtract(const Duration(hours: 3)),
+          source: StepRecordSource.foreground,
+        ),
+      );
+
+      await stepCounter.insertRecord(
+        StepRecord(
+          stepCount: 50,
+          fromTime: now.subtract(const Duration(hours: 3)),
+          toTime: now.subtract(const Duration(hours: 2)),
+          source: StepRecordSource.background,
+        ),
+      );
+
+      await stepCounter.insertRecord(
+        StepRecord(
+          stepCount: 200,
+          fromTime: now.subtract(const Duration(hours: 2)),
+          toTime: now,
+          source: StepRecordSource.terminated,
+        ),
+      );
+
+      await stepCounter.insertRecord(
+        StepRecord(
+          stepCount: 25,
+          fromTime: now.subtract(const Duration(hours: 1)),
+          toTime: now,
+          source: StepRecordSource.external,
+        ),
+      );
+
+      // Total = 100 + 50 + 200 + 25 = 375
+      final total = await stepCounter.getTotalSteps();
+      expect(total, 375);
+
+      // Stats breakdown
+      final stats = await stepCounter.getStepStats();
+      expect(stats['foregroundSteps'], 100);
+      expect(stats['backgroundSteps'], 50);
+      expect(stats['terminatedSteps'], 200);
+      expect(stats['externalSteps'], 25);
+    });
+
+    test('10.6 Today steps calculation correct', () async {
+      await stepCounter.initializeLogging(debugLogging: false);
+
+      final now = DateTime.now();
+      final startOfToday = DateTime(now.year, now.month, now.day);
+
+      // Add steps for today
+      await stepCounter.insertRecord(
+        StepRecord(
+          stepCount: 150,
+          fromTime: startOfToday.add(const Duration(hours: 8)),
+          toTime: startOfToday.add(const Duration(hours: 10)),
+          source: StepRecordSource.foreground,
+        ),
+      );
+
+      // Query today's steps
+      final todaySteps = await stepCounter.getTodayStepCount();
+      expect(todaySteps, 150);
+    });
+  });
+
+  group('Scenario 11: Warmup and Inactivity Timeout (Both Modes)', () {
+    test('11.1 Warmup config works with aggregated preset', () {
+      final config = StepRecordConfig.aggregated().copyWith(
+        warmupDurationMs: 8000,
+        inactivityTimeoutMs: 2000,
+      );
+
+      expect(config.warmupDurationMs, 8000);
+      expect(config.inactivityTimeoutMs, 2000);
+      expect(config.enableAggregatedMode, true);
+    });
+
+    test('11.2 Walking preset has proper warmup', () {
+      final config = StepRecordConfig.walking();
+
+      expect(config.warmupDurationMs, 5000);
+      expect(config.minStepsToValidate, 8);
+      expect(config.inactivityTimeoutMs, 10000);
+    });
+
+    test('11.3 Custom inactivity timeout', () {
+      final config = StepRecordConfig(inactivityTimeoutMs: 5000);
+
+      expect(config.inactivityTimeoutMs, 5000);
+    });
+
+    test('11.4 Zero warmup means immediate counting', () {
+      final config = StepRecordConfig.aggregated();
+
+      expect(config.warmupDurationMs, 0);
+      expect(config.minStepsToValidate, 1);
+    });
+
+    test('11.5 Config presets preserve customizations', () {
+      final base = StepRecordConfig.aggregated();
+      final custom = base.copyWith(
+        warmupDurationMs: 8000,
+        inactivityTimeoutMs: 2000,
+      );
+
+      // Preserved from aggregated
+      expect(custom.enableAggregatedMode, true);
+      expect(custom.maxStepsPerSecond, 5.0);
+
+      // Customized
+      expect(custom.warmupDurationMs, 8000);
+      expect(custom.inactivityTimeoutMs, 2000);
+    });
+
+    test('11.6 Detector config and record config are separate', () {
+      final detectorConfig = StepDetectorConfig(
+        foregroundServiceMaxApiLevel: 32,
+      );
+
+      final recordConfig = StepRecordConfig.aggregated().copyWith(
+        warmupDurationMs: 8000,
+      );
+
+      // These are independent configurations
+      expect(detectorConfig.foregroundServiceMaxApiLevel, 32);
+      expect(recordConfig.warmupDurationMs, 8000);
+    });
+  });
 }
