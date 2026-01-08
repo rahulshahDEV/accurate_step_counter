@@ -28,6 +28,7 @@ class AccurateStepCounterImpl {
   final StreamController<StepCountEvent> _foregroundStepController =
       StreamController<StepCountEvent>.broadcast();
   int _lastForegroundStepCount = 0;
+  StreamSubscription<Map<dynamic, dynamic>>? _foregroundEventSubscription;
 
   // Step recording
   final StepRecordStore _stepRecordStore = StepRecordStore();
@@ -179,7 +180,10 @@ class AccurateStepCounterImpl {
           text: _currentConfig!.foregroundNotificationText,
         );
 
-        // Start polling for step count updates (realtime UI updates)
+        // Listen to EventChannel for realtime step events (instant updates)
+        _listenToForegroundStepEvents();
+
+        // Also start backup polling in case EventChannel fails
         _startForegroundStepPolling();
 
         _isStarted = true;
@@ -250,7 +254,38 @@ class AccurateStepCounterImpl {
     }
   }
 
-  /// Start polling for step count updates from foreground service
+  /// Listen to realtime step events from foreground service via EventChannel
+  void _listenToForegroundStepEvents() {
+    _foregroundEventSubscription?.cancel();
+    _foregroundEventSubscription = _platform.foregroundStepEventStream.listen(
+      (event) {
+        final stepCount = event['stepCount'] as int?;
+        final timestamp = event['timestamp'] as int?;
+
+        if (stepCount != null && stepCount > _lastForegroundStepCount) {
+          _lastForegroundStepCount = stepCount;
+
+          if (!_foregroundStepController.isClosed) {
+            _foregroundStepController.add(
+              StepCountEvent(
+                stepCount: stepCount,
+                timestamp: timestamp != null
+                    ? DateTime.fromMillisecondsSinceEpoch(timestamp)
+                    : DateTime.now(),
+              ),
+            );
+          }
+
+          _log('Realtime step event: $stepCount');
+        }
+      },
+      onError: (error) {
+        _log('Foreground EventChannel error: $error');
+      },
+    );
+  }
+
+  /// Start polling for step count updates from foreground service (backup)
   void _startForegroundStepPolling() {
     _foregroundStepPollTimer?.cancel();
     _foregroundStepPollTimer = Timer.periodic(

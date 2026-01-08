@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.7.2] - 2026-01-08
+
+### Added
+- ⚡ **Realtime EventChannel for Foreground Service** - Instant step updates on Android ≤10
+  - Added EventChannel in `StepCounterForegroundService.kt` for realtime step events
+  - Emits step events immediately on sensor change (no more 500ms polling delay)
+  - Falls back to polling if EventChannel fails
+
+### Fixed
+- 🔧 **Instant step updates** on Android ≤10 when app is open (same feel as native detector)
+
+### Technical
+| Mode | Realtime Method |
+|------|-----------------|
+| Android ≤10 | EventChannel (instant) + polling backup |
+| Android 11+ | Native detector EventChannel (instant) |
+
+---
+
 ## [1.7.1] - 2026-01-08
 
 ### Changed

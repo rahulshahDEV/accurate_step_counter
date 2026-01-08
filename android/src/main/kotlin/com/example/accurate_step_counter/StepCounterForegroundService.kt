@@ -15,6 +15,7 @@ import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
 import androidx.core.app.NotificationCompat
+import io.flutter.plugin.common.EventChannel
 
 /**
  * Foreground Service for step counting on Android ≤10
@@ -46,6 +47,10 @@ class StepCounterForegroundService : Service(), SensorEventListener {
         @Volatile
         var currentStepCount = 0
             private set
+        
+        // EventChannel sink for realtime step events to Flutter
+        @Volatile
+        var eventSink: EventChannel.EventSink? = null
     }
     
     private var sensorManager: SensorManager? = null
@@ -266,13 +271,23 @@ class StepCounterForegroundService : Service(), SensorEventListener {
                 
                 android.util.Log.d("StepForegroundService", "Step detected! Total: $sessionStepCount")
                 
+                // REALTIME: Emit step event via EventChannel to Flutter
+                try {
+                    eventSink?.success(mapOf(
+                        "stepCount" to sessionStepCount,
+                        "timestamp" to System.currentTimeMillis()
+                    ))
+                } catch (e: Exception) {
+                    android.util.Log.w("StepForegroundService", "EventChannel emit failed: ${e.message}")
+                }
+                
                 // Update notification periodically (every 10 steps to save battery)
                 if (sessionStepCount % 10 == 0) {
                     updateNotification()
                     saveState()
                 }
                 
-                // Send step count via shared preferences for Flutter to read
+                // Send step count via shared preferences for Flutter to read (backup)
                 val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
                 prefs.edit().putInt(STEP_COUNT_KEY, sessionStepCount).apply()
             }

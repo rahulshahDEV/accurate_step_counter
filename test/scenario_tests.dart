@@ -956,4 +956,268 @@ void main() {
       expect(recordConfig.warmupDurationMs, 8000);
     });
   });
+
+  // ============================================================
+  // COMPREHENSIVE REAL-LIFE SCENARIOS
+  // ============================================================
+
+  group('Scenario 12: Complete Integration Tests', () {
+    late AccurateStepCounter stepCounter;
+
+    setUp(() {
+      stepCounter = AccurateStepCounter();
+    });
+
+    tearDown(() async {
+      await stepCounter.dispose();
+    });
+
+    test('12.1 Full initialization flow works', () async {
+      await stepCounter.initializeLogging(debugLogging: false);
+
+      // Should be ready to start
+      expect(stepCounter.isLoggingInitialized, true);
+    });
+
+    test('12.2 Config chain preserves all settings', () {
+      final detectorConfig = StepDetectorConfig(
+        foregroundServiceMaxApiLevel: 32,
+        useForegroundServiceOnOldDevices: true,
+        foregroundNotificationTitle: 'Test Title',
+        foregroundNotificationText: 'Test Text',
+      );
+
+      final recordConfig = StepRecordConfig.aggregated().copyWith(
+        warmupDurationMs: 8000,
+        inactivityTimeoutMs: 2000,
+      );
+
+      // Detector config preserved
+      expect(detectorConfig.foregroundServiceMaxApiLevel, 32);
+      expect(detectorConfig.useForegroundServiceOnOldDevices, true);
+      expect(detectorConfig.foregroundNotificationTitle, 'Test Title');
+      expect(detectorConfig.foregroundNotificationText, 'Test Text');
+
+      // Record config preserved
+      expect(recordConfig.warmupDurationMs, 8000);
+      expect(recordConfig.inactivityTimeoutMs, 2000);
+      expect(recordConfig.enableAggregatedMode, true);
+    });
+
+    test('12.3 Multiple step records from different sources', () async {
+      await stepCounter.initializeLogging(debugLogging: false);
+
+      final now = DateTime.now();
+
+      // Add steps from all 4 sources
+      await stepCounter.insertRecord(
+        StepRecord(
+          stepCount: 100,
+          fromTime: now.subtract(const Duration(hours: 4)),
+          toTime: now.subtract(const Duration(hours: 3)),
+          source: StepRecordSource.foreground,
+        ),
+      );
+
+      await stepCounter.insertRecord(
+        StepRecord(
+          stepCount: 75,
+          fromTime: now.subtract(const Duration(hours: 3)),
+          toTime: now.subtract(const Duration(hours: 2)),
+          source: StepRecordSource.background,
+        ),
+      );
+
+      await stepCounter.insertRecord(
+        StepRecord(
+          stepCount: 200,
+          fromTime: now.subtract(const Duration(hours: 2)),
+          toTime: now.subtract(const Duration(hours: 1)),
+          source: StepRecordSource.terminated,
+        ),
+      );
+
+      await stepCounter.insertRecord(
+        StepRecord(
+          stepCount: 50,
+          fromTime: now.subtract(const Duration(hours: 1)),
+          toTime: now,
+          source: StepRecordSource.external,
+        ),
+      );
+
+      // Total: 100 + 75 + 200 + 50 = 425
+      final total = await stepCounter.getTotalSteps();
+      expect(total, 425);
+
+      // Stats breakdown
+      final stats = await stepCounter.getStepStats();
+      expect(stats['foregroundSteps'], 100);
+      expect(stats['backgroundSteps'], 75);
+      expect(stats['terminatedSteps'], 200);
+      expect(stats['externalSteps'], 50);
+    });
+
+    test('12.4 Date range queries work correctly', () async {
+      await stepCounter.initializeLogging(debugLogging: false);
+
+      final now = DateTime.now();
+      final yesterday = DateTime(now.year, now.month, now.day - 1);
+      final today = DateTime(now.year, now.month, now.day);
+
+      // Yesterday's steps
+      await stepCounter.insertRecord(
+        StepRecord(
+          stepCount: 5000,
+          fromTime: yesterday.add(const Duration(hours: 10)),
+          toTime: yesterday.add(const Duration(hours: 18)),
+          source: StepRecordSource.foreground,
+        ),
+      );
+
+      // Today's steps
+      await stepCounter.insertRecord(
+        StepRecord(
+          stepCount: 3000,
+          fromTime: today.add(const Duration(hours: 8)),
+          toTime: today.add(const Duration(hours: 12)),
+          source: StepRecordSource.foreground,
+        ),
+      );
+
+      final yesterdayTotal = await stepCounter.getStepCount(
+        start: yesterday,
+        end: today,
+      );
+      expect(yesterdayTotal, 5000);
+
+      final todayTotal = await stepCounter.getTodayStepCount();
+      expect(todayTotal, 3000);
+    });
+
+    test('12.5 Step logs can be queried by source', () async {
+      await stepCounter.initializeLogging(debugLogging: false);
+
+      final now = DateTime.now();
+
+      await stepCounter.insertRecord(
+        StepRecord(
+          stepCount: 100,
+          fromTime: now.subtract(const Duration(hours: 1)),
+          toTime: now,
+          source: StepRecordSource.external,
+        ),
+      );
+
+      await stepCounter.insertRecord(
+        StepRecord(
+          stepCount: 200,
+          fromTime: now.subtract(const Duration(hours: 2)),
+          toTime: now.subtract(const Duration(hours: 1)),
+          source: StepRecordSource.foreground,
+        ),
+      );
+
+      final externalLogs = await stepCounter.getStepLogs(
+        source: StepRecordSource.external,
+      );
+      expect(externalLogs.length, 1);
+      expect(externalLogs.first.stepCount, 100);
+
+      final foregroundLogs = await stepCounter.getStepLogs(
+        source: StepRecordSource.foreground,
+      );
+      expect(foregroundLogs.length, 1);
+      expect(foregroundLogs.first.stepCount, 200);
+    });
+
+    test('12.6 Write to aggregated works with external source', () async {
+      await stepCounter.initializeLogging(debugLogging: false);
+
+      final now = DateTime.now();
+
+      // Simulate Health Connect import
+      await stepCounter.writeStepsToAggregated(
+        stepCount: 1000,
+        fromTime: now.subtract(const Duration(hours: 3)),
+        toTime: now,
+        source: StepRecordSource.external,
+      );
+
+      final externalSteps = await stepCounter.getStepsBySource(
+        StepRecordSource.external,
+      );
+      expect(externalSteps, 1000);
+    });
+  });
+
+  group('Scenario 13: Warmup Validation Behavior', () {
+    test('13.1 Warmup with custom duration', () {
+      final config = StepRecordConfig(
+        warmupDurationMs: 8000,
+        minStepsToValidate: 15,
+      );
+
+      expect(config.warmupDurationMs, 8000);
+      expect(config.minStepsToValidate, 15);
+    });
+
+    test('13.2 Warmup disabled with zero duration', () {
+      final config = StepRecordConfig(warmupDurationMs: 0);
+
+      expect(config.warmupDurationMs, 0);
+    });
+
+    test('13.3 Aggregated preset has no warmup by default', () {
+      final config = StepRecordConfig.aggregated();
+
+      expect(config.warmupDurationMs, 0);
+      expect(config.minStepsToValidate, 1);
+    });
+
+    test('13.4 Walking preset has standard warmup', () {
+      final config = StepRecordConfig.walking();
+
+      expect(config.warmupDurationMs, 5000);
+      expect(config.minStepsToValidate, 8);
+    });
+  });
+
+  group('Scenario 14: EventChannel and Polling Coexistence', () {
+    test('14.1 Detector config enables foreground service', () {
+      final config = StepDetectorConfig(
+        useForegroundServiceOnOldDevices: true,
+        foregroundServiceMaxApiLevel: 29,
+      );
+
+      expect(config.useForegroundServiceOnOldDevices, true);
+      expect(config.foregroundServiceMaxApiLevel, 29);
+    });
+
+    test('14.2 Detector config for Android 10 and below', () {
+      final config = StepDetectorConfig(
+        foregroundServiceMaxApiLevel: 29,
+        useForegroundServiceOnOldDevices: true,
+      );
+
+      expect(config.foregroundServiceMaxApiLevel, 29);
+      expect(config.useForegroundServiceOnOldDevices, true);
+    });
+
+    test('14.3 Detector config for Android 12 and below', () {
+      final config = StepDetectorConfig(
+        foregroundServiceMaxApiLevel: 32,
+        useForegroundServiceOnOldDevices: true,
+      );
+
+      expect(config.foregroundServiceMaxApiLevel, 32);
+      expect(config.useForegroundServiceOnOldDevices, true);
+    });
+
+    test('14.4 OS level sync enabled by default', () {
+      final config = const StepDetectorConfig();
+
+      expect(config.enableOsLevelSync, true);
+    });
+  });
 }

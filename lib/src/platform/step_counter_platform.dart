@@ -10,12 +10,26 @@ import 'package:flutter/services.dart';
 class StepCounterPlatform {
   static const MethodChannel _channel = MethodChannel('accurate_step_counter');
 
+  // EventChannel for foreground service realtime step events
+  static const EventChannel _foregroundEventChannel = EventChannel(
+    'accurate_step_counter/foreground_step_events',
+  );
+
   static final StepCounterPlatform _instance = StepCounterPlatform._();
 
   StepCounterPlatform._();
 
   /// Singleton instance
   static StepCounterPlatform get instance => _instance;
+
+  /// Stream of realtime step events from foreground service
+  ///
+  /// Emits a map with 'stepCount' and 'timestamp' on each step
+  Stream<Map<dynamic, dynamic>> get foregroundStepEventStream {
+    return _foregroundEventChannel
+        .receiveBroadcastStream()
+        .cast<Map<dynamic, dynamic>>();
+  }
 
   /// Initialize the platform channel
   Future<void> initialize() async {

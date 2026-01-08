@@ -82,6 +82,20 @@ class AccurateStepCounterPlugin : FlutterPlugin, MethodCallHandler, SensorEventL
             }
         })
         
+        // Setup EventChannel for foreground service step events (realtime)
+        val foregroundEventChannel = EventChannel(flutterPluginBinding.binaryMessenger, "accurate_step_counter/foreground_step_events")
+        foregroundEventChannel.setStreamHandler(object : EventChannel.StreamHandler {
+            override fun onListen(arguments: Any?, events: EventChannel.EventSink?) {
+                android.util.Log.d("AccurateStepCounter", "Foreground EventChannel: onListen")
+                StepCounterForegroundService.eventSink = events
+            }
+            
+            override fun onCancel(arguments: Any?) {
+                android.util.Log.d("AccurateStepCounter", "Foreground EventChannel: onCancel")
+                StepCounterForegroundService.eventSink = null
+            }
+        })
+        
         context = flutterPluginBinding.applicationContext
         initializeSensorManager()
         initializeNativeDetector()
