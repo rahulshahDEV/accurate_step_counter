@@ -293,4 +293,88 @@ class StepCounterPlatform {
       return false;
     }
   }
+
+  // ============================================================
+  // Hybrid Foreground Service Methods
+  // ============================================================
+
+  /// Configure foreground service for hybrid architecture
+  ///
+  /// When enabled, foreground service will auto-start when app is terminated
+  /// on devices with Android API <= [maxApiLevel].
+  ///
+  /// [enabled] - Whether to use foreground service on app termination
+  /// [maxApiLevel] - Maximum API level to use foreground service (default: 29 for Android 10)
+  /// [title] - Notification title
+  /// [text] - Notification text
+  Future<bool> configureForegroundServiceOnTerminated({
+    required bool enabled,
+    required int maxApiLevel,
+    String title = 'Step Counter',
+    String text = 'Tracking your steps...',
+  }) async {
+    if (!Platform.isAndroid) {
+      return false;
+    }
+
+    try {
+      dev.log(
+        'Configuring foreground service: enabled=$enabled, maxApi=$maxApiLevel',
+      );
+      final result = await _channel.invokeMethod<bool>(
+        'configureForegroundServiceOnTerminated',
+        {
+          'enabled': enabled,
+          'maxApiLevel': maxApiLevel,
+          'title': title,
+          'text': text,
+        },
+      );
+      return result ?? false;
+    } on PlatformException catch (e) {
+      dev.log('Error configuring foreground service: ${e.message}', error: e);
+      return false;
+    }
+  }
+
+  /// Sync steps from foreground service (when resuming from terminated state)
+  ///
+  /// Returns a map with 'stepCount', 'startTime', and 'endTime' if service was running,
+  /// or null if no foreground service was active.
+  Future<Map<String, dynamic>?> syncStepsFromForegroundService() async {
+    if (!Platform.isAndroid) {
+      return null;
+    }
+
+    try {
+      dev.log('Syncing steps from foreground service');
+      final result = await _channel.invokeMethod<Map<dynamic, dynamic>>(
+        'syncStepsFromForegroundService',
+      );
+
+      if (result == null) {
+        dev.log('No foreground service steps to sync');
+        return null;
+      }
+
+      final syncData = {
+        'stepCount': result['stepCount'] as int,
+        'startTime': DateTime.fromMillisecondsSinceEpoch(
+          result['startTime'] as int,
+        ),
+        'endTime': DateTime.fromMillisecondsSinceEpoch(
+          result['endTime'] as int,
+        ),
+      };
+
+      dev.log(
+        'Foreground service steps synced: ${syncData['stepCount']} steps',
+      );
+
+      return syncData;
+    } on PlatformException catch (e) {
+      dev.log('Error syncing foreground service steps: ${e.message}', error: e);
+      return null;
+    }
+  }
 }

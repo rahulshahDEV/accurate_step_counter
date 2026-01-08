@@ -143,11 +143,13 @@ class AccurateStepCounterImpl {
     }
 
     _currentConfig = config ?? const StepDetectorConfig();
+
+    // HYBRID ARCHITECTURE:
+    // - Always use native detector for foreground/background (realtime)
+    // - Configure foreground service to auto-start when app is terminated on older APIs
     _useForegroundService = false;
 
-    // Check if we should use foreground service based on configured API level
-    if (Platform.isAndroid &&
-        _currentConfig!.useForegroundServiceOnOldDevices) {
+    if (Platform.isAndroid) {
       final androidVersion = await _platform.getAndroidVersion();
       final maxApiLevel = _currentConfig!.foregroundServiceMaxApiLevel;
       _log('Android API level is $androidVersion');
@@ -155,37 +157,32 @@ class AccurateStepCounterImpl {
         'AccurateStepCounter: Foreground service max API level is $maxApiLevel',
       );
 
-      // Use foreground service for API ≤ configured maxApiLevel
-      if (androidVersion > 0 && androidVersion <= maxApiLevel) {
-        dev.log(
-          'AccurateStepCounter: Using foreground service for API ≤$maxApiLevel',
-        );
-        _useForegroundService = true;
-
-        // Start the foreground service
-        await _platform.startForegroundService(
+      // Configure foreground service to auto-start when app terminates (older APIs only)
+      if (_currentConfig!.useForegroundServiceOnOldDevices) {
+        await _platform.configureForegroundServiceOnTerminated(
+          enabled: true,
+          maxApiLevel: maxApiLevel,
           title: _currentConfig!.foregroundNotificationTitle,
           text: _currentConfig!.foregroundNotificationText,
         );
+        dev.log(
+          'AccurateStepCounter: Configured foreground service for terminated state (API ≤$maxApiLevel)',
+        );
+      }
 
-        // Start polling for step count updates
-        _startForegroundStepPolling();
+      // Initialize platform channel for OS-level sync (if enabled)
+      if (_currentConfig!.enableOsLevelSync) {
+        await _platform.initialize();
 
-        _isStarted = true;
-        return;
+        // Sync steps from foreground service (if it was running from previous termination)
+        await _syncStepsFromForegroundService();
+
+        // Sync steps from terminated state (TYPE_STEP_COUNTER)
+        await _syncStepsFromTerminatedState();
       }
     }
 
-    // For Android 11+ or iOS, use native step detection
-    // Initialize platform channel for OS-level sync (if enabled)
-    if (_currentConfig!.enableOsLevelSync && Platform.isAndroid) {
-      await _platform.initialize();
-
-      // Sync steps from terminated state
-      await _syncStepsFromTerminatedState();
-    }
-
-    // Start native step detection
+    // Always start native step detection for realtime behavior
     await _nativeDetector.start(config: _currentConfig);
 
     _isStarted = true;
@@ -988,6 +985,48 @@ class AccurateStepCounterImpl {
 
     await _stepRecordStore.insertRecord(entry);
     _log('Logged $stepCount terminated steps');
+  }
+
+  /// Sync steps from foreground service (hybrid architecture)
+  ///
+  /// This is called when the app restarts after being terminated.
+  /// If the foreground service was running (on older APIs), it will have
+  /// counted steps while the app was closed. This method retrieves and logs them.
+  Future<void> _syncStepsFromForegroundService() async {
+    try {
+      dev.log(
+        'AccurateStepCounter: Checking for steps from foreground service...',
+      );
+
+      final result = await _platform.syncStepsFromForegroundService();
+
+      if (result == null) {
+        _log('No foreground service steps to sync');
+        return;
+      }
+
+      final stepCount = result['stepCount'] as int;
+      final startTime = result['startTime'] as DateTime;
+      final endTime = result['endTime'] as DateTime;
+
+      if (stepCount > 0) {
+        dev.log(
+          'AccurateStepCounter: Syncing $stepCount steps from foreground service',
+        );
+        _log('Time range: $startTime to $endTime');
+
+        // Log these steps as terminated source (they were counted while app was closed)
+        await _logTerminatedSteps(stepCount, startTime, endTime);
+
+        // Stop and reset foreground service since app is now active
+        await _platform.stopForegroundService();
+        await _platform.resetForegroundStepCount();
+
+        dev.log('AccurateStepCounter: Foreground service stopped and reset');
+      }
+    } catch (e) {
+      _log('Error syncing steps from foreground service: $e');
+    }
   }
 
   /// Manually log a step entry

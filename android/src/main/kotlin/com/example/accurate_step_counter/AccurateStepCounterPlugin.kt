@@ -1,5 +1,7 @@
 package com.example.accurate_step_counter
 
+import android.app.Activity
+import android.app.Application
 import android.Manifest
 import android.content.Context
 import android.content.Intent
@@ -9,10 +11,13 @@ import android.hardware.SensorEvent
 import android.hardware.SensorEventListener
 import android.hardware.SensorManager
 import android.os.Build
+import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import androidx.core.content.ContextCompat
 import io.flutter.embedding.engine.plugins.FlutterPlugin
+import io.flutter.embedding.engine.plugins.activity.ActivityAware
+import io.flutter.embedding.engine.plugins.activity.ActivityPluginBinding
 import io.flutter.plugin.common.EventChannel
 import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
@@ -23,8 +28,13 @@ import io.flutter.plugin.common.MethodChannel.Result
  *
  * Provides access to Android's OS-level step counter (TYPE_STEP_COUNTER sensor)
  * and SharedPreferences for state persistence across app restarts.
+ * 
+ * Implements hybrid architecture:
+ * - Uses native step detector for foreground/background (realtime)
+ * - Auto-starts foreground service when app is terminated on older APIs
  */
-class AccurateStepCounterPlugin : FlutterPlugin, MethodCallHandler, SensorEventListener {
+class AccurateStepCounterPlugin : FlutterPlugin, MethodCallHandler, SensorEventListener, 
+                                   ActivityAware, Application.ActivityLifecycleCallbacks {
     private lateinit var channel: MethodChannel
     private lateinit var eventChannel: EventChannel
     private lateinit var context: Context
@@ -37,6 +47,17 @@ class AccurateStepCounterPlugin : FlutterPlugin, MethodCallHandler, SensorEventL
     // Native step detector
     private var nativeStepDetector: NativeStepDetector? = null
     private var eventSink: EventChannel.EventSink? = null
+
+    // Activity lifecycle tracking for hybrid foreground service
+    private var activity: Activity? = null
+    private var application: Application? = null
+    private var activityCount = 0
+    
+    // Foreground service configuration (set from Dart layer)
+    private var useForegroundServiceOnTerminated = true
+    private var foregroundServiceMaxApiLevel = 29  // Default: Android 10
+    private var foregroundNotificationTitle = "Step Counter"
+    private var foregroundNotificationText = "Tracking your steps..."
 
     private val PREFS_NAME = "accurate_step_counter_prefs"
     private val STEP_COUNT_KEY = "last_step_count"
@@ -265,6 +286,43 @@ class AccurateStepCounterPlugin : FlutterPlugin, MethodCallHandler, SensorEventL
                 val isHardware = nativeStepDetector?.isUsingHardwareDetector() ?: false
                 result.success(isHardware)
             }
+            // Hybrid foreground service configuration
+            "configureForegroundServiceOnTerminated" -> {
+                android.util.Log.d("AccurateStepCounter", "configureForegroundServiceOnTerminated method called")
+                val enabled = call.argument<Boolean>("enabled") ?: true
+                val maxApiLevel = call.argument<Int>("maxApiLevel") ?: 29
+                val title = call.argument<String>("title") ?: "Step Counter"
+                val text = call.argument<String>("text") ?: "Tracking your steps..."
+                
+                configureForegroundService(enabled, maxApiLevel, title, text)
+                result.success(true)
+            }
+            "syncStepsFromForegroundService" -> {
+                android.util.Log.d("AccurateStepCounter", "syncStepsFromForegroundService method called")
+                
+                if (!StepCounterForegroundService.isRunning) {
+                    android.util.Log.d("AccurateStepCounter", "Foreground service not running")
+                    result.success(null)
+                    return
+                }
+                
+                val stepCount = StepCounterForegroundService.currentStepCount
+                val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                val startTime = prefs.getLong(TIMESTAMP_KEY, System.currentTimeMillis())
+                val endTime = System.currentTimeMillis()
+                
+                if (stepCount > 0) {
+                    android.util.Log.d("AccurateStepCounter", 
+                        "Syncing $stepCount steps from foreground service (${startTime} to ${endTime})")
+                    result.success(mapOf(
+                        "stepCount" to stepCount,
+                        "startTime" to startTime,
+                        "endTime" to endTime
+                    ))
+                } else {
+                    result.success(null)
+                }
+            }
             else -> {
                 android.util.Log.w("AccurateStepCounter", "Unknown method called: ${call.method}")
                 result.notImplemented()
@@ -480,5 +538,167 @@ class AccurateStepCounterPlugin : FlutterPlugin, MethodCallHandler, SensorEventL
 
     override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {
         // Not needed for step counter
+    }
+
+    // ============================================================
+    // ActivityAware Implementation - Hybrid foreground service
+    // ============================================================
+
+    override fun onAttachedToActivity(binding: ActivityPluginBinding) {
+        android.util.Log.d("AccurateStepCounter", "onAttachedToActivity")
+        activity = binding.activity
+        
+        // Register lifecycle callbacks
+        application = binding.activity.application
+        application?.registerActivityLifecycleCallbacks(this)
+    }
+
+    override fun onDetachedFromActivityForConfigChanges() {
+        android.util.Log.d("AccurateStepCounter", "onDetachedFromActivityForConfigChanges")
+        // Don't unregister - config change, activity will be reattached
+    }
+
+    override fun onReattachedToActivityForConfigChanges(binding: ActivityPluginBinding) {
+        android.util.Log.d("AccurateStepCounter", "onReattachedToActivityForConfigChanges")
+        activity = binding.activity
+    }
+
+    override fun onDetachedFromActivity() {
+        android.util.Log.d("AccurateStepCounter", "onDetachedFromActivity")
+        application?.unregisterActivityLifecycleCallbacks(this)
+        activity = null
+        application = null
+    }
+
+    // ============================================================
+    // ActivityLifecycleCallbacks - Track activity count
+    // ============================================================
+
+    override fun onActivityCreated(activity: Activity, savedInstanceState: Bundle?) {
+        // Not used
+    }
+
+    override fun onActivityStarted(activity: Activity) {
+        activityCount++
+        android.util.Log.d("AccurateStepCounter", "Activity started, count: $activityCount")
+        
+        // If coming back from terminated state, check if foreground service was running
+        if (activityCount == 1 && StepCounterForegroundService.isRunning) {
+            android.util.Log.d("AccurateStepCounter", "App resumed from terminated - foreground service was running")
+            // Steps will be synced via syncStepsFromForegroundService call from Dart
+        }
+    }
+
+    override fun onActivityResumed(activity: Activity) {
+        // Not used
+    }
+
+    override fun onActivityPaused(activity: Activity) {
+        // Not used
+    }
+
+    override fun onActivityStopped(activity: Activity) {
+        activityCount--
+        android.util.Log.d("AccurateStepCounter", "Activity stopped, count: $activityCount")
+        
+        // When all activities are stopped and this looks like app termination
+        // Start foreground service on older APIs for continued step counting
+        if (activityCount == 0 && shouldStartForegroundServiceOnTermination()) {
+            android.util.Log.d("AccurateStepCounter", "All activities stopped - starting foreground service for terminated state tracking")
+            startForegroundServiceForTerminatedState()
+        }
+    }
+
+    override fun onActivitySaveInstanceState(activity: Activity, outState: Bundle) {
+        // Not used
+    }
+
+    override fun onActivityDestroyed(activity: Activity) {
+        // Not used
+    }
+
+    // ============================================================
+    // Helper methods for hybrid foreground service
+    // ============================================================
+
+    /**
+     * Check if we should start foreground service when app is being terminated
+     */
+    private fun shouldStartForegroundServiceOnTermination(): Boolean {
+        if (!useForegroundServiceOnTerminated) {
+            android.util.Log.d("AccurateStepCounter", "Foreground service disabled by config")
+            return false
+        }
+        
+        if (Build.VERSION.SDK_INT > foregroundServiceMaxApiLevel) {
+            android.util.Log.d("AccurateStepCounter", 
+                "API ${Build.VERSION.SDK_INT} > $foregroundServiceMaxApiLevel, using TYPE_STEP_COUNTER sync instead")
+            return false
+        }
+        
+        if (StepCounterForegroundService.isRunning) {
+            android.util.Log.d("AccurateStepCounter", "Foreground service already running")
+            return false
+        }
+        
+        return true
+    }
+
+    /**
+     * Start foreground service when app is terminated on older APIs
+     */
+    private fun startForegroundServiceForTerminatedState() {
+        try {
+            // Save current step count before starting foreground service
+            saveCurrentStepCount()
+            
+            val intent = Intent(context, StepCounterForegroundService::class.java).apply {
+                action = StepCounterForegroundService.ACTION_START
+                putExtra(StepCounterForegroundService.EXTRA_NOTIFICATION_TITLE, foregroundNotificationTitle)
+                putExtra(StepCounterForegroundService.EXTRA_NOTIFICATION_TEXT, foregroundNotificationText)
+            }
+            
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                context.startForegroundService(intent)
+            } else {
+                context.startService(intent)
+            }
+            
+            android.util.Log.d("AccurateStepCounter", "Foreground service started for terminated state")
+        } catch (e: Exception) {
+            android.util.Log.e("AccurateStepCounter", "Failed to start foreground service: ${e.message}", e)
+        }
+    }
+
+    /**
+     * Save current OS step count before termination for later sync
+     */
+    private fun saveCurrentStepCount() {
+        if (currentStepCount > 0) {
+            val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            prefs.edit().apply {
+                putInt(STEP_COUNT_KEY, currentStepCount)
+                putLong(TIMESTAMP_KEY, System.currentTimeMillis())
+                apply()
+            }
+            android.util.Log.d("AccurateStepCounter", "Saved step count: $currentStepCount before termination")
+        }
+    }
+
+    /**
+     * Configure foreground service settings from Dart layer
+     */
+    fun configureForegroundService(
+        enabled: Boolean,
+        maxApiLevel: Int,
+        title: String,
+        text: String
+    ) {
+        useForegroundServiceOnTerminated = enabled
+        foregroundServiceMaxApiLevel = maxApiLevel
+        foregroundNotificationTitle = title
+        foregroundNotificationText = text
+        android.util.Log.d("AccurateStepCounter", 
+            "Foreground service configured: enabled=$enabled, maxApi=$maxApiLevel")
     }
 }

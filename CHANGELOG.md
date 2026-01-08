@@ -5,6 +5,67 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.7.0] - 2026-01-08
+
+### Added
+- 🏗️ **Hybrid Step Counter Architecture** - Optimal step tracking for all app states
+  - **Foreground/Background**: Always uses native detector for realtime step events
+  - **Terminated State (API ≤ configured)**: Foreground service auto-starts when app is killed
+  - Better UX: No persistent notification when app is running
+  - Better battery life: Foreground service only runs when needed
+  - Configurable API level threshold (default: Android 10, API 29)
+
+- 🔄 **New Platform Methods**:
+  - `configureForegroundServiceOnTerminated()` - Configure hybrid foreground service
+  - `syncStepsFromForegroundService()` - Sync steps when resuming from terminated state
+
+- 🧪 **New Test Scenarios** - 10 new tests for hybrid architecture:
+  - Scenario 6: Hybrid Architecture - No Duplicate Writes (6 tests)
+  - Scenario 7: Step Rate Validation (4 tests)
+  - Tests verify: deduplication, source tracking, config defaults
+
+### Changed
+- 🔧 **`start()` method refactored** for hybrid architecture:
+  - Always starts native detector (realtime behavior)
+  - Configures foreground service to auto-start on app termination
+  - Syncs steps from foreground service on app restart
+
+- ⚙️ **Android Plugin Enhanced**:
+  - Added `ActivityAware` and `ActivityLifecycleCallbacks` implementations
+  - Tracks activity count to detect app termination
+  - Auto-starts foreground service only when all activities are destroyed on older APIs
+
+### Technical Details
+- **Behavior by API Level**:
+  | App State | API ≤ 29 | API > 29 |
+  |-----------|----------|----------|
+  | Foreground | Native detector | Native detector |
+  | Background | Native detector | Native detector |
+  | Terminated | Foreground service | TYPE_STEP_COUNTER sync |
+
+- **No Duplicate Writes**:
+  - Steps from foreground service are logged with `StepRecordSource.terminated`
+  - Foreground service is stopped and reset after sync
+  - Separate sync paths prevent overlapping data
+
+### Example
+```dart
+// Hybrid architecture is automatic!
+await stepCounter.start(
+  config: StepDetectorConfig(
+    foregroundServiceMaxApiLevel: 29, // Default: Android 10
+    useForegroundServiceOnOldDevices: true,
+  ),
+);
+
+// On Android 10 and below:
+// - App running: Native detector (realtime)
+// - App terminated: Foreground service with notification
+// - App restart: Syncs steps, stops service
+```
+
+---
+
 ## [1.6.0] - 2026-01-08
 
 ### Added

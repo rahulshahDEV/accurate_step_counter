@@ -28,7 +28,7 @@ A simple, accurate step counter for Flutter. Works in **foreground**, **backgrou
 
 ```yaml
 dependencies:
-  accurate_step_counter: ^1.6.0
+  accurate_step_counter: ^1.7.0
 ```
 
 ### 2. Add Permissions
@@ -203,15 +203,19 @@ await stepCounter.deleteStepLogsBefore(
 );
 ```
 
-## 📱 How It Works
+## 📱 How It Works (Hybrid Architecture v1.7.0)
 
-| State | Behavior |
-|-------|----------|
-| 🟢 **Foreground** | Real-time updates, logged as `foreground` |
-| 🟡 **Background** | Continues counting, logged as `background` |
-| 🔴 **Terminated** | OS tracks steps, synced on relaunch as `terminated` |
+| App State | Android ≤10 (API ≤29) | Android 11+ (API 30+) |
+|-----------|----------------------|----------------------|
+| 🟢 **Foreground** | Native detector (realtime) | Native detector (realtime) |
+| 🟡 **Background** | Native detector (realtime) | Native detector (realtime) |
+| 🔴 **Terminated** | Foreground service with notification | TYPE_STEP_COUNTER sync on restart |
 
-**Terminated state sync**: When you kill the app and walk, Android's step counter keeps counting. When you reopen, the package syncs missed steps and adds them to your total. This works on Android 11+.
+**Key Benefits of v1.7.0:**
+- ✅ **Better UX**: No persistent notification when app is running
+- ✅ **Better battery**: Foreground service only runs when needed (terminated state)
+- ✅ **Realtime updates**: Native detector for instant step feedback in all running states
+- ✅ **No duplicates**: Separate sync paths prevent double-counting
 
 ## ⚙️ Advanced Configuration
 
