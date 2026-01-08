@@ -5,7 +5,8 @@ part 'step_record_source.g.dart';
 /// Source of the step record
 ///
 /// Indicates whether steps were recorded while the app was in
-/// foreground, background, or from terminated state sync.
+/// foreground, background, from terminated state sync, or imported
+/// from external sources.
 @HiveType(typeId: 2)
 enum StepRecordSource {
   /// Steps recorded while app was in foreground
@@ -19,6 +20,17 @@ enum StepRecordSource {
   /// Steps synced from terminated state (Android 11+ only)
   @HiveField(2)
   terminated,
+
+  /// Steps imported from external sources
+  ///
+  /// Use this for data imported from:
+  /// - Google Fit
+  /// - Apple Health
+  /// - Samsung Health
+  /// - Fitbit
+  /// - Other step tracking apps/devices
+  @HiveField(3)
+  external,
 }
 
 // Backwards compatibility

@@ -12,6 +12,8 @@ A simple, accurate step counter for Flutter. Works in **foreground**, **backgrou
 - 📱 **All States** - Foreground, background, AND terminated
 - 🚀 **Simple API** - One-line setup, no complexity
 - 🔋 **Battery Efficient** - Event-driven, not polling
+- ⏱️ **Inactivity Timeout** - Auto-reset sessions after idle periods
+- 🌍 **External Import** - Import steps from Google Fit, Apple Health, etc.
 
 ## 📱 Platform Support
 
@@ -26,7 +28,7 @@ A simple, accurate step counter for Flutter. Works in **foreground**, **backgrou
 
 ```yaml
 dependencies:
-  accurate_step_counter: ^1.5.0
+  accurate_step_counter: ^1.6.0
 ```
 
 ### 2. Add Permissions
@@ -158,29 +160,35 @@ final logs = await stepCounter.getStepLogs();
 for (final log in logs) {
   print('${log.stepCount} steps');
   print('From: ${log.fromTime} To: ${log.toTime}');
-  print('Source: ${log.source}'); // foreground, background, terminated
+  print('Source: ${log.source}'); // foreground, background, terminated, external
 }
 
 // Filter by date or source
 final todayLogs = await stepCounter.getStepLogs(from: startOfToday);
 final bgLogs = await stepCounter.getStepLogs(source: StepRecordSource.background);
+final externalLogs = await stepCounter.getStepLogs(source: StepRecordSource.external);
 
 // Get stats
 final stats = await stepCounter.getStepStats();
 // {totalSteps, foregroundSteps, backgroundSteps, terminatedSteps, ...}
 ```
 
-### Writing Externally
+### Importing External Steps (NEW in v1.6.0)
 
 ```dart
-// Import steps from Google Fit, wearable, or manual entry
+// Import steps from Google Fit, Apple Health, wearables, etc.
 await stepCounter.writeStepsToAggregated(
   stepCount: 500,
   fromTime: DateTime.now().subtract(Duration(hours: 2)),
   toTime: DateTime.now(),
-  source: StepRecordSource.foreground,
+  source: StepRecordSource.external, // Mark as external import
 );
 // All listeners automatically notified!
+
+// Query external steps
+final externalSteps = await stepCounter.getStepsBySource(
+  StepRecordSource.external,
+);
 ```
 
 ### Data Management
@@ -225,6 +233,13 @@ await stepCounter.start(
 // Start logging with preset
 await stepCounter.startLogging(config: StepRecordConfig.walking());
 // Presets: walking(), running(), sensitive(), conservative(), aggregated()
+
+// Custom config with inactivity timeout (NEW in v1.6.0)
+await stepCounter.startLogging(
+  config: StepRecordConfig.walking().copyWith(
+    inactivityTimeoutMs: 10000, // Reset after 10s of no steps
+  ),
+);
 ```
 
 ## 📄 License

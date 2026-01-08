@@ -5,6 +5,52 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.0] - 2026-01-08
+
+### Added
+- ✨ **Inactivity Timeout Feature** - Automatically reset warmup state after period of inactivity
+  - New `inactivityTimeoutMs` parameter in `StepRecordConfig`
+  - Properly handles session separation when user stops walking
+  - Resets warmup state for fresh validation on next walking session
+  - Example: After 10s of no steps, next walk requires new warmup
+  - Prevents phantom steps and improves accuracy
+
+- 🌍 **External Source Import** - Track steps imported from other apps
+  - New `StepRecordSource.external` enum value for imported data
+  - Use for Google Fit, Apple Health, Samsung Health, Fitbit imports
+  - `writeStepsToAggregated()` now defaults to `external` source
+  - Separate tracking of app-detected vs imported steps
+  - Query external steps with `getStepsBySource(StepRecordSource.external)`
+
+### Changed
+- 🚀 **No Warmup by Default** - `StepRecordConfig.aggregated()` now works immediately
+  - Changed `warmupDurationMs` from `3000ms` to `0ms` in aggregated preset
+  - Changed `minStepsToValidate` from `5` to `1`
+  - Immediate step counting like Health Connect
+  - Walking/Running presets still have warmup for accuracy
+
+### Fixed
+- 🐛 **Stream Initialization** - Fixed potential race condition in stream subscriptions
+  - Optimized subscription order in example app
+  - `watchAggregatedStepCounter()` subscribed first to catch initial value
+  - Moved `_isInitialized` flag after stream setup
+  - Added error cleanup on initialization failure
+
+### Improved
+- 📖 **Better Documentation** - Enhanced code examples and comments
+  - Added clarifying comments in initialization sequence
+  - Updated `writeStepsToAggregated()` with external source examples
+  - Improved error messages for better debugging
+  - Added comprehensive test scenarios document
+
+### Developer
+- ✅ **Comprehensive Test Suite** - Added 20+ automated tests
+  - Configuration validation tests
+  - External source import tests
+  - Stream initialization tests
+  - Error handling tests
+  - All core logic verified
+
 ## [1.5.0] - 2026-01-07
 
 ### Fixed

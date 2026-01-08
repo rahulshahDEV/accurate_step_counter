@@ -81,33 +81,18 @@ class _StepCounterTestAppState extends State<StepCounterTestApp>
       setState(() => _detectorType = isHardware ? 'Hardware' : 'Accelerometer');
       _log('Detector type: $_detectorType');
 
-      // Step 3: Start logging with NO WARMUP for easier testing
+      // Step 3: Start logging with aggregated mode (no warmup by default)
+      // This loads today's steps from DB and starts continuous logging
       await _stepCounter.startLogging(
-        config: StepRecordConfig(
-          recordIntervalMs: 1000,
-          warmupDurationMs: 0, // NO WARMUP!
-          minStepsToValidate: 1, // Just 1 step needed
-          maxStepsPerSecond: 10.0,
-          inactivityTimeoutMs: 0,
-          enableAggregatedMode: true,
-        ),
+        config: StepRecordConfig.aggregated(),
       );
-      _log('✓ Logging started (NO warmup, aggregated mode)');
+      _log('✓ Logging started (aggregated mode, no warmup)');
 
-      setState(() => _isInitialized = true);
-
-      // Step 4: Subscribe to streams AFTER initialization
+      // Step 4: Subscribe to streams IMMEDIATELY after startLogging
+      // This ensures we catch the initial value from watchAggregatedStepCounter
       _log('Setting up streams...');
 
-      // Raw step events from native detector
-      _stepSubscription = _stepCounter.stepEventStream.listen((event) {
-        dev.log('RAW STEP EVENT: ${event.stepCount}');
-        _log('RAW: ${event.stepCount} steps');
-        setState(() => _liveStepCount = event.stepCount);
-      }, onError: (e) => _log('Step stream error: $e'));
-      _log('✓ stepEventStream subscribed');
-
-      // Aggregated count (stored + live)
+      // Aggregated count (stored + live) - Subscribe FIRST to catch initial value
       _aggregatedSubscription = _stepCounter
           .watchAggregatedStepCounter()
           .listen((steps) {
@@ -125,6 +110,14 @@ class _StepCounterTestAppState extends State<StepCounterTestApp>
       }, onError: (e) => _log('Today stream error: $e'));
       _log('✓ watchTodaySteps subscribed');
 
+      // Raw step events from native detector
+      _stepSubscription = _stepCounter.stepEventStream.listen((event) {
+        dev.log('RAW STEP EVENT: ${event.stepCount}');
+        _log('RAW: ${event.stepCount} steps');
+        setState(() => _liveStepCount = event.stepCount);
+      }, onError: (e) => _log('Step stream error: $e'));
+      _log('✓ stepEventStream subscribed');
+
       // Terminated steps callback
       _stepCounter.onTerminatedStepsDetected = (steps, from, to) {
         _log('TERMINATED SYNC: $steps steps!');
@@ -138,12 +131,21 @@ class _StepCounterTestAppState extends State<StepCounterTestApp>
         }
       };
 
-      // Load initial data
+      // Mark as initialized AFTER streams are set up
+      setState(() => _isInitialized = true);
+
+      // Load initial data (stats by source)
       await _refreshData();
       _log('=== READY! Walk to test ===');
     } catch (e, stack) {
-      _log('ERROR: $e');
+      _log('ERROR during initialization: $e');
       dev.log('Init error: $e\n$stack');
+
+      // Cleanup on error
+      setState(() => _isInitialized = false);
+      await _stepSubscription?.cancel();
+      await _aggregatedSubscription?.cancel();
+      await _todaySubscription?.cancel();
     }
   }
 

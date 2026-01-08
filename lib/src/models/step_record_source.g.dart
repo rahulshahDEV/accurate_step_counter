@@ -19,6 +19,8 @@ class StepRecordSourceAdapter extends TypeAdapter<StepRecordSource> {
         return StepRecordSource.background;
       case 2:
         return StepRecordSource.terminated;
+      case 3:
+        return StepRecordSource.external;
       default:
         return StepRecordSource.foreground;
     }
@@ -35,6 +37,9 @@ class StepRecordSourceAdapter extends TypeAdapter<StepRecordSource> {
         break;
       case StepRecordSource.terminated:
         writer.writeByte(2);
+        break;
+      case StepRecordSource.external:
+        writer.writeByte(3);
         break;
     }
   }

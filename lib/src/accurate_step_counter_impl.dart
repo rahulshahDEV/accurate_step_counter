@@ -64,6 +64,10 @@ class AccurateStepCounterImpl {
   double _maxStepsPerSecond = 5.0;
   int _warmupStartStepCount = 0;
 
+  // Inactivity timeout tracking
+  int _inactivityTimeoutMs = 0;
+  Timer? _inactivityTimer;
+
   /// Callback for handling missed steps from terminated state
   /// Parameters: (missedSteps, startTime, endTime)
   Function(int, DateTime, DateTime)? onTerminatedStepsDetected;
@@ -316,6 +320,8 @@ class AccurateStepCounterImpl {
     await _nativeDetector.dispose();
     _stopForegroundStepPolling();
     await _stepRecordSubscription?.cancel();
+    _inactivityTimer?.cancel();
+    _inactivityTimer = null;
     await _foregroundStepController.close();
     await _aggregatedStepController.close();
     await _stepRecordStore.close();
@@ -537,6 +543,7 @@ class AccurateStepCounterImpl {
     _warmupDurationMs = cfg.warmupDurationMs;
     _minStepsToValidate = cfg.minStepsToValidate;
     _maxStepsPerSecond = cfg.maxStepsPerSecond;
+    _inactivityTimeoutMs = cfg.inactivityTimeoutMs;
     _isInWarmup = cfg.warmupDurationMs > 0;
     _warmupStartTime = null;
     _warmupStartStepCount = 0;
@@ -572,9 +579,36 @@ class AccurateStepCounterImpl {
   Future<void> stopLogging() async {
     await _stepRecordSubscription?.cancel();
     _stepRecordSubscription = null;
+    _inactivityTimer?.cancel();
+    _inactivityTimer = null;
     _recordingEnabled = false;
     _aggregatedModeEnabled = false;
     _log('Step logging stopped');
+  }
+
+  /// Reset warmup state for new walking session
+  void _resetWarmupState() {
+    _isInWarmup = _warmupDurationMs > 0;
+    _warmupStartTime = null;
+    _warmupStartStepCount = 0;
+    _log('Warmup state reset - new session will require validation');
+  }
+
+  /// Handle inactivity timeout - end current session and reset warmup
+  void _handleInactivityTimeout() {
+    _log('Inactivity timeout triggered - ending current session');
+    _resetWarmupState();
+  }
+
+  /// Start or restart the inactivity timer
+  void _startInactivityTimer() {
+    if (_inactivityTimeoutMs <= 0) return;
+
+    _inactivityTimer?.cancel();
+    _inactivityTimer = Timer(
+      Duration(milliseconds: _inactivityTimeoutMs),
+      _handleInactivityTimeout,
+    );
   }
 
   /// Initialize aggregated mode by loading today's steps
@@ -605,6 +639,9 @@ class AccurateStepCounterImpl {
   /// Auto-log steps continuously (write on every step) for aggregated mode
   void _autoLogStepsContinuous(StepCountEvent event) {
     final now = DateTime.now();
+
+    // Restart inactivity timer on every step
+    _startInactivityTimer();
 
     // === WARMUP PHASE ===
     if (_isInWarmup) {
@@ -790,6 +827,9 @@ class AccurateStepCounterImpl {
   /// Auto-log steps based on interval with warmup validation
   void _autoLogSteps(StepCountEvent event, int intervalMs) {
     final now = DateTime.now();
+
+    // Restart inactivity timer on every step
+    _startInactivityTimer();
 
     // === WARMUP PHASE ===
     if (_isInWarmup) {
@@ -1099,6 +1139,7 @@ class AccurateStepCounterImpl {
   /// final fgSteps = await stepCounter.getStepsBySource(StepRecordSource.foreground);
   /// final bgSteps = await stepCounter.getStepsBySource(StepRecordSource.background);
   /// final termSteps = await stepCounter.getStepsBySource(StepRecordSource.terminated);
+  /// final externalSteps = await stepCounter.getStepsBySource(StepRecordSource.external);
   /// ```
   Future<int> getStepsBySource(
     StepRecordSource source, {
@@ -1253,7 +1294,7 @@ class AccurateStepCounterImpl {
   /// all listeners of [watchAggregatedStepCounter].
   ///
   /// Perfect for:
-  /// - Importing steps from external sources (Google Fit, Apple Health)
+  /// - Importing steps from external sources (Google Fit, Apple Health, etc.)
   /// - Manually correcting step counts
   /// - Syncing steps from other devices
   /// - Batch importing historical data
@@ -1264,23 +1305,32 @@ class AccurateStepCounterImpl {
   /// - [stepCount] - Number of steps to write (must be positive)
   /// - [fromTime] - Start time of the activity
   /// - [toTime] - End time of the activity (defaults to now)
-  /// - [source] - Source of the steps (defaults to foreground)
+  /// - [source] - Source of the steps (defaults to external)
   ///
   /// Example:
   /// ```dart
-  /// // Write 100 steps from external source
+  /// // Import from Google Fit (recommended - use external source)
+  /// await stepCounter.writeStepsToAggregated(
+  ///   stepCount: 5000,
+  ///   fromTime: DateTime.now().subtract(Duration(hours: 2)),
+  ///   toTime: DateTime.now(),
+  ///   source: StepRecordSource.external, // Mark as external data
+  /// );
+  ///
+  /// // Import from Apple Health
+  /// await stepCounter.writeStepsToAggregated(
+  ///   stepCount: 3500,
+  ///   fromTime: startOfDay,
+  ///   toTime: endOfDay,
+  ///   source: StepRecordSource.external,
+  /// );
+  ///
+  /// // Manual correction (if needed)
   /// await stepCounter.writeStepsToAggregated(
   ///   stepCount: 100,
   ///   fromTime: DateTime.now().subtract(Duration(hours: 1)),
   ///   toTime: DateTime.now(),
   ///   source: StepRecordSource.foreground,
-  /// );
-  ///
-  /// // Import from Google Fit
-  /// await stepCounter.writeStepsToAggregated(
-  ///   stepCount: 5000,
-  ///   fromTime: startOfDay,
-  ///   toTime: endOfDay,
   /// );
   /// ```
   ///
@@ -1315,7 +1365,7 @@ class AccurateStepCounterImpl {
       stepCount: stepCount,
       fromTime: fromTime,
       toTime: endTime,
-      source: source ?? StepRecordSource.foreground,
+      source: source ?? StepRecordSource.external,
     );
 
     await _stepRecordStore.insertRecord(entry);

@@ -151,16 +151,16 @@ class StepRecordConfig {
   /// Preset for aggregated mode (Health Connect-like)
   ///
   /// - Continuous recording (every step)
-  /// - 3 second warmup
-  /// - 5 steps minimum to validate
+  /// - No warmup (immediate counting)
+  /// - 1 step minimum
   /// - Max 5 steps/second
   /// - No inactivity timeout
   /// - Aggregated mode enabled
   factory StepRecordConfig.aggregated() {
     return const StepRecordConfig(
       recordIntervalMs: 1000, // Not used in aggregated mode
-      warmupDurationMs: 3000,
-      minStepsToValidate: 5,
+      warmupDurationMs: 0, // No warmup by default
+      minStepsToValidate: 1,
       maxStepsPerSecond: 5.0,
       inactivityTimeoutMs: 0,
       enableAggregatedMode: true,
