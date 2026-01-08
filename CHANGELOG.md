@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.7.4] - 2026-01-08
+
+### Fixed
+- 🐛 **Duplicate prevention for foreground service terminated state sync (Android ≤10)**
+  - Added validation to prevent duplicate step writes when app is restarted multiple times
+  - Checks for existing records with same hour, minute, and step count before writing
+  - Always resets SharedPreferences after sync to prevent stale data re-reads
+  - Particularly fixes issue on devices with aggressive battery optimization (MIUI, Samsung)
+
+### Added
+- 📊 **Comprehensive scenario testing documentation**
+  - Added `FOREGROUND_SERVICE_SCENARIOS.md` with 7 real-life test scenarios
+  - Documented PERSISTENT vs ON-TERMINATION foreground service modes
+  - Detailed analysis of duplicate prevention logic
+
+### Why?
+When using foreground service on Android 10 and below, rapid app restarts could cause the same step count (e.g., 46 steps) to be logged multiple times as "terminated" steps. The service's SharedPreferences weren't being cleared properly between restarts, causing duplicate reads. This fix ensures each session's steps are only logged once, even with multiple app restarts within the same minute.
+
+---
+
 ## [1.7.3] - 2026-01-08
 
 ### Fixed

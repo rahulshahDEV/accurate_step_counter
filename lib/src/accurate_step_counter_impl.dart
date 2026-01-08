@@ -1066,12 +1066,45 @@ class AccurateStepCounterImpl {
         );
         _log('Time range: $startTime to $endTime');
 
-        // Log these steps as terminated source (they were counted while app was closed)
-        await _logTerminatedSteps(stepCount, startTime, endTime);
+        // Check for duplicate: if a terminated record exists with same hour, minute, and step count
+        // This prevents duplicate writes when app is restarted multiple times while foreground service is running
+        final existingRecords = await _stepRecordStore.readRecords(
+          source: StepRecordSource.terminated,
+        );
 
-        // Stop and reset foreground service since app is now active
+        final isDuplicate = existingRecords.any((record) {
+          // Check if endTime matches the same hour and minute
+          final sameHour = record.toTime.year == endTime.year &&
+              record.toTime.month == endTime.month &&
+              record.toTime.day == endTime.day &&
+              record.toTime.hour == endTime.hour &&
+              record.toTime.minute == endTime.minute;
+
+          // Check if step count is the same
+          final sameStepCount = record.stepCount == stepCount;
+
+          return sameHour && sameStepCount;
+        });
+
+        if (!isDuplicate) {
+          // Log these steps as terminated source (they were counted while app was closed)
+          await _logTerminatedSteps(stepCount, startTime, endTime);
+
+          // Reset immediately after successful logging to prevent re-reading same data
+          await _platform.resetForegroundStepCount();
+          _log('Foreground service step count reset after logging');
+        } else {
+          _log(
+            'Skipping duplicate foreground service sync: $stepCount steps already logged for ${endTime.hour}:${endTime.minute.toString().padLeft(2, '0')}',
+          );
+
+          // Still reset even if duplicate to clear the stale data
+          await _platform.resetForegroundStepCount();
+          _log('Foreground service step count reset (duplicate detected)');
+        }
+
+        // Stop foreground service since app is now active
         await _platform.stopForegroundService();
-        await _platform.resetForegroundStepCount();
 
         dev.log('AccurateStepCounter: Foreground service stopped and reset');
       }

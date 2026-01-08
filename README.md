@@ -28,7 +28,7 @@ A simple, accurate step counter for Flutter. Works in **foreground**, **backgrou
 
 ```yaml
 dependencies:
-  accurate_step_counter: ^1.7.0
+  accurate_step_counter: ^1.7.4
 ```
 
 ### 2. Add Permissions
@@ -203,7 +203,7 @@ await stepCounter.deleteStepLogsBefore(
 );
 ```
 
-## 📱 How It Works (Hybrid Architecture v1.7.0)
+## 📱 How It Works (Hybrid Architecture v1.7.x)
 
 | App State | Android ≤10 (API ≤29) | Android 11+ (API 30+) |
 |-----------|----------------------|----------------------|
@@ -211,11 +211,15 @@ await stepCounter.deleteStepLogsBefore(
 | 🟡 **Background** | Native detector (realtime) | Native detector (realtime) |
 | 🔴 **Terminated** | Foreground service with notification | TYPE_STEP_COUNTER sync on restart |
 
-**Key Benefits of v1.7.0:**
-- ✅ **Better UX**: No persistent notification when app is running
-- ✅ **Better battery**: Foreground service only runs when needed (terminated state)
+**Key Benefits:**
+- ✅ **Better UX**: No persistent notification when app is running (Android 11+)
+- ✅ **Better battery**: Foreground service only runs when needed (terminated state on Android ≤10)
 - ✅ **Realtime updates**: Native detector for instant step feedback in all running states
-- ✅ **No duplicates**: Separate sync paths prevent double-counting
+- ✅ **No duplicates**: Smart duplicate prevention prevents double-counting on rapid restarts
+- ✅ **OEM Compatible**: Works reliably on MIUI, Samsung, and other aggressive battery optimization systems
+
+**Duplicate Prevention (v1.7.4+):**
+When using foreground service on Android ≤10, the library now prevents duplicate step logging when the app is restarted multiple times. It checks for existing records with the same timestamp (hour + minute) and step count before writing, ensuring each session's steps are only logged once.
 
 ## ⚙️ Advanced Configuration
 
