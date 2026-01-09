@@ -73,8 +73,14 @@ class _StepCounterTestAppState extends State<StepCounterTestApp>
       _log('✓ Database initialized');
 
       // Step 2: Start step detector with walking config
-      await _stepCounter.start(config: StepDetectorConfig.walking());
-      _log('✓ Step detector started');
+      // Set foregroundServiceMaxApiLevel: 32 to enable foreground service on Android 11-12
+      await _stepCounter.start(
+        config: StepDetectorConfig.walking().copyWith(
+          foregroundServiceMaxApiLevel:
+              32, // Enable foreground service on Android 11/12
+        ),
+      );
+      _log('✓ Step detector started (foreground service enabled up to API 32)');
 
       // Check detector type
       final isHardware = await _stepCounter.isUsingNativeDetector();
@@ -83,9 +89,7 @@ class _StepCounterTestAppState extends State<StepCounterTestApp>
 
       // Step 3: Start logging with aggregated mode (no warmup by default)
       // This loads today's steps from DB and starts continuous logging
-      await _stepCounter.startLogging(
-        config: StepRecordConfig.aggregated(),
-      );
+      await _stepCounter.startLogging(config: StepRecordConfig.aggregated());
       _log('✓ Logging started (aggregated mode, no warmup)');
 
       // Step 4: Subscribe to streams IMMEDIATELY after startLogging

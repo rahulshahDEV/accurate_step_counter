@@ -334,8 +334,18 @@ class AccurateStepCounterPlugin : FlutterPlugin, MethodCallHandler, SensorEventL
                 
                 val stepCount = StepCounterForegroundService.currentStepCount
                 val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-                val startTime = prefs.getLong(TIMESTAMP_KEY, System.currentTimeMillis())
+                // Use the foreground service specific keys for proper timestamps
+                val startTime = prefs.getLong("foreground_start_timestamp", System.currentTimeMillis())
                 val endTime = System.currentTimeMillis()
+                
+                // Get the last OS step count from foreground service for proper baseline update
+                val lastOsStepCount = prefs.getInt("foreground_os_step_count", -1)
+                if (lastOsStepCount > 0) {
+                    // Update main baseline with correct OS step count (not session count)
+                    saveStepCountToPrefs(lastOsStepCount, endTime)
+                    android.util.Log.d("AccurateStepCounter", 
+                        "Updated baseline from foreground service: $lastOsStepCount")
+                }
                 
                 if (stepCount > 0) {
                     android.util.Log.d("AccurateStepCounter", 
@@ -441,7 +451,45 @@ class AccurateStepCounterPlugin : FlutterPlugin, MethodCallHandler, SensorEventL
     private fun syncStepsFromTerminatedState(): Map<String, Any>? {
         try {
             android.util.Log.d("StepSync", "=== Starting syncStepsFromTerminatedState ===")
+            
+            // Check if foreground service was running and has data - use its data instead
+            // This fixes the Android 11 bug where session count was incorrectly used as baseline
+            val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            val foregroundOsCount = prefs.getInt("foreground_os_step_count", -1)
+            val foregroundStepCount = prefs.getInt("foreground_step_count", 0)
+            val foregroundStartTime = prefs.getLong("foreground_start_timestamp", -1L)
+            
+            if (foregroundOsCount > 0 && foregroundStepCount > 0 && foregroundStartTime > 0) {
+                android.util.Log.d("StepSync", "Found foreground service data:")
+                android.util.Log.d("StepSync", "  - OS step count: $foregroundOsCount")
+                android.util.Log.d("StepSync", "  - Session steps: $foregroundStepCount")
+                android.util.Log.d("StepSync", "  - Start time: $foregroundStartTime")
+                
+                // Update baseline with correct OS count (not session count!)
+                val now = System.currentTimeMillis()
+                saveStepCountToPrefs(foregroundOsCount, now)
+                
+                // Clear foreground service prefs to prevent double-counting
+                prefs.edit().apply {
+                    remove("foreground_os_step_count")
+                    remove("foreground_step_count")
+                    remove("foreground_start_timestamp")
+                    remove("foreground_last_update")
+                    apply()
+                }
+                android.util.Log.d("StepSync", "Cleared foreground service data, returning $foregroundStepCount steps")
+                
+                // Return the session steps from foreground service (the actual walked steps)
+                return mapOf(
+                    "missedSteps" to foregroundStepCount,
+                    "startTime" to foregroundStartTime,
+                    "endTime" to now
+                )
+            }
 
+            // No foreground service data - use standard TYPE_STEP_COUNTER sync (Android 12+ path)
+            android.util.Log.d("StepSync", "No foreground service data, using TYPE_STEP_COUNTER sync")
+            
             // Get current OS-level step count
             val currentStepCount = getStepCountFromSensor()
             android.util.Log.d("StepSync", "Current OS step count: $currentStepCount")

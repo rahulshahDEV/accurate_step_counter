@@ -39,6 +39,10 @@ class StepCounterForegroundService : Service(), SensorEventListener {
         private const val TIMESTAMP_KEY = "last_timestamp"
         private const val FOREGROUND_STEP_COUNT_KEY = "foreground_step_count"
         private const val FOREGROUND_BASE_STEP_KEY = "foreground_base_step"
+        // New keys for proper terminated state sync (stores absolute OS count)
+        private const val FOREGROUND_OS_STEP_KEY = "foreground_os_step_count"
+        private const val FOREGROUND_START_TIMESTAMP_KEY = "foreground_start_timestamp"
+        private const val FOREGROUND_LAST_UPDATE_KEY = "foreground_last_update"
         
         @Volatile
         var isRunning = false
@@ -258,6 +262,14 @@ class StepCounterForegroundService : Service(), SensorEventListener {
             if (baseStepCount < 0) {
                 baseStepCount = totalSteps
                 android.util.Log.d("StepForegroundService", "Baseline set: $baseStepCount")
+                // Save the starting OS step count for terminated state sync
+                val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                prefs.edit().apply {
+                    putInt(FOREGROUND_OS_STEP_KEY, totalSteps)
+                    putLong(FOREGROUND_START_TIMESTAMP_KEY, System.currentTimeMillis())
+                    apply()
+                }
+                android.util.Log.d("StepForegroundService", "Saved initial OS count for sync: $totalSteps")
                 return
             }
             
@@ -287,9 +299,16 @@ class StepCounterForegroundService : Service(), SensorEventListener {
                     saveState()
                 }
                 
-                // Send step count via shared preferences for Flutter to read (backup)
+                // Save both session count (for display) and OS count (for sync)
+                // This fixes the Android 11 terminated state bug where session count
+                // was incorrectly used as OS count baseline
                 val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-                prefs.edit().putInt(STEP_COUNT_KEY, sessionStepCount).apply()
+                prefs.edit().apply {
+                    putInt(FOREGROUND_STEP_COUNT_KEY, sessionStepCount)
+                    putInt(FOREGROUND_OS_STEP_KEY, totalSteps)  // Absolute OS count for sync
+                    putLong(FOREGROUND_LAST_UPDATE_KEY, System.currentTimeMillis())
+                    apply()
+                }
             }
         }
     }

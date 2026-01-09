@@ -141,4 +141,141 @@ void main() {
       expect(event1, isNot(equals(event3)));
     });
   });
+
+  // ============================================================
+  // ANDROID 11 FOREGROUND SERVICE FIX TESTS (v1.7.8)
+  // ============================================================
+
+  group('Android 11 Foreground Service Fix', () {
+    test('default foregroundServiceMaxApiLevel is 29 (Android 10)', () {
+      final config = const StepDetectorConfig();
+      expect(config.foregroundServiceMaxApiLevel, 29);
+    });
+
+    test('foregroundServiceMaxApiLevel 32 includes Android 11/12', () {
+      final config = StepDetectorConfig(foregroundServiceMaxApiLevel: 32);
+      expect(config.foregroundServiceMaxApiLevel, 32);
+      // Android 11 (API 30) <= 32, so foreground service should be used
+      expect(30 <= config.foregroundServiceMaxApiLevel, true);
+      // Android 12 (API 31) <= 32, so foreground service should be used
+      expect(31 <= config.foregroundServiceMaxApiLevel, true);
+      // Android 12L (API 32) <= 32, so foreground service should be used
+      expect(32 <= config.foregroundServiceMaxApiLevel, true);
+      // Android 13 (API 33) > 32, so TYPE_STEP_COUNTER sync should be used
+      expect(33 <= config.foregroundServiceMaxApiLevel, false);
+    });
+
+    test('foregroundServiceMaxApiLevel bounds validation', () {
+      // Min: API 21 (Android 5.0)
+      expect(
+        () => StepDetectorConfig(foregroundServiceMaxApiLevel: 20),
+        throwsA(isA<AssertionError>()),
+      );
+      // Max: API 50 (future-proof)
+      expect(
+        () => StepDetectorConfig(foregroundServiceMaxApiLevel: 51),
+        throwsA(isA<AssertionError>()),
+      );
+      // Valid range
+      expect(
+        StepDetectorConfig(
+          foregroundServiceMaxApiLevel: 21,
+        ).foregroundServiceMaxApiLevel,
+        21,
+      );
+      expect(
+        StepDetectorConfig(
+          foregroundServiceMaxApiLevel: 50,
+        ).foregroundServiceMaxApiLevel,
+        50,
+      );
+    });
+
+    test('all presets have consistent foregroundServiceMaxApiLevel', () {
+      final presets = [
+        const StepDetectorConfig(),
+        StepDetectorConfig.walking(),
+        StepDetectorConfig.running(),
+        StepDetectorConfig.sensitive(),
+        StepDetectorConfig.conservative(),
+      ];
+      for (final preset in presets) {
+        expect(
+          preset.foregroundServiceMaxApiLevel,
+          29,
+          reason: 'All presets should have default API level 29',
+        );
+      }
+    });
+
+    test('copyWith preserves foregroundServiceMaxApiLevel', () {
+      final original = StepDetectorConfig(foregroundServiceMaxApiLevel: 32);
+      final modified = original.copyWith(threshold: 2.0);
+      expect(modified.foregroundServiceMaxApiLevel, 32);
+    });
+
+    test('copyWith can change foregroundServiceMaxApiLevel', () {
+      final original = const StepDetectorConfig();
+      final modified = original.copyWith(foregroundServiceMaxApiLevel: 31);
+      expect(modified.foregroundServiceMaxApiLevel, 31);
+    });
+
+    test('config equality includes foregroundServiceMaxApiLevel', () {
+      final config1 = StepDetectorConfig(foregroundServiceMaxApiLevel: 29);
+      final config2 = StepDetectorConfig(foregroundServiceMaxApiLevel: 29);
+      final config3 = StepDetectorConfig(foregroundServiceMaxApiLevel: 32);
+
+      expect(config1, equals(config2));
+      expect(config1, isNot(equals(config3)));
+    });
+
+    test('config hashCode includes foregroundServiceMaxApiLevel', () {
+      final config1 = StepDetectorConfig(foregroundServiceMaxApiLevel: 29);
+      final config2 = StepDetectorConfig(foregroundServiceMaxApiLevel: 32);
+
+      expect(config1.hashCode, isNot(equals(config2.hashCode)));
+    });
+  });
+
+  group('Foreground Service Path Selection', () {
+    test('API 30 (Android 11) uses foreground service when maxApiLevel=32', () {
+      const androidApiLevel = 30;
+      final config = StepDetectorConfig(foregroundServiceMaxApiLevel: 32);
+      final usesForegroundService =
+          androidApiLevel <= config.foregroundServiceMaxApiLevel;
+      expect(usesForegroundService, true);
+    });
+
+    test(
+      'API 30 (Android 11) skips foreground service when maxApiLevel=29',
+      () {
+        const androidApiLevel = 30;
+        final config = StepDetectorConfig(foregroundServiceMaxApiLevel: 29);
+        final usesForegroundService =
+            androidApiLevel <= config.foregroundServiceMaxApiLevel;
+        expect(usesForegroundService, false);
+      },
+    );
+
+    test('API 33 (Android 13) always skips foreground service', () {
+      const androidApiLevel = 33;
+
+      // Even with maxApiLevel=32, Android 13 should not use foreground service
+      final config = StepDetectorConfig(foregroundServiceMaxApiLevel: 32);
+      final usesForegroundService =
+          androidApiLevel <= config.foregroundServiceMaxApiLevel;
+      expect(usesForegroundService, false);
+    });
+
+    test(
+      'API 29 (Android 10) always uses foreground service with default config',
+      () {
+        const androidApiLevel = 29;
+        final config = const StepDetectorConfig();
+        final usesForegroundService =
+            androidApiLevel <= config.foregroundServiceMaxApiLevel;
+        expect(usesForegroundService, true);
+      },
+    );
+  });
 }

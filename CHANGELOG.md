@@ -5,6 +5,31 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.7.8] - 2026-01-09
+
+### Fixed
+- 🔥 **Critical Fix: Android 11 Terminated State Step Inflation**
+  - Walking 50 steps while app was terminated resulted in ~1000 steps being counted
+  - **Root cause**: SharedPreferences key conflict between foreground service and main plugin
+  - Foreground service was storing session-relative count (50) in same key main plugin expected absolute OS count (5,234,567)
+  - Delta calculation became: `5,234,617 - 50 = 5,234,567 steps!`
+
+### Technical Details
+- Added new preference keys for foreground service:
+  - `foreground_os_step_count` - Stores absolute TYPE_STEP_COUNTER value
+  - `foreground_start_timestamp` - When service started tracking
+  - `foreground_last_update` - Last update timestamp
+- `syncStepsFromTerminatedState()` now checks for foreground service data first
+- Updates baseline with correct OS count before returning session steps
+- Clears foreground service data after sync to prevent double-counting
+
+### Compatibility
+- ✅ Android 11 (API 30) - Bug fixed
+- ✅ Android 12/12L (API 31-32) - Bug fixed
+- ✅ Android 13+ (API 33+) - Unchanged (uses TYPE_STEP_COUNTER sync, not foreground service)
+
+---
+
 ## [1.7.7] - 2026-01-09
 
 ### Verified

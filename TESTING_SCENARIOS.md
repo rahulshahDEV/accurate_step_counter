@@ -794,3 +794,246 @@ The package is considered **fully functional** if:
 
 **Ready to test?** Start with Scenario 1 and work through each one. Good luck! 🚀
 
+---
+
+## Scenario 11: Android 11 Terminated State Fix (API 30)
+
+**Goal**: Verify the ~1000 step inflation bug is fixed on Android 11.
+
+### Background (Bug Fixed in v1.7.8)
+Previously, walking 50 steps while app was terminated resulted in ~1000 steps due to SharedPreferences key conflict between foreground service and main plugin.
+
+### Setup
+```dart
+final stepCounter = AccurateStepCounter();
+
+await stepCounter.initializeLogging(debugLogging: true);
+await stepCounter.start(
+  config: StepDetectorConfig(
+    foregroundServiceMaxApiLevel: 32,  // Enables foreground service on Android 11
+    useForegroundServiceOnOldDevices: true,
+  ),
+);
+await stepCounter.startLogging(config: StepRecordConfig.aggregated());
+
+stepCounter.onTerminatedStepsDetected = (steps, start, end) {
+  print('📥 Terminated steps: $steps');
+  print('   Duration: ${end.difference(start).inMinutes} minutes');
+};
+```
+
+### Test Steps
+1. **Device**: Use Android 11 (API 30) device
+2. **Start app**: Walk 20 steps to establish baseline
+3. **Force close**: Swipe app from recent apps
+4. **Walk**: Walk exactly 50 steps (count manually)
+5. **Wait**: 1-2 minutes
+6. **Reopen app**: Check step count
+
+### Expected Results
+- ✅ `onTerminatedStepsDetected` callback fires with ~50 steps (±10)
+- ❌ NOT ~1000 steps (bug was inflation)
+- ✅ Source: `StepRecordSource.terminated`
+
+### Verification
+```bash
+# Watch logs for the fix
+adb logcat -c && adb logcat -s StepSync | grep -E "foreground service data|OS step count|Session steps"
+```
+
+### Success Criteria
+| Metric | Expected | Bug (Before Fix) |
+|--------|----------|------------------|
+| Steps returned | ~50 | ~1000+ |
+| Session steps | 50 | N/A (not tracked) |
+| OS step count | Large (5M+) | Used as session count |
+
+---
+
+## Scenario 12: Android 12 Terminated State Fix (API 31-32)
+
+**Goal**: Verify the fix also works on Android 12 and 12L.
+
+### Config
+```dart
+await stepCounter.start(
+  config: StepDetectorConfig(
+    foregroundServiceMaxApiLevel: 32,  // Includes Android 12/12L
+    useForegroundServiceOnOldDevices: true,
+  ),
+);
+```
+
+### Test Steps
+1. **Device**: Use Android 12 (API 31) or Android 12L (API 32)
+2. Same steps as Scenario 11
+
+### Expected Results
+- ✅ Same fix applies: ~50 steps returned (not ~1000)
+- ✅ Foreground service path used (API 31-32 ≤ 32)
+
+---
+
+## Scenario 13: Android 13+ Non-Foreground Service Path (API 33+)
+
+**Goal**: Verify Android 13+ uses TYPE_STEP_COUNTER sync (no foreground service).
+
+### Config
+```dart
+await stepCounter.start(
+  config: StepDetectorConfig(
+    foregroundServiceMaxApiLevel: 32,  // Android 13+ (API 33) > 32, skips foreground service
+    useForegroundServiceOnOldDevices: true,
+  ),
+);
+```
+
+### Test Steps
+1. **Device**: Use Android 13+ (API 33+) device
+2. **Start app**: Walk 20 steps
+3. **Force close**: Settings → Apps → Force Stop
+4. **Walk**: 50 steps
+5. **Reopen**: Check sync
+
+### Expected Results
+- ❌ No foreground service notification (ever)
+- ✅ Terminated sync uses TYPE_STEP_COUNTER delta
+- ✅ Fix doesn't affect this path (unchanged from before)
+
+### Verification
+```bash
+# No foreground service should run
+adb shell dumpsys activity services | grep StepCounterForegroundService
+# Should return empty
+```
+
+---
+
+## Scenario 14: Comparison Test (API 30 vs API 33+)
+
+**Goal**: Verify consistent behavior across both paths.
+
+### Test Matrix
+
+| Step | Android 11 (API 30) | Android 13+ (API 33) |
+|------|---------------------|----------------------|
+| 1. Walk 30 steps | ✓ | ✓ |
+| 2. Force close | ✓ | ✓ |
+| 3. Walk 50 steps | ✓ | ✓ |
+| 4. Reopen | ✓ | ✓ |
+
+### Expected Results
+
+| Metric | Android 11 | Android 13+ |
+|--------|------------|-------------|
+| Path used | Foreground Service | TYPE_STEP_COUNTER |
+| Notification shown | ✅ Yes | ❌ No |
+| Terminated steps | ~50 | ~50 |
+
+---
+
+## Scenario 15: Multiple Terminated Sessions
+
+**Goal**: Verify fix handles multiple app kill/restart cycles.
+
+### Test Steps
+1. **Session 1**: Walk 30 steps → Force close → Reopen
+2. **Session 2**: Walk 40 steps → Force close → Reopen  
+3. **Session 3**: Walk 50 steps → Force close → Reopen
+4. **Verify total**: Should be ~120 (30+40+50)
+
+### Expected Results
+- ✅ Each session's steps logged separately
+- ✅ No carryover/duplicate from previous session
+- ✅ SharedPreferences cleared after each sync
+
+---
+
+## Scenario 16: Rapid App Restart
+
+**Goal**: Verify fix prevents duplicate logging on rapid restarts.
+
+### Test Steps
+1. Start app, walk 30 steps
+2. Force close app
+3. Walk 20 steps
+4. **Rapidly restart**: Open → Close → Open → Close → Open (within 30 seconds)
+5. Check total: Should be ~50 (30+20), no duplicates
+
+### Expected Results
+- ✅ Steps logged only once
+- ✅ No duplicate entries for same time range
+
+---
+
+## Scenario 17: Config Changes (Switching API Level)
+
+**Goal**: Verify behavior when changing `foregroundServiceMaxApiLevel`.
+
+### Test on Android 11 (API 30)
+```dart
+// Config 32: Foreground service runs (30 ≤ 32)
+await stepCounter.start(config: StepDetectorConfig(foregroundServiceMaxApiLevel: 32));
+
+// Config 29: No foreground service (30 > 29)
+await stepCounter.start(config: StepDetectorConfig(foregroundServiceMaxApiLevel: 29));
+```
+
+### Expected Results
+- ✅ Config 32: Notification appears
+- ✅ Config 29: No notification (uses TYPE_STEP_COUNTER sync)
+
+---
+
+## Scenario 18: Edge Cases for Foreground Service Fix
+
+**Goal**: Verify edge case handling.
+
+### Test 18.1: Device Reboot
+1. Force close app → Walk 20 steps → Reboot device → Reopen app
+- **Expected**: No steps synced (OS counter reset)
+
+### Test 18.2: Long Duration
+1. Force close → Wait 6+ hours → Walk 100 steps → Reopen
+- **Expected**: Steps synced with validation
+
+### Test 18.3: Zero Steps
+1. Force close → Don't walk → Reopen after 1 hour
+- **Expected**: No callback fired
+
+---
+
+## Test Summary Checklist
+
+```
+[ ] Scenario 11: Android 11 (API 30) - 50 steps → ~50 returned (not ~1000)
+[ ] Scenario 12: Android 12/12L (API 31-32) - Same fix applies
+[ ] Scenario 13: Android 13+ (API 33+) - Unchanged behavior
+[ ] Scenario 14: Comparison test - Both paths consistent
+[ ] Scenario 15: Multiple sessions - No carryover
+[ ] Scenario 16: Rapid restart - No duplicates
+[ ] Scenario 17: Config changes - Correct path switching
+[ ] Scenario 18: Edge cases - Reboot, long duration, zero steps
+```
+
+---
+
+## ADB Commands for Testing
+
+```bash
+# Get API level
+adb shell getprop ro.build.version.sdk
+
+# Force stop app
+adb shell am force-stop com.example.your_app
+
+# Watch logs
+adb logcat -c && adb logcat -s StepSync StepForegroundService
+
+# Check foreground service
+adb shell dumpsys activity services | grep StepCounterForegroundService
+```
+
+---
+
+**Test thoroughly on Android 11 (API 30) and Android 13+ (API 33) devices to verify the fix!** 🧪
