@@ -245,12 +245,17 @@ class AccurateStepCounterPlugin : FlutterPlugin, MethodCallHandler, SensorEventL
             }
             "getForegroundStepCount" -> {
                 android.util.Log.d("AccurateStepCounter", "getForegroundStepCount method called")
-                // Use NativeStepDetector count instead of foreground service count
-                // NativeStepDetector uses TYPE_STEP_DETECTOR which works on more devices (including Samsung)
+                // Use the maximum of all available step sources:
+                // 1. NativeStepDetector (TYPE_STEP_DETECTOR or accelerometer fallback)
+                // 2. Foreground service count
+                // 3. Main plugin's TYPE_STEP_COUNTER (onSensorChanged updates)
                 val nativeCount = nativeStepDetector?.getStepCount() ?: 0
                 val foregroundCount = StepCounterForegroundService.currentStepCount
-                val stepCount = maxOf(nativeCount, foregroundCount)
-                android.util.Log.d("AccurateStepCounter", "Foreground step count: $stepCount (native: $nativeCount, service: $foregroundCount)")
+                val pluginCount = currentStepCount  // Main plugin's TYPE_STEP_COUNTER steps
+                
+                val stepCount = maxOf(nativeCount, foregroundCount, pluginCount)
+                android.util.Log.d("AccurateStepCounter", 
+                    "Foreground step count: $stepCount (native: $nativeCount, service: $foregroundCount, plugin: $pluginCount)")
                 result.success(stepCount)
             }
             "resetForegroundStepCount" -> {

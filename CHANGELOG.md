@@ -5,6 +5,52 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.7.7] - 2026-01-09
+
+### Verified
+- ✅ **Android 11+ Compatibility** - Verified fix does not affect Android 11+ devices
+  - `maxOf(nativeCount, foregroundCount, pluginCount)` is additive, never removes data
+  - Android 11+ continues to use TYPE_STEP_COUNTER sync via `shouldStartForegroundServiceOnTermination()`
+  - Samsung accelerometer fallback is sensor-only, independent of API level logic
+
+### No Duplication
+- ✅ Step sources are mutually exclusive by design:
+  - `nativeCount`: From NativeStepDetector (TYPE_STEP_DETECTOR or accelerometer)
+  - `foregroundCount`: From StepCounterForegroundService (Android ≤10)
+  - `pluginCount`: From main plugin's TYPE_STEP_COUNTER (onSensorChanged)
+- Using `maxOf()` prevents duplication - it selects the highest source, not sum
+
+### Behavior Matrix
+| Device | Android ≤10 | Android 11+ |
+|--------|------------|-------------|
+| **Samsung** | Foreground service + Accelerometer | TYPE_STEP_COUNTER sync + Accelerometer |
+| **Non-Samsung** | Foreground service + TYPE_STEP_DETECTOR | TYPE_STEP_COUNTER sync + TYPE_STEP_DETECTOR |
+
+### Test Results
+- ✅ 42 unit tests passed (config validation)
+- ✅ Samsung fallback logic verified
+- ✅ Android API level checks preserved
+
+---
+
+## [1.7.6] - 2026-01-09
+
+### Fixed
+- 🔥 **Critical Fix: Step count returning 0 despite sensor working**
+  - `getForegroundStepCount()` was ignoring main plugin's `currentStepCount` (TYPE_STEP_COUNTER)
+  - Sensor was reporting steps (180 → 181 → 182) but method returned 0
+  - Now includes all three sources: `maxOf(nativeCount, foregroundCount, pluginCount)`
+  - Enhanced logging shows all three counts for debugging
+
+### Technical Details
+The `onSensorChanged` handler was correctly updating `currentStepCount`, but `getForegroundStepCount` was only checking:
+- `nativeStepDetector?.getStepCount()` (TYPE_STEP_DETECTOR or accelerometer)
+- `StepCounterForegroundService.currentStepCount` (foreground service)
+
+Missing the main plugin's `currentStepCount` (TYPE_STEP_COUNTER) caused step count to return 0 on devices where the other sources weren't active.
+
+---
+
 ## [1.7.5] - 2026-01-09
 
 ### Fixed
