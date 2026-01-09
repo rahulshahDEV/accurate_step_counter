@@ -60,14 +60,25 @@ class NativeStepDetector(private val context: Context) : SensorEventListener {
     private fun initializeSensors() {
         sensorManager = context.getSystemService(Context.SENSOR_SERVICE) as SensorManager
         
-        // Try to get TYPE_STEP_DETECTOR first (more accurate)
-        stepDetectorSensor = sensorManager?.getDefaultSensor(Sensor.TYPE_STEP_DETECTOR)
+        // Check if Samsung device - they have known issues with TYPE_STEP_DETECTOR
+        val isSamsung = android.os.Build.MANUFACTURER.equals("samsung", ignoreCase = true)
+        
+        if (isSamsung) {
+            android.util.Log.w(TAG, "Samsung device detected - using accelerometer fallback (TYPE_STEP_DETECTOR unreliable on Samsung)")
+        }
+        
+        // Try to get TYPE_STEP_DETECTOR first (more accurate) - but skip on Samsung
+        if (!isSamsung) {
+            stepDetectorSensor = sensorManager?.getDefaultSensor(Sensor.TYPE_STEP_DETECTOR)
+        }
         
         if (stepDetectorSensor != null) {
             android.util.Log.d(TAG, "TYPE_STEP_DETECTOR available: ${stepDetectorSensor?.name}")
             isUsingStepDetector = true
         } else {
-            android.util.Log.w(TAG, "TYPE_STEP_DETECTOR not available, using accelerometer fallback")
+            if (!isSamsung) {
+                android.util.Log.w(TAG, "TYPE_STEP_DETECTOR not available, using accelerometer fallback")
+            }
             accelerometerSensor = sensorManager?.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
             isUsingStepDetector = false
             

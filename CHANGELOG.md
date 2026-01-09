@@ -9,9 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - 🐛 **Samsung Device Compatibility Fix**
-  - Fixed step counting on Samsung devices by prioritizing TYPE_STEP_DETECTOR over TYPE_STEP_COUNTER
-  - `getForegroundStepCount()` now returns `maxOf(nativeCount, foregroundCount)` for better device compatibility
-  - Enhanced logging shows both native and service counts for debugging
+  - **Accelerometer Fallback**: Samsung devices now use TYPE_ACCELEROMETER instead of TYPE_STEP_DETECTOR
+  - Samsung has known issues with TYPE_STEP_DETECTOR sensor not triggering `onSensorChanged`
+  - Added manufacturer detection: `Build.MANUFACTURER.equals("samsung", ignoreCase = true)`
+  - `getForegroundStepCount()` now returns `maxOf(nativeCount, foregroundCount)` for better compatibility
+  - Enhanced logging shows device manufacturer and sensor selection for debugging
 
 ### Added
 - 🧪 **Comprehensive Scenario Tests** (15 new tests across 3 groups)
