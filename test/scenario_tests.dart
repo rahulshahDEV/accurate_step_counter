@@ -1220,4 +1220,445 @@ void main() {
       expect(config.enableOsLevelSync, true);
     });
   });
+
+  // ============================================================
+  // DUPLICATE STEP PREVENTION SCENARIOS
+  // ============================================================
+
+  group('Scenario 15: Duplicate Step Prevention', () {
+    late AccurateStepCounter stepCounter;
+
+    setUp(() {
+      stepCounter = AccurateStepCounter();
+    });
+
+    tearDown(() async {
+      await stepCounter.dispose();
+    });
+
+    test('15.1 Foreground to background: no duplicate counts', () async {
+      await stepCounter.initializeLogging(debugLogging: false);
+
+      final now = DateTime.now();
+
+      // Foreground session: 100 steps
+      await stepCounter.insertRecord(
+        StepRecord(
+          stepCount: 100,
+          fromTime: now.subtract(const Duration(hours: 2)),
+          toTime: now.subtract(const Duration(hours: 1)),
+          source: StepRecordSource.foreground,
+        ),
+      );
+
+      // Background session: 50 NEW steps (starting after foreground ended)
+      await stepCounter.insertRecord(
+        StepRecord(
+          stepCount: 50,
+          fromTime: now.subtract(const Duration(hours: 1)),
+          toTime: now,
+          source: StepRecordSource.background,
+        ),
+      );
+
+      // Total should be exactly 150 (no duplication)
+      final total = await stepCounter.getTotalSteps();
+      expect(total, 150);
+
+      // Verify each source has correct distinct count
+      final fg = await stepCounter.getStepsBySource(
+        StepRecordSource.foreground,
+      );
+      final bg = await stepCounter.getStepsBySource(
+        StepRecordSource.background,
+      );
+      expect(fg, 100);
+      expect(bg, 50);
+    });
+
+    test('15.2 Background to terminated: no duplicate counts', () async {
+      await stepCounter.initializeLogging(debugLogging: false);
+
+      final now = DateTime.now();
+
+      // Background session while app was in background
+      await stepCounter.insertRecord(
+        StepRecord(
+          stepCount: 75,
+          fromTime: now.subtract(const Duration(hours: 3)),
+          toTime: now.subtract(const Duration(hours: 2)),
+          source: StepRecordSource.background,
+        ),
+      );
+
+      // Terminated sync: steps counted while app was killed
+      await stepCounter.insertRecord(
+        StepRecord(
+          stepCount: 100,
+          fromTime: now.subtract(const Duration(hours: 2)),
+          toTime: now,
+          source: StepRecordSource.terminated,
+        ),
+      );
+
+      // Total should be 175 (no duplication)
+      final total = await stepCounter.getTotalSteps();
+      expect(total, 175);
+    });
+
+    test(
+      '15.3 Terminated sync does not overlap with existing records',
+      () async {
+        await stepCounter.initializeLogging(debugLogging: false);
+
+        final now = DateTime.now();
+
+        // First terminated sync at 10:00
+        await stepCounter.insertRecord(
+          StepRecord(
+            stepCount: 200,
+            fromTime: now.subtract(const Duration(hours: 4)),
+            toTime: now.subtract(const Duration(hours: 2)),
+            source: StepRecordSource.terminated,
+          ),
+        );
+
+        // Second terminated sync at 12:00 (non-overlapping)
+        await stepCounter.insertRecord(
+          StepRecord(
+            stepCount: 100,
+            fromTime: now.subtract(const Duration(hours: 2)),
+            toTime: now,
+            source: StepRecordSource.terminated,
+          ),
+        );
+
+        // Total should be sum of both
+        final total = await stepCounter.getTotalSteps();
+        expect(total, 300);
+
+        // Get logs and verify they're distinct
+        final logs = await stepCounter.getStepLogs();
+        expect(logs.length, 2);
+      },
+    );
+
+    test('15.4 Multiple state transitions: total is correct', () async {
+      await stepCounter.initializeLogging(debugLogging: false);
+
+      final now = DateTime.now();
+
+      // Simulate full day: foreground → background → terminated → foreground
+      // Period 1: Morning walk (foreground)
+      await stepCounter.insertRecord(
+        StepRecord(
+          stepCount: 100,
+          fromTime: now.subtract(const Duration(hours: 8)),
+          toTime: now.subtract(const Duration(hours: 7)),
+          source: StepRecordSource.foreground,
+        ),
+      );
+
+      // Period 2: App in background (background)
+      await stepCounter.insertRecord(
+        StepRecord(
+          stepCount: 50,
+          fromTime: now.subtract(const Duration(hours: 7)),
+          toTime: now.subtract(const Duration(hours: 6)),
+          source: StepRecordSource.background,
+        ),
+      );
+
+      // Period 3: App killed for hours (terminated sync)
+      await stepCounter.insertRecord(
+        StepRecord(
+          stepCount: 200,
+          fromTime: now.subtract(const Duration(hours: 6)),
+          toTime: now.subtract(const Duration(hours: 2)),
+          source: StepRecordSource.terminated,
+        ),
+      );
+
+      // Period 4: Evening walk (foreground)
+      await stepCounter.insertRecord(
+        StepRecord(
+          stepCount: 75,
+          fromTime: now.subtract(const Duration(hours: 2)),
+          toTime: now,
+          source: StepRecordSource.foreground,
+        ),
+      );
+
+      // Total: 100 + 50 + 200 + 75 = 425
+      final total = await stepCounter.getTotalSteps();
+      expect(total, 425);
+
+      // Verify stats breakdown
+      final stats = await stepCounter.getStepStats();
+      expect(stats['foregroundSteps'], 175); // 100 + 75
+      expect(stats['backgroundSteps'], 50);
+      expect(stats['terminatedSteps'], 200);
+    });
+
+    test('15.5 Rapid state changes do not cause duplicates', () async {
+      await stepCounter.initializeLogging(debugLogging: false);
+
+      final now = DateTime.now();
+
+      // Quick foreground → background → foreground cycle
+      await stepCounter.insertRecord(
+        StepRecord(
+          stepCount: 10,
+          fromTime: now.subtract(const Duration(minutes: 10)),
+          toTime: now.subtract(const Duration(minutes: 8)),
+          source: StepRecordSource.foreground,
+        ),
+      );
+
+      await stepCounter.insertRecord(
+        StepRecord(
+          stepCount: 5,
+          fromTime: now.subtract(const Duration(minutes: 8)),
+          toTime: now.subtract(const Duration(minutes: 6)),
+          source: StepRecordSource.background,
+        ),
+      );
+
+      await stepCounter.insertRecord(
+        StepRecord(
+          stepCount: 15,
+          fromTime: now.subtract(const Duration(minutes: 6)),
+          toTime: now,
+          source: StepRecordSource.foreground,
+        ),
+      );
+
+      // Total: 10 + 5 + 15 = 30
+      final total = await stepCounter.getTotalSteps();
+      expect(total, 30);
+    });
+
+    test(
+      '15.6 External import does not duplicate with native counts',
+      () async {
+        await stepCounter.initializeLogging(debugLogging: false);
+
+        final now = DateTime.now();
+
+        // Native counting (foreground)
+        await stepCounter.insertRecord(
+          StepRecord(
+            stepCount: 500,
+            fromTime: now.subtract(const Duration(hours: 4)),
+            toTime: now.subtract(const Duration(hours: 2)),
+            source: StepRecordSource.foreground,
+          ),
+        );
+
+        // External import (Health Connect) for DIFFERENT time period
+        await stepCounter.insertRecord(
+          StepRecord(
+            stepCount: 300,
+            fromTime: now.subtract(const Duration(hours: 8)),
+            toTime: now.subtract(const Duration(hours: 4)),
+            source: StepRecordSource.external,
+          ),
+        );
+
+        // Total: 500 + 300 = 800
+        final total = await stepCounter.getTotalSteps();
+        expect(total, 800);
+
+        // Verify distinct sources
+        final fg = await stepCounter.getStepsBySource(
+          StepRecordSource.foreground,
+        );
+        final ext = await stepCounter.getStepsBySource(
+          StepRecordSource.external,
+        );
+        expect(fg, 500);
+        expect(ext, 300);
+      },
+    );
+  });
+
+  // ============================================================
+  // SAMSUNG TYPE_STEP_DETECTOR FIX VERIFICATION
+  // ============================================================
+
+  group('Scenario 16: TYPE_STEP_DETECTOR Priority (Samsung Fix)', () {
+    test('16.1 Config allows hardware detector configuration', () {
+      final config = StepDetectorConfig(
+        useForegroundServiceOnOldDevices: true,
+        foregroundServiceMaxApiLevel: 32, // Android 12
+      );
+
+      expect(config.useForegroundServiceOnOldDevices, true);
+      expect(config.foregroundServiceMaxApiLevel, 32);
+    });
+
+    test('16.2 Default config uses API 29 cutoff', () {
+      final config = const StepDetectorConfig();
+
+      // TYPE_STEP_DETECTOR (native) should be used for API > 29
+      // TYPE_STEP_COUNTER (foreground service) for API <= 29
+      expect(config.foregroundServiceMaxApiLevel, 29);
+    });
+
+    test('16.3 Running preset preserves detector settings', () {
+      final config = StepDetectorConfig.running();
+
+      // Running preset should still have default service settings
+      expect(config.useForegroundServiceOnOldDevices, true);
+      expect(config.foregroundServiceMaxApiLevel, 29);
+    });
+
+    test('16.4 Custom config can extend foreground service to newer APIs', () {
+      // For Samsung devices that don't support TYPE_STEP_COUNTER well
+      final config = StepDetectorConfig(
+        foregroundServiceMaxApiLevel: 33, // Android 13
+        useForegroundServiceOnOldDevices: true,
+      );
+
+      expect(config.foregroundServiceMaxApiLevel, 33);
+      expect(config.useForegroundServiceOnOldDevices, true);
+    });
+  });
+
+  // ============================================================
+  // CROSS-API LEVEL BEHAVIOR
+  // ============================================================
+
+  group('Scenario 17: Cross-API Level Behavior', () {
+    late AccurateStepCounter stepCounter;
+
+    setUp(() {
+      stepCounter = AccurateStepCounter();
+    });
+
+    tearDown(() async {
+      await stepCounter.dispose();
+    });
+
+    test('17.1 Android 10 config uses foreground service', () {
+      final config = StepDetectorConfig(
+        foregroundServiceMaxApiLevel: 29, // Android 10
+        useForegroundServiceOnOldDevices: true,
+        foregroundNotificationTitle: 'Step Counter',
+        foregroundNotificationText: 'Tracking steps in background',
+      );
+
+      expect(config.foregroundServiceMaxApiLevel, 29);
+      expect(config.foregroundNotificationTitle, 'Step Counter');
+      expect(config.foregroundNotificationText, 'Tracking steps in background');
+    });
+
+    test('17.2 Android 11+ config uses native detector', () {
+      final config = StepDetectorConfig(
+        enableOsLevelSync: true, // For terminated state
+        useForegroundServiceOnOldDevices: true,
+        foregroundServiceMaxApiLevel: 29, // Only for API <= 29
+      );
+
+      // API > 29 should use native TYPE_STEP_DETECTOR instead
+      expect(config.enableOsLevelSync, true);
+      expect(config.foregroundServiceMaxApiLevel, 29);
+    });
+
+    test('17.3 Terminated source works for both API levels', () async {
+      await stepCounter.initializeLogging(debugLogging: false);
+
+      final now = DateTime.now();
+
+      // Terminated steps should work regardless of API level
+      await stepCounter.insertRecord(
+        StepRecord(
+          stepCount: 500,
+          fromTime: now.subtract(const Duration(hours: 8)),
+          toTime: now,
+          source: StepRecordSource.terminated,
+        ),
+      );
+
+      final terminated = await stepCounter.getStepsBySource(
+        StepRecordSource.terminated,
+      );
+      expect(terminated, 500);
+    });
+
+    test('17.4 Config respects foregroundServiceMaxApiLevel', () {
+      // Test different API level configurations
+      final config10 = StepDetectorConfig(foregroundServiceMaxApiLevel: 29);
+      final config12 = StepDetectorConfig(foregroundServiceMaxApiLevel: 32);
+      final config13 = StepDetectorConfig(foregroundServiceMaxApiLevel: 33);
+
+      expect(config10.foregroundServiceMaxApiLevel, 29);
+      expect(config12.foregroundServiceMaxApiLevel, 32);
+      expect(config13.foregroundServiceMaxApiLevel, 33);
+    });
+
+    test('17.5 All sources available on all API levels', () async {
+      await stepCounter.initializeLogging(debugLogging: false);
+
+      final now = DateTime.now();
+
+      // Add steps from all sources
+      await stepCounter.insertRecord(
+        StepRecord(
+          stepCount: 100,
+          fromTime: now.subtract(const Duration(hours: 4)),
+          toTime: now.subtract(const Duration(hours: 3)),
+          source: StepRecordSource.foreground,
+        ),
+      );
+
+      await stepCounter.insertRecord(
+        StepRecord(
+          stepCount: 75,
+          fromTime: now.subtract(const Duration(hours: 3)),
+          toTime: now.subtract(const Duration(hours: 2)),
+          source: StepRecordSource.background,
+        ),
+      );
+
+      await stepCounter.insertRecord(
+        StepRecord(
+          stepCount: 50,
+          fromTime: now.subtract(const Duration(hours: 2)),
+          toTime: now.subtract(const Duration(hours: 1)),
+          source: StepRecordSource.terminated,
+        ),
+      );
+
+      await stepCounter.insertRecord(
+        StepRecord(
+          stepCount: 25,
+          fromTime: now.subtract(const Duration(hours: 1)),
+          toTime: now,
+          source: StepRecordSource.external,
+        ),
+      );
+
+      // All 4 sources should work
+      final fg = await stepCounter.getStepsBySource(
+        StepRecordSource.foreground,
+      );
+      final bg = await stepCounter.getStepsBySource(
+        StepRecordSource.background,
+      );
+      final term = await stepCounter.getStepsBySource(
+        StepRecordSource.terminated,
+      );
+      final ext = await stepCounter.getStepsBySource(StepRecordSource.external);
+
+      expect(fg, 100);
+      expect(bg, 75);
+      expect(term, 50);
+      expect(ext, 25);
+
+      // Total: 250
+      final total = await stepCounter.getTotalSteps();
+      expect(total, 250);
+    });
+  });
 }

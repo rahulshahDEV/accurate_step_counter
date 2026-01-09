@@ -636,6 +636,143 @@ Future<void> runComprehensiveTest() async {
 
 ---
 
+## Scenario 8: Samsung Device Fix Verification
+
+**Goal**: Verify the TYPE_STEP_DETECTOR priority fix works on Samsung devices.
+
+### Background
+Samsung devices sometimes don't report steps via `TYPE_STEP_COUNTER` sensor properly. The fix prioritizes `TYPE_STEP_DETECTOR` (NativeStepDetector) over the foreground service counter.
+
+### Setup
+```dart
+final stepCounter = AccurateStepCounter();
+
+await stepCounter.initializeLogging(debugLogging: true);
+await stepCounter.start();
+await stepCounter.startLogging(config: StepRecordConfig.walking());
+```
+
+### Test Steps
+1. **Run on Samsung device** (Android 10+)
+2. **Start the app** and walk 50 steps
+3. **Monitor ADB logs** for step source
+
+### Verification Commands
+```bash
+# Watch logs for the Samsung fix
+adb logcat -c && adb logcat -s AccurateStepCounter | grep -E "getForegroundStepCount|native:|service:"
+```
+
+### Expected Log Output
+```
+Foreground step count: 50 (native: 50, service: 0)
+```
+
+This confirms NativeStepDetector (TYPE_STEP_DETECTOR) is providing the count, not the foreground service (TYPE_STEP_COUNTER).
+
+### Success Criteria
+- ✅ `native:` count matches actual steps walked
+- ✅ `service:` count may be 0 on Samsung devices (expected)
+- ✅ Total step count is accurate
+
+---
+
+## Scenario 9: Duplicate Prevention Test
+
+**Goal**: Verify no duplicate step counts across state transitions.
+
+### Setup
+```dart
+final stepCounter = AccurateStepCounter();
+
+await stepCounter.initializeLogging(debugLogging: true);
+await stepCounter.start(config: StepDetectorConfig(enableOsLevelSync: true));
+await stepCounter.startLogging(config: StepRecordConfig.aggregated());
+```
+
+### Test Steps
+1. **Phase 1 (Foreground)**: Walk 30 steps with app open, note the count
+2. **Phase 2 (Background)**: Press home, walk 30 more steps, return to app
+3. **Phase 3 (Terminated)**: Force kill app, walk 30 more steps, reopen app
+4. **Verify**: Total should be ~90 steps (not 120+ due to duplicates)
+
+### Verification Commands
+```dart
+final stats = await stepCounter.getStepStats();
+print('Total: ${stats['totalSteps']}');
+print('Foreground: ${stats['foregroundSteps']}');
+print('Background: ${stats['backgroundSteps']}');
+print('Terminated: ${stats['terminatedSteps']}');
+
+// Each phase should have ~30 steps, total ~90
+// If you see 120+, there's a duplicate counting issue
+```
+
+### Expected Results
+- ✅ Foreground steps: ~30
+- ✅ Background steps: ~30
+- ✅ Terminated steps: ~30
+- ✅ Total: ~90 (sum of all three)
+- ❌ If total > 100: Possible duplicate counting
+
+---
+
+## Scenario 10: Cross-Android Version Validation
+
+**Goal**: Verify correct behavior on both Android ≤10 and Android 11+.
+
+### Android ≤10 (API ≤29) Testing
+
+#### Expected Behavior
+- ✅ Foreground service notification appears when app goes to background
+- ✅ WakeLock keeps sensor active
+- ✅ Steps counted continuously via foreground service
+
+#### Test Steps
+1. Start app, enable step counter
+2. Press home button (app goes to background)
+3. **Verify**: Notification appears in status bar
+4. Walk 50 steps
+5. Return to app
+6. **Verify**: Steps are counted
+
+```bash
+# Check foreground service
+adb shell dumpsys activity services | grep StepCounterForegroundService
+```
+
+### Android 11+ (API ≥30) Testing
+
+#### Expected Behavior
+- ❌ No foreground service notification
+- ✅ Native TYPE_STEP_DETECTOR continues in background
+- ✅ Terminated state sync works when app is killed
+
+#### Test Steps
+1. Start app, enable step counter
+2. Press home button (app goes to background)
+3. **Verify**: NO notification appears
+4. Walk 50 steps
+5. **Force kill app**: `adb shell am force-stop <package>`
+6. Walk 30 more steps
+7. Reopen app
+8. **Verify**: ~80 total steps (50 background + 30 terminated sync)
+
+### Quick Check Script
+```bash
+# Get Android version
+API=$(adb shell getprop ro.build.version.sdk)
+echo "API Level: $API"
+
+if [ "$API" -le 29 ]; then
+  echo "Testing Android ≤10 behavior (foreground service)"
+else
+  echo "Testing Android 11+ behavior (native detector + OS sync)"
+fi
+```
+
+---
+
 ## Success Criteria
 
 The package is considered **fully functional** if:
@@ -650,7 +787,10 @@ The package is considered **fully functional** if:
 8. ✅ **Permission handling**: Gracefully handles denied permissions
 9. ✅ **Device reboot**: Handles sensor reset without crashing
 10. ✅ **No crashes**: All scenarios complete without errors
+11. ✅ **Samsung devices**: TYPE_STEP_DETECTOR priority works correctly
+12. ✅ **No duplicates**: State transitions don't cause double-counting
 
 ---
 
 **Ready to test?** Start with Scenario 1 and work through each one. Good luck! 🚀
+
