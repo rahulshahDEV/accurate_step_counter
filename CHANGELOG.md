@@ -28,13 +28,25 @@ When using foreground service on Android 10 and below, rapid app restarts could 
 ## [1.7.3] - 2026-01-08
 
 ### Fixed
+- 🐛 **Fixed race condition causing duplicate steps on some devices (MIUI, Samsung)**
+  - Changed SharedPreferences from `apply()` to `commit()` in reset operations
+  - Ensures synchronous write completion before next read on service restart
+  - Fixes duplicate terminated step logging on devices with aggressive app lifecycle management
+  - Specifically targets MIUI, Samsung, and other OEM devices with aggressive battery optimization
+
 - 🐛 **Fixed duplicate step counting from foreground service**
   - Removed automatic `_syncStepsFromForegroundService()` call from `start()`
   - Steps are already logged via polling/EventChannel during active use
   - Prevents double-counting when app restarts
 
-### Why?
-In v1.7.1-1.7.2, every call to `start()` would sync foreground service steps as "terminated" steps, even if the app was active. This caused duplicates because those steps were already counted via polling.
+### Technical Details
+Root cause was async SharedPreferences writes using `apply()` in reset methods. On devices with fast/aggressive lifecycle management, the foreground service could restart and read old values before the reset completed, causing the same step count to be logged multiple times.
+
+Changed to `commit()` for synchronous blocking writes in:
+- `AccurateStepCounterPlugin.kt` → `resetForegroundStepCount()` method (line 261)
+- `StepCounterForegroundService.kt` → `resetStepCount()` method (line 315)
+
+---
 
 ---
 

@@ -305,15 +305,17 @@ class StepCounterForegroundService : Service(), SensorEventListener {
         sessionStepCount = 0
         baseStepCount = -1
         currentStepCount = 0
-        
+
+        // Using commit() instead of apply() to ensure synchronous write completes before next read
+        // This prevents race conditions on devices with aggressive lifecycle management (MIUI, Samsung)
         val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         prefs.edit().apply {
             putInt(FOREGROUND_STEP_COUNT_KEY, 0)
             putInt(FOREGROUND_BASE_STEP_KEY, -1)
-            apply()
+            commit()
         }
-        
+
         updateNotification()
-        android.util.Log.d("StepForegroundService", "Step count reset")
+        android.util.Log.d("StepForegroundService", "Step count reset completed (synchronous)")
     }
 }

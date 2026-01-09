@@ -245,19 +245,26 @@ class AccurateStepCounterPlugin : FlutterPlugin, MethodCallHandler, SensorEventL
             }
             "getForegroundStepCount" -> {
                 android.util.Log.d("AccurateStepCounter", "getForegroundStepCount method called")
-                val stepCount = StepCounterForegroundService.currentStepCount
-                android.util.Log.d("AccurateStepCounter", "Foreground step count: $stepCount")
+                // Use NativeStepDetector count instead of foreground service count
+                // NativeStepDetector uses TYPE_STEP_DETECTOR which works on more devices (including Samsung)
+                val nativeCount = nativeStepDetector?.getStepCount() ?: 0
+                val foregroundCount = StepCounterForegroundService.currentStepCount
+                val stepCount = maxOf(nativeCount, foregroundCount)
+                android.util.Log.d("AccurateStepCounter", "Foreground step count: $stepCount (native: $nativeCount, service: $foregroundCount)")
                 result.success(stepCount)
             }
             "resetForegroundStepCount" -> {
                 android.util.Log.d("AccurateStepCounter", "resetForegroundStepCount method called")
                 // Reset via SharedPreferences since we can't directly access the service instance
+                // Using commit() instead of apply() to ensure synchronous write completes before next read
+                // This prevents race conditions on devices with aggressive lifecycle management (MIUI, Samsung)
                 val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
                 prefs.edit().apply {
                     putInt("foreground_step_count", 0)
                     putInt("foreground_base_step", -1)
-                    apply()
+                    commit()
                 }
+                android.util.Log.d("AccurateStepCounter", "Foreground step count reset completed (synchronous)")
                 result.success(true)
             }
             // Native step detection methods
