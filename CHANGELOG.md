@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.7.5] - 2026-01-09
+
+### Fixed
+- 🐛 **Samsung Device Compatibility Fix**
+  - Fixed step counting on Samsung devices by prioritizing TYPE_STEP_DETECTOR over TYPE_STEP_COUNTER
+  - `getForegroundStepCount()` now returns `maxOf(nativeCount, foregroundCount)` for better device compatibility
+  - Enhanced logging shows both native and service counts for debugging
+
+### Added
+- 🧪 **Comprehensive Scenario Tests** (15 new tests across 3 groups)
+  - **Scenario 15**: Duplicate Step Prevention (6 tests) - State transitions, rapid changes
+  - **Scenario 16**: Samsung TYPE_STEP_DETECTOR Fix (4 tests) - Config verification
+  - **Scenario 17**: Cross-API Level Behavior (5 tests) - Android ≤10 vs 11+ differences
+
+- 📖 **New Manual Testing Scenarios** in TESTING_SCENARIOS.md
+  - Scenario 8: Samsung Device Fix Verification
+  - Scenario 9: Duplicate Prevention Test
+  - Scenario 10: Cross-Android Version Validation
+
+---
+
 ## [1.7.4] - 2026-01-08
 
 ### Fixed
