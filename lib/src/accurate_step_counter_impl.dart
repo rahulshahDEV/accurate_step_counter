@@ -11,6 +11,7 @@ import 'models/step_record_config.dart';
 import 'models/step_record_source.dart';
 import 'platform/step_counter_platform.dart';
 import 'services/native_step_detector.dart';
+import 'services/sensors_step_detector.dart';
 import 'services/step_record_store.dart';
 
 /// Implementation of the AccurateStepCounter plugin
@@ -28,7 +29,10 @@ class AccurateStepCounterImpl {
   final StreamController<StepCountEvent> _foregroundStepController =
       StreamController<StepCountEvent>.broadcast();
   int _lastForegroundStepCount = 0;
-  StreamSubscription<Map<dynamic, dynamic>>? _foregroundEventSubscription;
+
+  // Sensors plus step detector for foreground service mode
+  SensorsStepDetector? _sensorsStepDetector;
+  StreamSubscription<StepCountEvent>? _sensorsStepSubscription;
 
   // Step recording
   final StepRecordStore _stepRecordStore = StepRecordStore();
@@ -183,11 +187,35 @@ class AccurateStepCounterImpl {
           text: _currentConfig!.foregroundNotificationText,
         );
 
-        // Listen to EventChannel for realtime step events (instant updates)
-        _listenToForegroundStepEvents();
+        // Use sensors_plus for step detection on Android ≤ maxApiLevel
+        // This replaces the native sensor implementation for better reliability
+        _sensorsStepDetector = SensorsStepDetector(
+          threshold: _currentConfig!.threshold,
+          filterAlpha: _currentConfig!.filterAlpha,
+          minTimeBetweenStepsMs: _currentConfig!.minTimeBetweenStepsMs,
+          debugLogging: _debugLogging,
+        );
+        await _sensorsStepDetector!.start();
 
-        // Also start backup polling in case EventChannel fails
-        _startForegroundStepPolling();
+        // Listen to step events from sensors_plus
+        _sensorsStepSubscription = _sensorsStepDetector!.stepEventStream.listen(
+          (event) {
+            _lastForegroundStepCount = event.stepCount;
+
+            // Emit event via foreground step controller
+            if (!_foregroundStepController.isClosed) {
+              _foregroundStepController.add(event);
+            }
+
+            // Update native side for persistence
+            _platform.updateForegroundStepCount(event.stepCount);
+
+            _log('sensors_plus step: ${event.stepCount}');
+          },
+          onError: (error) {
+            _log('sensors_plus error: $error');
+          },
+        );
 
         _isStarted = true;
         return;
@@ -224,6 +252,12 @@ class AccurateStepCounterImpl {
     }
 
     if (_useForegroundService) {
+      // Stop sensors_plus step detection
+      await _sensorsStepSubscription?.cancel();
+      _sensorsStepSubscription = null;
+      await _sensorsStepDetector?.stop();
+      _sensorsStepDetector = null;
+
       _stopForegroundStepPolling();
       await _platform.stopForegroundService();
       _useForegroundService = false;
@@ -251,75 +285,17 @@ class AccurateStepCounterImpl {
   void reset() {
     if (_useForegroundService) {
       _platform.resetForegroundStepCount();
+      _sensorsStepDetector?.reset();
       _lastForegroundStepCount = 0;
     } else {
       _nativeDetector.resetStepCount();
     }
   }
 
-  /// Listen to realtime step events from foreground service via EventChannel
-  void _listenToForegroundStepEvents() {
-    _foregroundEventSubscription?.cancel();
-    _foregroundEventSubscription = _platform.foregroundStepEventStream.listen(
-      (event) {
-        final stepCount = event['stepCount'] as int?;
-        final timestamp = event['timestamp'] as int?;
-
-        if (stepCount != null && stepCount > _lastForegroundStepCount) {
-          _lastForegroundStepCount = stepCount;
-
-          if (!_foregroundStepController.isClosed) {
-            _foregroundStepController.add(
-              StepCountEvent(
-                stepCount: stepCount,
-                timestamp: timestamp != null
-                    ? DateTime.fromMillisecondsSinceEpoch(timestamp)
-                    : DateTime.now(),
-              ),
-            );
-          }
-
-          _log('Realtime step event: $stepCount');
-        }
-      },
-      onError: (error) {
-        _log('Foreground EventChannel error: $error');
-      },
-    );
-  }
-
-  /// Start polling for step count updates from foreground service (backup)
-  void _startForegroundStepPolling() {
-    _foregroundStepPollTimer?.cancel();
-    _foregroundStepPollTimer = Timer.periodic(
-      const Duration(milliseconds: 500),
-      (_) => _pollForegroundStepCount(),
-    );
-  }
-
   /// Stop polling for step count updates
   void _stopForegroundStepPolling() {
     _foregroundStepPollTimer?.cancel();
     _foregroundStepPollTimer = null;
-  }
-
-  /// Poll the foreground service for current step count
-  Future<void> _pollForegroundStepCount() async {
-    try {
-      final stepCount = await _platform.getForegroundStepCount();
-
-      if (stepCount > _lastForegroundStepCount) {
-        _lastForegroundStepCount = stepCount;
-
-        if (!_foregroundStepController.isClosed) {
-          _foregroundStepController.add(
-            StepCountEvent(stepCount: stepCount, timestamp: DateTime.now()),
-          );
-        }
-      }
-    } catch (e) {
-      _log('Error polling foreground step count: $e');
-    }
   }
 
   /// Get the current configuration being used
@@ -366,6 +342,8 @@ class AccurateStepCounterImpl {
   Future<void> dispose() async {
     await stop();
     await _nativeDetector.dispose();
+    await _sensorsStepDetector?.dispose();
+    _sensorsStepDetector = null;
     _stopForegroundStepPolling();
     await _stepRecordSubscription?.cancel();
     _inactivityTimer?.cancel();
@@ -1036,81 +1014,6 @@ class AccurateStepCounterImpl {
 
     await _stepRecordStore.insertRecord(entry);
     _log('Logged $stepCount terminated steps');
-  }
-
-  /// Sync steps from foreground service (hybrid architecture)
-  ///
-  /// This is called when the app restarts after being terminated.
-  /// If the foreground service was running (on older APIs), it will have
-  /// counted steps while the app was closed. This method retrieves and logs them.
-  Future<void> _syncStepsFromForegroundService() async {
-    try {
-      dev.log(
-        'AccurateStepCounter: Checking for steps from foreground service...',
-      );
-
-      final result = await _platform.syncStepsFromForegroundService();
-
-      if (result == null) {
-        _log('No foreground service steps to sync');
-        return;
-      }
-
-      final stepCount = result['stepCount'] as int;
-      final startTime = result['startTime'] as DateTime;
-      final endTime = result['endTime'] as DateTime;
-
-      if (stepCount > 0) {
-        dev.log(
-          'AccurateStepCounter: Syncing $stepCount steps from foreground service',
-        );
-        _log('Time range: $startTime to $endTime');
-
-        // Check for duplicate: if a terminated record exists with same hour, minute, and step count
-        // This prevents duplicate writes when app is restarted multiple times while foreground service is running
-        final existingRecords = await _stepRecordStore.readRecords(
-          source: StepRecordSource.terminated,
-        );
-
-        final isDuplicate = existingRecords.any((record) {
-          // Check if endTime matches the same hour and minute
-          final sameHour = record.toTime.year == endTime.year &&
-              record.toTime.month == endTime.month &&
-              record.toTime.day == endTime.day &&
-              record.toTime.hour == endTime.hour &&
-              record.toTime.minute == endTime.minute;
-
-          // Check if step count is the same
-          final sameStepCount = record.stepCount == stepCount;
-
-          return sameHour && sameStepCount;
-        });
-
-        if (!isDuplicate) {
-          // Log these steps as terminated source (they were counted while app was closed)
-          await _logTerminatedSteps(stepCount, startTime, endTime);
-
-          // Reset immediately after successful logging to prevent re-reading same data
-          await _platform.resetForegroundStepCount();
-          _log('Foreground service step count reset after logging');
-        } else {
-          _log(
-            'Skipping duplicate foreground service sync: $stepCount steps already logged for ${endTime.hour}:${endTime.minute.toString().padLeft(2, '0')}',
-          );
-
-          // Still reset even if duplicate to clear the stale data
-          await _platform.resetForegroundStepCount();
-          _log('Foreground service step count reset (duplicate detected)');
-        }
-
-        // Stop foreground service since app is now active
-        await _platform.stopForegroundService();
-
-        dev.log('AccurateStepCounter: Foreground service stopped and reset');
-      }
-    } catch (e) {
-      _log('Error syncing steps from foreground service: $e');
-    }
   }
 
   /// Manually log a step entry

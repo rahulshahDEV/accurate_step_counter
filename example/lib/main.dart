@@ -77,10 +77,10 @@ class _StepCounterTestAppState extends State<StepCounterTestApp>
       await _stepCounter.start(
         config: StepDetectorConfig.walking().copyWith(
           foregroundServiceMaxApiLevel:
-              32, // Enable foreground service on Android 11/12
+              32, // Enable foreground service with sensors_plus on Android 11/12
         ),
       );
-      _log('✓ Step detector started (foreground service enabled up to API 32)');
+      _log('✓ Step detector started (sensors_plus on API ≤32)');
 
       // Check detector type
       final isHardware = await _stepCounter.isUsingNativeDetector();

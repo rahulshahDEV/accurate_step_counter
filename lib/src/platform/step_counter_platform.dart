@@ -308,6 +308,27 @@ class StepCounterPlatform {
     }
   }
 
+  /// Update the foreground service step count from Dart
+  ///
+  /// This is used when step detection is done in Dart (using sensors_plus)
+  /// but we need to persist the count in the native foreground service.
+  Future<bool> updateForegroundStepCount(int stepCount) async {
+    if (!Platform.isAndroid) {
+      return false;
+    }
+
+    try {
+      final result = await _channel.invokeMethod<bool>(
+        'updateForegroundStepCount',
+        {'stepCount': stepCount},
+      );
+      return result ?? false;
+    } on PlatformException catch (e) {
+      dev.log('Error updating foreground step count: ${e.message}', error: e);
+      return false;
+    }
+  }
+
   // ============================================================
   // Hybrid Foreground Service Methods
   // ============================================================

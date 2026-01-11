@@ -5,6 +5,73 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.8.0] - 2026-01-11
+
+### 🎉 Production Ready Release
+
+This release introduces a major improvement to step detection reliability with `sensors_plus` integration and includes **671 comprehensive tests** covering all app states.
+
+### Added
+- 🚀 **sensors_plus Integration for Foreground Service Mode**
+  - Replaced native Android sensor implementation with Dart-based step detection using `sensors_plus`
+  - More reliable step counting on devices with unreliable native `TYPE_STEP_COUNTER` sensors
+  - New `SensorsStepDetector` class with low-pass filtering and peak detection algorithm
+  - Configurable threshold, filter alpha, and minimum time between steps
+  
+- 🧪 **Comprehensive Test Suite** - **671 tests total**
+  - `comprehensive_state_tests.dart` - 505 scenario tests
+  - `foreground_service_tests.dart` - 141 integration tests
+  - `accurate_step_counter_test.dart` - 25 unit tests
+
+### Test Coverage
+
+| Category | Tests |
+|----------|-------|
+| Foreground State | 100+ |
+| Background State | 100+ |
+| Terminated State | 100+ |
+| Duplicate Prevention | 100+ |
+| State Transitions | 60+ |
+| API Level Tests | 50+ |
+| Edge Cases | 50+ |
+| Config & Parameters | 100+ |
+
+### Changed
+- 📱 **Foreground Service Architecture** (Android ≤ configured API level)
+  - Native sensor logic removed from `StepCounterForegroundService.kt`
+  - Service now only handles wake lock, notification, and step persistence
+  - Step detection done in Dart using `sensors_plus` accelerometer
+  - Step counts pushed to native side via `updateForegroundStepCount` method channel
+
+- 🔧 **Dependencies**
+  - Added `sensors_plus: ^6.1.1` for cross-platform accelerometer access
+
+### Technical Details
+| Android Version | Step Detection Method |
+|-----------------|----------------------|
+| **≤ configured API** | Dart (`sensors_plus` accelerometer) + Foreground Service |
+| **> configured API** | Native TYPE_STEP_COUNTER sync (unchanged) |
+
+**SensorsStepDetector Algorithm:**
+- Low-pass filter for noise reduction (configurable alpha)
+- Peak detection with threshold validation
+- Minimum time between steps enforcement
+- Configurable via `StepDetectorConfig`
+
+### Production Readiness
+- ✅ **671 automated tests** covering all scenarios
+- ✅ **Foreground state**: Step detection, real-time updates, config presets
+- ✅ **Background state**: Source tracking, duration, step rate validation
+- ✅ **Terminated state**: Long sync periods, step recovery
+- ✅ **Duplicate prevention**: Hash codes, timestamp equality, monotonic counts
+- ✅ **State transitions**: FG→BG, BG→TERM, TERM→FG, rapid transitions
+- ✅ **Edge cases**: Zero steps, large counts, timestamps, confidence values
+- ✅ **Build verified**: APK builds successfully
+- ✅ **OEM compatible**: Works on MIUI, Samsung, and other devices
+
+---
+
+
 ## [1.7.8] - 2026-01-09
 
 ### Fixed

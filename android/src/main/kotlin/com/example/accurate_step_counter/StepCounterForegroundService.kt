@@ -7,10 +7,6 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
-import android.hardware.Sensor
-import android.hardware.SensorEvent
-import android.hardware.SensorEventListener
-import android.hardware.SensorManager
 import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
@@ -18,13 +14,15 @@ import androidx.core.app.NotificationCompat
 import io.flutter.plugin.common.EventChannel
 
 /**
- * Foreground Service for step counting on Android ≤10
+ * Foreground Service for step counting on Android ≤11
  * 
  * This service keeps the step counter running persistently with a notification.
- * It's needed because on Android 10 and below, the OS may not reliably 
- * continue counting steps when the app is terminated.
+ * Step detection is now done in Dart using sensors_plus, this service only:
+ * - Maintains the foreground notification
+ * - Holds a wake lock to keep the CPU active
+ * - Persists step count to SharedPreferences
  */
-class StepCounterForegroundService : Service(), SensorEventListener {
+class StepCounterForegroundService : Service() {
     
     companion object {
         const val CHANNEL_ID = "step_counter_channel"
@@ -50,18 +48,14 @@ class StepCounterForegroundService : Service(), SensorEventListener {
         
         @Volatile
         var currentStepCount = 0
-            private set
         
         // EventChannel sink for realtime step events to Flutter
         @Volatile
         var eventSink: EventChannel.EventSink? = null
     }
     
-    private var sensorManager: SensorManager? = null
-    private var stepCounterSensor: Sensor? = null
     private var wakeLock: PowerManager.WakeLock? = null
     
-    private var baseStepCount: Int = -1
     private var sessionStepCount: Int = 0
     private var notificationTitle = "Step Counter"
     private var notificationText = "Tracking your steps..."
@@ -70,7 +64,6 @@ class StepCounterForegroundService : Service(), SensorEventListener {
         super.onCreate()
         android.util.Log.d("StepForegroundService", "Service onCreate")
         createNotificationChannel()
-        initializeSensorManager()
     }
     
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -113,8 +106,17 @@ class StepCounterForegroundService : Service(), SensorEventListener {
         val notification = createNotification()
         startForeground(NOTIFICATION_ID, notification)
         
-        // Start sensor listening
-        startTracking()
+        // Load saved session step count if resuming
+        val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        sessionStepCount = prefs.getInt(FOREGROUND_STEP_COUNT_KEY, 0)
+        
+        // Save start timestamp if this is a new session
+        if (!prefs.contains(FOREGROUND_START_TIMESTAMP_KEY)) {
+            prefs.edit().apply {
+                putLong(FOREGROUND_START_TIMESTAMP_KEY, System.currentTimeMillis())
+                apply()
+            }
+        }
         
         isRunning = true
         android.util.Log.d("StepForegroundService", "Foreground service started successfully")
@@ -179,37 +181,7 @@ class StepCounterForegroundService : Service(), SensorEventListener {
         notificationManager?.notify(NOTIFICATION_ID, notification)
     }
     
-    private fun initializeSensorManager() {
-        sensorManager = getSystemService(Context.SENSOR_SERVICE) as SensorManager
-        stepCounterSensor = sensorManager?.getDefaultSensor(Sensor.TYPE_STEP_COUNTER)
-        
-        if (stepCounterSensor != null) {
-            android.util.Log.d("StepForegroundService", "Step counter sensor found: ${stepCounterSensor?.name}")
-        } else {
-            android.util.Log.w("StepForegroundService", "Step counter sensor NOT available")
-        }
-    }
-    
-    private fun startTracking() {
-        stepCounterSensor?.let { sensor ->
-            sensorManager?.registerListener(
-                this,
-                sensor,
-                SensorManager.SENSOR_DELAY_NORMAL
-            )
-            android.util.Log.d("StepForegroundService", "Sensor listener registered")
-        }
-        
-        // Load saved session step count if resuming
-        val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-        sessionStepCount = prefs.getInt(FOREGROUND_STEP_COUNT_KEY, 0)
-        baseStepCount = prefs.getInt(FOREGROUND_BASE_STEP_KEY, -1)
-        
-        android.util.Log.d("StepForegroundService", "Tracking started with session: $sessionStepCount, base: $baseStepCount")
-    }
-    
     private fun stopTracking() {
-        sensorManager?.unregisterListener(this)
         releaseWakeLock()
         
         // Save current state
@@ -247,74 +219,47 @@ class StepCounterForegroundService : Service(), SensorEventListener {
         val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         prefs.edit().apply {
             putInt(FOREGROUND_STEP_COUNT_KEY, sessionStepCount)
-            putInt(FOREGROUND_BASE_STEP_KEY, baseStepCount)
             putLong(TIMESTAMP_KEY, System.currentTimeMillis())
             apply()
         }
-        android.util.Log.d("StepForegroundService", "State saved: session=$sessionStepCount, base=$baseStepCount")
+        android.util.Log.d("StepForegroundService", "State saved: session=$sessionStepCount")
     }
     
-    override fun onSensorChanged(event: SensorEvent?) {
-        if (event?.sensor?.type == Sensor.TYPE_STEP_COUNTER) {
-            val totalSteps = event.values[0].toInt()
+    /**
+     * Update step count from Dart layer (sensors_plus based detection)
+     * Called via method channel from AccurateStepCounterPlugin
+     */
+    fun updateStepCount(steps: Int) {
+        if (steps > sessionStepCount) {
+            sessionStepCount = steps
+            currentStepCount = steps
             
-            // First reading - set as baseline
-            if (baseStepCount < 0) {
-                baseStepCount = totalSteps
-                android.util.Log.d("StepForegroundService", "Baseline set: $baseStepCount")
-                // Save the starting OS step count for terminated state sync
-                val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-                prefs.edit().apply {
-                    putInt(FOREGROUND_OS_STEP_KEY, totalSteps)
-                    putLong(FOREGROUND_START_TIMESTAMP_KEY, System.currentTimeMillis())
-                    apply()
-                }
-                android.util.Log.d("StepForegroundService", "Saved initial OS count for sync: $totalSteps")
-                return
+            android.util.Log.d("StepForegroundService", "Step count updated from Dart: $sessionStepCount")
+            
+            // Emit step event via EventChannel to Flutter
+            try {
+                eventSink?.success(mapOf(
+                    "stepCount" to sessionStepCount,
+                    "timestamp" to System.currentTimeMillis()
+                ))
+            } catch (e: Exception) {
+                android.util.Log.w("StepForegroundService", "EventChannel emit failed: ${e.message}")
             }
             
-            // Calculate steps since service started
-            val stepsFromSensor = totalSteps - baseStepCount
+            // Update notification periodically (every 10 steps to save battery)
+            if (sessionStepCount % 10 == 0) {
+                updateNotification()
+                saveState()
+            }
             
-            // Only update if steps increased
-            if (stepsFromSensor > sessionStepCount) {
-                sessionStepCount = stepsFromSensor
-                currentStepCount = sessionStepCount
-                
-                android.util.Log.d("StepForegroundService", "Step detected! Total: $sessionStepCount")
-                
-                // REALTIME: Emit step event via EventChannel to Flutter
-                try {
-                    eventSink?.success(mapOf(
-                        "stepCount" to sessionStepCount,
-                        "timestamp" to System.currentTimeMillis()
-                    ))
-                } catch (e: Exception) {
-                    android.util.Log.w("StepForegroundService", "EventChannel emit failed: ${e.message}")
-                }
-                
-                // Update notification periodically (every 10 steps to save battery)
-                if (sessionStepCount % 10 == 0) {
-                    updateNotification()
-                    saveState()
-                }
-                
-                // Save both session count (for display) and OS count (for sync)
-                // This fixes the Android 11 terminated state bug where session count
-                // was incorrectly used as OS count baseline
-                val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-                prefs.edit().apply {
-                    putInt(FOREGROUND_STEP_COUNT_KEY, sessionStepCount)
-                    putInt(FOREGROUND_OS_STEP_KEY, totalSteps)  // Absolute OS count for sync
-                    putLong(FOREGROUND_LAST_UPDATE_KEY, System.currentTimeMillis())
-                    apply()
-                }
+            // Save step count for persistence
+            val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            prefs.edit().apply {
+                putInt(FOREGROUND_STEP_COUNT_KEY, sessionStepCount)
+                putLong(FOREGROUND_LAST_UPDATE_KEY, System.currentTimeMillis())
+                apply()
             }
         }
-    }
-    
-    override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {
-        android.util.Log.d("StepForegroundService", "Sensor accuracy changed: $accuracy")
     }
     
     /**
@@ -322,7 +267,6 @@ class StepCounterForegroundService : Service(), SensorEventListener {
      */
     fun resetStepCount() {
         sessionStepCount = 0
-        baseStepCount = -1
         currentStepCount = 0
 
         // Using commit() instead of apply() to ensure synchronous write completes before next read
@@ -330,7 +274,6 @@ class StepCounterForegroundService : Service(), SensorEventListener {
         val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         prefs.edit().apply {
             putInt(FOREGROUND_STEP_COUNT_KEY, 0)
-            putInt(FOREGROUND_BASE_STEP_KEY, -1)
             commit()
         }
 

@@ -359,6 +359,24 @@ class AccurateStepCounterPlugin : FlutterPlugin, MethodCallHandler, SensorEventL
                     result.success(null)
                 }
             }
+            "updateForegroundStepCount" -> {
+                android.util.Log.d("AccurateStepCounter", "updateForegroundStepCount method called")
+                val stepCount = call.argument<Int>("stepCount") ?: 0
+                
+                // Update the static step count
+                StepCounterForegroundService.currentStepCount = stepCount
+                
+                // Also save to SharedPreferences for persistence
+                val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                prefs.edit().apply {
+                    putInt("foreground_step_count", stepCount)
+                    putLong("foreground_last_update", System.currentTimeMillis())
+                    apply()
+                }
+                
+                android.util.Log.d("AccurateStepCounter", "Foreground step count updated from Dart: $stepCount")
+                result.success(true)
+            }
             else -> {
                 android.util.Log.w("AccurateStepCounter", "Unknown method called: ${call.method}")
                 result.notImplemented()
