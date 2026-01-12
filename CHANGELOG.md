@@ -5,6 +5,29 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.8.1] - 2026-01-12
+
+### Fixed
+- 🔧 **Threshold Normalization for SensorsStepDetector**
+  - Fixed step detection not working on Android ≤ configured API level (foreground service mode)
+  - High thresholds intended for NativeStepDetector (10-20 range) were incorrectly passed to SensorsStepDetector
+  - Added `_normalizeThresholdForSensors()` that scales thresholds > 5.0 down to 0.5-2.0 range
+  - Example: `threshold: 14.0` → normalized to `1.4` for sensors_plus
+
+- 🔄 **Terminated State Step Sync for Foreground Service Mode**
+  - Fixed steps not syncing after app termination on Android ≤ configured API level
+  - `_syncStepsFromTerminatedState()` is now called for foreground service mode
+  - Recovers steps saved to SharedPreferences before app was killed
+  - Uses TYPE_STEP_COUNTER to detect steps taken while app was fully terminated
+
+### Technical Details
+| Issue | Root Cause | Fix |
+|-------|-----------|-----|
+| Steps not incrementing | High threshold (14.0) passed to SensorsStepDetector that expects 0.5-2.0 | Normalize thresholds > 5.0 by dividing by 10 |
+| Terminated steps lost | `_syncStepsFromTerminatedState()` skipped for foreground service mode | Call sync on restart for all modes |
+
+---
+
 ## [1.8.0] - 2026-01-11
 
 ### 🎉 Production Ready Release

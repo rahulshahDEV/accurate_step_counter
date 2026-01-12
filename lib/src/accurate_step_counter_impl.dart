@@ -173,11 +173,13 @@ class AccurateStepCounterImpl {
         if (_currentConfig!.enableOsLevelSync) {
           await _platform.initialize();
 
-          // NOTE: We do NOT sync foreground service steps here because:
-          // 1. If app was active, steps were already logged via polling/EventChannel
-          // 2. If app was terminated, the foreground service continues its session
-          //    and the steps will be counted when polling resumes
-          // 3. Syncing here would cause duplicate step counting
+          // Sync steps from terminated state on app restart
+          // This recovers:
+          // 1. Steps saved to SharedPreferences before app was killed
+          // 2. Steps detected by TYPE_STEP_COUNTER while app was terminated
+          // Note: sensors_plus cannot run when app is killed, so OS-level
+          // step counter is the only source for terminated state steps.
+          await _syncStepsFromTerminatedState();
         }
 
         // Start the foreground service immediately (NOT on termination)
@@ -189,8 +191,21 @@ class AccurateStepCounterImpl {
 
         // Use sensors_plus for step detection on Android ≤ maxApiLevel
         // This replaces the native sensor implementation for better reliability
+        //
+        // IMPORTANT: Threshold normalization is required because:
+        // - NativeStepDetector uses raw accelerometer magnitude thresholds (10-20 range)
+        // - SensorsStepDetector uses magnitude DIFFERENCE thresholds (0.5-2.0 range)
+        // If a high threshold (intended for native) is passed, normalize it down.
+        final sensorsThreshold = _normalizeThresholdForSensors(
+          _currentConfig!.threshold,
+        );
+
+        _log(
+          'SensorsStepDetector threshold: $sensorsThreshold (original: ${_currentConfig!.threshold})',
+        );
+
         _sensorsStepDetector = SensorsStepDetector(
-          threshold: _currentConfig!.threshold,
+          threshold: sensorsThreshold,
           filterAlpha: _currentConfig!.filterAlpha,
           minTimeBetweenStepsMs: _currentConfig!.minTimeBetweenStepsMs,
           debugLogging: _debugLogging,
@@ -296,6 +311,29 @@ class AccurateStepCounterImpl {
   void _stopForegroundStepPolling() {
     _foregroundStepPollTimer?.cancel();
     _foregroundStepPollTimer = null;
+  }
+
+  /// Normalize threshold for SensorsStepDetector
+  ///
+  /// The NativeStepDetector uses raw accelerometer magnitude thresholds,
+  /// typically in the 10-20 range. SensorsStepDetector uses magnitude
+  /// DIFFERENCE thresholds, which are much smaller (0.5-2.0 range).
+  ///
+  /// This method normalizes thresholds that appear to be in native scale
+  /// down to the sensors_plus scale.
+  double _normalizeThresholdForSensors(double threshold) {
+    // If threshold is already in sensors_plus range, use it as-is
+    if (threshold <= 5.0) {
+      return threshold;
+    }
+
+    // Normalize high thresholds (native detector scale) to sensors_plus scale
+    // Native thresholds are typically 10-20, sensors_plus expects 0.5-2.0
+    // Using a scaling factor of 10 to convert
+    final normalized = threshold / 10.0;
+
+    // Clamp to sensible range for sensors_plus (0.5 - 2.0)
+    return normalized.clamp(0.5, 2.0);
   }
 
   /// Get the current configuration being used

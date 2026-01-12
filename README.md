@@ -31,7 +31,7 @@ A simple, accurate step counter for Flutter. Works in **foreground**, **backgrou
 
 ```yaml
 dependencies:
-  accurate_step_counter: ^1.8.0
+  accurate_step_counter: ^1.8.1
 ```
 
 ### 2. Add Permissions
