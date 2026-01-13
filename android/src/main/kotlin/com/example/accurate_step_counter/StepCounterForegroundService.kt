@@ -67,7 +67,7 @@ class StepCounterForegroundService : Service() {
     }
     
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        android.util.Log.d("StepForegroundService", "onStartCommand: action=${intent?.action}")
+        android.util.Log.d("StepForegroundService", "onStartCommand: action=${intent?.action}, isRunning=$isRunning")
         
         when (intent?.action) {
             ACTION_STOP -> {
@@ -75,6 +75,16 @@ class StepCounterForegroundService : Service() {
                 return START_NOT_STICKY
             }
             ACTION_START, null -> {
+                // Prevent duplicate service starts - if already running, just update notification text if needed
+                if (isRunning) {
+                    android.util.Log.d("StepForegroundService", "Service already running, ignoring duplicate start")
+                    // Still update notification text if provided
+                    intent?.getStringExtra(EXTRA_NOTIFICATION_TITLE)?.let { notificationTitle = it }
+                    intent?.getStringExtra(EXTRA_NOTIFICATION_TEXT)?.let { notificationText = it }
+                    updateNotification()
+                    return START_STICKY
+                }
+                
                 // Get custom notification text if provided
                 notificationTitle = intent?.getStringExtra(EXTRA_NOTIFICATION_TITLE) 
                     ?: "Step Counter"

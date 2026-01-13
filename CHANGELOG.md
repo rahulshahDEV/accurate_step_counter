@@ -5,6 +5,59 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.8.2] - 2026-01-13
+
+### Fixed
+- 🔒 **Singleton Foreground Service Enforcement**
+  - Prevents multiple foreground service instances from running simultaneously
+  - Added explicit `isRunning` check in `AccurateStepCounterPlugin.startForegroundService()`
+  - Added duplicate start guard in `StepCounterForegroundService.onStartCommand()`
+  - If service is already running, notification text is updated instead of restarting
+  - Enhanced logging shows `isRunning` state for debugging
+
+- 🛡️ **Double-Counting Prevention in Terminated State Sync**
+  - Added `syncAlreadyDoneThisSession` flag to prevent multiple sync calls per session
+  - Changed SharedPreferences from `apply()` to `commit()` for atomic writes
+  - Foreground service data is now properly cleared after sync with synchronous commit
+  - Prevents steps being counted twice when both foreground service and TYPE_STEP_COUNTER are used
+
+- 📅 **Multi-Day Terminated Step Distribution** (Android 12+)
+  - Fixed critical bug where steps from multiple days were all counted as "today"
+  - When app is closed for 2+ days, steps are now distributed proportionally across each day
+  - Each day gets its own `StepRecord` entry with correct date range
+  - `watchTodaySteps()` now correctly shows only today's steps after multi-day termination
+  - Example: 3000 steps over 3 days → ~1000 steps logged to each day
+
+### Added
+- 🔍 **StepLogsViewer Widget** - New reusable debug widget for viewing step logs
+  - Filter by source (foreground/background/terminated/external)
+  - Date range picker for filtering
+  - Export logs to clipboard
+  - Real-time updates via stream subscription
+  - Color-coded entries by source
+  - Configurable max height, auto-scroll, and styling
+
+  **Usage:**
+  ```dart
+  StepLogsViewer(
+    stepCounter: _stepCounter,
+    maxHeight: 300,
+    showFilters: true,
+    showExportButton: true,
+  )
+  ```
+
+### Technical Details
+| Issue | Root Cause | Fix |
+|-------|-----------|-----|
+| Multiple service instances | No check before starting service | Added `isRunning` guard in plugin and service |
+| Double step counting | Sync called multiple times | Added session flag + atomic writes with `commit()` |
+| Debug difficulty | No visual log viewer | New `StepLogsViewer` widget |
+| Multi-day steps all as "today" | Single log entry for entire period | Distribute steps proportionally across days |
+
+---
+
+
 ## [1.8.1] - 2026-01-12
 
 ### Fixed

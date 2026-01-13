@@ -1,6 +1,6 @@
 name: accurate_step_counter
 description: A highly accurate step counter plugin using accelerometer-based detection with low-pass filtering and peak detection. Includes Hive database logging with warmup validation. Supports foreground, background, and terminated state tracking.
-version: 1.8.1
+version: 1.8.2
 homepage: https://github.com/rahulshahDEV/accurate_step_counter
 repository: https://github.com/rahulshahDEV/accurate_step_counter
 issue_tracker: https://github.com/rahulshahDEV/accurate_step_counter/issues

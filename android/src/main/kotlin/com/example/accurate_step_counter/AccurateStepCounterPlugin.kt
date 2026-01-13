@@ -58,6 +58,9 @@ class AccurateStepCounterPlugin : FlutterPlugin, MethodCallHandler, SensorEventL
     private var foregroundServiceMaxApiLevel = 29  // Default: Android 10
     private var foregroundNotificationTitle = "Step Counter"
     private var foregroundNotificationText = "Tracking your steps..."
+    
+    // Sync tracking to prevent double-counting
+    private var syncAlreadyDoneThisSession = false
 
     private val PREFS_NAME = "accurate_step_counter_prefs"
     private val STEP_COUNT_KEY = "last_step_count"
@@ -202,6 +205,14 @@ class AccurateStepCounterPlugin : FlutterPlugin, MethodCallHandler, SensorEventL
             }
             "startForegroundService" -> {
                 android.util.Log.d("AccurateStepCounter", "startForegroundService method called")
+                
+                // Check if service is already running - prevent duplicate starts
+                if (StepCounterForegroundService.isRunning) {
+                    android.util.Log.d("AccurateStepCounter", "Foreground service already running, skipping start")
+                    result.success(true)
+                    return
+                }
+                
                 val title = call.argument<String>("title") ?: "Step Counter"
                 val text = call.argument<String>("text") ?: "Tracking your steps..."
                 
@@ -473,6 +484,13 @@ class AccurateStepCounterPlugin : FlutterPlugin, MethodCallHandler, SensorEventL
             // Check if foreground service was running and has data - use its data instead
             // This fixes the Android 11 bug where session count was incorrectly used as baseline
             val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            
+            // Check if we've already synced this session to prevent double-counting
+            if (syncAlreadyDoneThisSession) {
+                android.util.Log.d("StepSync", "Sync already done this session, returning null")
+                return null
+            }
+            
             val foregroundOsCount = prefs.getInt("foreground_os_step_count", -1)
             val foregroundStepCount = prefs.getInt("foreground_step_count", 0)
             val foregroundStartTime = prefs.getLong("foreground_start_timestamp", -1L)
@@ -488,13 +506,18 @@ class AccurateStepCounterPlugin : FlutterPlugin, MethodCallHandler, SensorEventL
                 saveStepCountToPrefs(foregroundOsCount, now)
                 
                 // Clear foreground service prefs to prevent double-counting
+                // Using commit() for synchronous atomic write
                 prefs.edit().apply {
                     remove("foreground_os_step_count")
                     remove("foreground_step_count")
                     remove("foreground_start_timestamp")
                     remove("foreground_last_update")
-                    apply()
+                    commit()  // Synchronous to prevent race conditions
                 }
+                
+                // Mark sync as done for this session
+                syncAlreadyDoneThisSession = true
+                
                 android.util.Log.d("StepSync", "Cleared foreground service data, returning $foregroundStepCount steps")
                 
                 // Return the session steps from foreground service (the actual walked steps)
@@ -586,6 +609,9 @@ class AccurateStepCounterPlugin : FlutterPlugin, MethodCallHandler, SensorEventL
             // Save current state
             saveStepCountToPrefs(currentStepCount, currentTime)
 
+            // Mark sync as done for this session
+            syncAlreadyDoneThisSession = true
+            
             // Return data for the application
             return mapOf(
                 "missedSteps" to missedSteps,

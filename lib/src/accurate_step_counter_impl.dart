@@ -1027,6 +1027,9 @@ class AccurateStepCounterImpl {
 
   /// Log steps from terminated state sync
   ///
+  /// If the time range spans multiple days, steps are distributed proportionally
+  /// across each day to ensure accurate daily step counts.
+  ///
   /// Note: Only requires logging to be initialized, not enabled,
   /// so terminated steps are logged even before startLogging() is called.
   Future<void> _logTerminatedSteps(
@@ -1043,15 +1046,85 @@ class AccurateStepCounterImpl {
       return;
     }
 
-    final entry = StepRecord(
-      stepCount: stepCount,
-      fromTime: fromTime,
-      toTime: toTime,
-      source: StepRecordSource.terminated,
+    // Check if the time range spans multiple days
+    final fromDate = DateTime(fromTime.year, fromTime.month, fromTime.day);
+    final toDate = DateTime(toTime.year, toTime.month, toTime.day);
+
+    // If same day, log as single entry
+    if (fromDate == toDate) {
+      final entry = StepRecord(
+        stepCount: stepCount,
+        fromTime: fromTime,
+        toTime: toTime,
+        source: StepRecordSource.terminated,
+      );
+      await _stepRecordStore.insertRecord(entry);
+      _log('Logged $stepCount terminated steps for single day');
+      return;
+    }
+
+    // Multiple days - distribute steps proportionally across days
+    final totalDurationMs = toTime.difference(fromTime).inMilliseconds;
+    if (totalDurationMs <= 0) {
+      _log('Skipping terminated steps - invalid duration');
+      return;
+    }
+
+    int remainingSteps = stepCount;
+    DateTime currentStart = fromTime;
+
+    dev.log(
+      'AccurateStepCounter: Distributing $stepCount terminated steps across multiple days',
     );
 
-    await _stepRecordStore.insertRecord(entry);
-    _log('Logged $stepCount terminated steps');
+    while (currentStart.isBefore(toTime)) {
+      // Calculate end of current day (midnight of next day) or toTime if earlier
+      final currentDate = DateTime(
+        currentStart.year,
+        currentStart.month,
+        currentStart.day,
+      );
+      final endOfDay = currentDate.add(const Duration(days: 1));
+      final currentEnd = endOfDay.isBefore(toTime) ? endOfDay : toTime;
+
+      // Calculate proportion of time in this day
+      final dayDurationMs = currentEnd.difference(currentStart).inMilliseconds;
+      final proportion = dayDurationMs / totalDurationMs;
+
+      // Calculate steps for this day (proportional distribution)
+      int daySteps;
+      if (currentEnd == toTime) {
+        // Last day - assign remaining steps to avoid rounding errors
+        daySteps = remainingSteps;
+      } else {
+        daySteps = (stepCount * proportion).round();
+        remainingSteps -= daySteps;
+      }
+
+      // Only log if there are steps for this day
+      if (daySteps > 0) {
+        final entry = StepRecord(
+          stepCount: daySteps,
+          fromTime: currentStart,
+          toTime: currentEnd,
+          source: StepRecordSource.terminated,
+        );
+        await _stepRecordStore.insertRecord(entry);
+
+        final dateStr =
+            '${currentStart.year}-${currentStart.month.toString().padLeft(2, '0')}-${currentStart.day.toString().padLeft(2, '0')}';
+        dev.log(
+          'AccurateStepCounter: Logged $daySteps terminated steps for $dateStr',
+        );
+      }
+
+      // Move to start of next day
+      currentStart = endOfDay;
+    }
+
+    _log(
+      'Distributed $stepCount terminated steps across ${toDate.difference(fromDate).inDays + 1} days',
+    );
   }
 
   /// Manually log a step entry

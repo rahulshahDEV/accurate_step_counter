@@ -59,6 +59,9 @@ export 'src/models/step_record_config.dart'
 export 'src/services/step_record_store.dart'
     show StepRecordStore, StepLogDatabase;
 
+// Widgets
+export 'src/widgets/step_logs_viewer.dart' show StepLogsViewer;
+
 // Main class for easier access
 import 'src/accurate_step_counter_impl.dart';
 

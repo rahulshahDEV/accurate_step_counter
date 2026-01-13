@@ -206,6 +206,30 @@ await stepCounter.deleteStepLogsBefore(
 );
 ```
 
+### Debug Logs Viewer (NEW in v1.8.2)
+
+Display step logs visually with filtering and export:
+
+```dart
+import 'package:accurate_step_counter/accurate_step_counter.dart';
+
+// Add to your widget tree
+StepLogsViewer(
+  stepCounter: _stepCounter,
+  maxHeight: 300,
+  showFilters: true,      // Filter by source (FG/BG/Term/Ext)
+  showExportButton: true,  // Copy logs to clipboard
+  showDatePicker: true,    // Date range filtering
+)
+```
+
+Features:
+- 🔍 Filter by source (foreground/background/terminated/external)
+- 📅 Date range picker
+- 📋 Export to clipboard
+- ⚡ Real-time updates
+- 🎨 Color-coded entries by source
+
 ## 📱 How It Works (Hybrid Architecture v1.8.x)
 
 | App State | Android ≤10 (API ≤29) | Android 11+ (API 30+) |

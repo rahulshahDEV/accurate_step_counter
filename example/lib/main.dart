@@ -365,7 +365,7 @@ class _StepCounterTestAppState extends State<StepCounterTestApp>
               ),
               const SizedBox(height: 16),
 
-              // Debug Log
+              // Step Logs (new widget)
               Card(
                 child: Padding(
                   padding: const EdgeInsets.all(12),
@@ -373,12 +373,45 @@ class _StepCounterTestAppState extends State<StepCounterTestApp>
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       const Text(
-                        'Debug Log:',
+                        'Step Logs (Database):',
+                        style: TextStyle(fontWeight: FontWeight.bold),
+                      ),
+                      const SizedBox(height: 8),
+                      if (_isInitialized)
+                        StepLogsViewer(
+                          stepCounter: _stepCounter,
+                          maxHeight: 200,
+                          showFilters: true,
+                          showExportButton: true,
+                          showDatePicker: false,
+                        )
+                      else
+                        const Center(
+                          child: Padding(
+                            padding: EdgeInsets.all(16),
+                            child: Text('Initializing...'),
+                          ),
+                        ),
+                    ],
+                  ),
+                ),
+              ),
+              const SizedBox(height: 16),
+
+              // Debug Log (raw events)
+              Card(
+                child: Padding(
+                  padding: const EdgeInsets.all(12),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Text(
+                        'Debug Log (Raw Events):',
                         style: TextStyle(fontWeight: FontWeight.bold),
                       ),
                       const SizedBox(height: 8),
                       Container(
-                        height: 300,
+                        height: 200,
                         decoration: BoxDecoration(
                           color: Colors.black,
                           borderRadius: BorderRadius.circular(8),
