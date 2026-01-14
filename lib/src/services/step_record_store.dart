@@ -106,7 +106,7 @@ class StepRecordStore {
 
     // Apply filters
     if (from != null) {
-      entries = entries.where((e) => !e.toTime.isBefore(from)).toList();
+      entries = entries.where((e) => e.toTime.isAfter(from)).toList();
     }
     if (to != null) {
       entries = entries.where((e) => !e.fromTime.isAfter(to)).toList();

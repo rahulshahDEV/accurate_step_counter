@@ -1661,4 +1661,114 @@ void main() {
       expect(total, 250);
     });
   });
+
+  // ============================================================
+  // SCENARIO 17: MIDNIGHT BOUNDARY HANDLING
+  // ============================================================
+
+  group('Scenario 17: Midnight Boundary Handling', () {
+    late AccurateStepCounter stepCounter;
+
+    setUp(() {
+      stepCounter = AccurateStepCounter();
+    });
+
+    tearDown(() async {
+      await stepCounter.dispose();
+    });
+
+    test(
+      '17.1 Record ending at midnight is NOT included in today count',
+      () async {
+        await stepCounter.initializeLogging(debugLogging: false);
+
+        final now = DateTime.now();
+        final midnight = DateTime(
+          now.year,
+          now.month,
+          now.day,
+        ); // Today 00:00:00
+        final yesterdayEvening = midnight.subtract(
+          const Duration(hours: 6),
+        ); // Yesterday 18:00:00
+
+        // Add a record that ends exactly at midnight
+        await stepCounter.insertRecord(
+          StepRecord(
+            stepCount: 500,
+            fromTime: yesterdayEvening,
+            toTime: midnight, // Ends at 00:00:00 today
+            source: StepRecordSource.terminated,
+          ),
+        );
+
+        // Today's count should be 0 (record belongs to yesterday)
+        final todaySteps = await stepCounter.getTodaySteps();
+        expect(todaySteps, 0);
+      },
+    );
+
+    test(
+      '17.2 Record ending after midnight IS included in today count',
+      () async {
+        await stepCounter.initializeLogging(debugLogging: false);
+
+        final now = DateTime.now();
+        final midnight = DateTime(now.year, now.month, now.day);
+        final afterMidnight = midnight.add(const Duration(seconds: 1));
+        final yesterdayEvening = midnight.subtract(const Duration(hours: 6));
+
+        // Add a record that ends just after midnight
+        await stepCounter.insertRecord(
+          StepRecord(
+            stepCount: 500,
+            fromTime: yesterdayEvening,
+            toTime: afterMidnight, // Ends at 00:00:01 today
+            source: StepRecordSource.terminated,
+          ),
+        );
+
+        // Today's count should include this record
+        final todaySteps = await stepCounter.getTodaySteps();
+        expect(todaySteps, 500);
+      },
+    );
+
+    test(
+      '17.3 Separate yesterday and today records counted correctly',
+      () async {
+        await stepCounter.initializeLogging(debugLogging: false);
+
+        final now = DateTime.now();
+        final midnight = DateTime(now.year, now.month, now.day);
+        final yesterdayStart = midnight.subtract(const Duration(hours: 12));
+        final yesterdayEnd = midnight.subtract(
+          const Duration(milliseconds: 1),
+        ); // 23:59:59.999
+
+        // Yesterday's record (ending before midnight)
+        await stepCounter.insertRecord(
+          StepRecord(
+            stepCount: 1000,
+            fromTime: yesterdayStart,
+            toTime: yesterdayEnd,
+            source: StepRecordSource.foreground,
+          ),
+        );
+
+        // Today's record
+        await stepCounter.insertRecord(
+          StepRecord(
+            stepCount: 500,
+            fromTime: midnight.add(const Duration(hours: 1)),
+            toTime: now,
+            source: StepRecordSource.foreground,
+          ),
+        );
+
+        final todaySteps = await stepCounter.getTodaySteps();
+        expect(todaySteps, 500); // Only today's steps
+      },
+    );
+  });
 }

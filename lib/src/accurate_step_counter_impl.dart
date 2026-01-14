@@ -1084,7 +1084,10 @@ class AccurateStepCounterImpl {
         currentStart.month,
         currentStart.day,
       );
-      final endOfDay = currentDate.add(const Duration(days: 1));
+      // Use end of day (23:59:59.999) instead of midnight to avoid boundary issues
+      final endOfDay = currentDate
+          .add(const Duration(days: 1))
+          .subtract(const Duration(milliseconds: 1));
       final currentEnd = endOfDay.isBefore(toTime) ? endOfDay : toTime;
 
       // Calculate proportion of time in this day

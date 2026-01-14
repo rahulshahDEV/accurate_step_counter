@@ -5,6 +5,29 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.8.3] - 2026-01-14
+
+### Fixed
+- 🕛 **Midnight Boundary Fix** - Yesterday's steps no longer appear in today's count
+  - Records with `toTime` exactly at midnight (00:00:00) are now correctly excluded from today's count
+  - Changed `readRecords()` filter from `!e.toTime.isBefore(from)` to `e.toTime.isAfter(from)`
+  - Fixed `_logTerminatedSteps` to end records at 23:59:59.999 instead of 00:00:00
+  - Prevents step logs like `17:04:50 - 00:00:00` from appearing in today's count
+
+### Technical Details
+| Issue | Root Cause | Fix |
+|-------|-----------|-----|
+| Yesterday's steps in today's count | Records ending at midnight included due to `>=` filter | Use strict `>` filter: `toTime.isAfter(from)` |
+| Records end at midnight | `_logTerminatedSteps` used start of next day | End at 23:59:59.999 instead |
+
+### Tests Added
+- 3 new tests in `Scenario 17: Midnight Boundary Handling`
+  - Record ending at midnight is NOT included in today count
+  - Record ending after midnight IS included in today count
+  - Separate yesterday and today records counted correctly
+
+---
+
 ## [1.8.2] - 2026-01-13
 
 ### Fixed
