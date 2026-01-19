@@ -69,6 +69,10 @@ class AccurateStepCounterImpl {
   double _maxStepsPerSecond = 5.0;
   int _warmupStartStepCount = 0;
 
+  // Sliding window validation state
+  DateTime? _lastWarmupCheckTime;
+  int _warmupWindowStartStepCount = 0;
+
   // Inactivity timeout tracking
   int _inactivityTimeoutMs = 0;
   Timer? _inactivityTimer;
@@ -655,6 +659,8 @@ class AccurateStepCounterImpl {
     _isInWarmup = _warmupDurationMs > 0;
     _warmupStartTime = null;
     _warmupStartStepCount = 0;
+    _lastWarmupCheckTime = null;
+    _warmupWindowStartStepCount = 0;
     _log('Warmup state reset - new session will require validation');
   }
 
@@ -702,7 +708,7 @@ class AccurateStepCounterImpl {
 
   /// Auto-log steps continuously (write on every step) for aggregated mode
   void _autoLogStepsContinuous(StepCountEvent event) {
-    final now = DateTime.now();
+    final now = event.timestamp;
 
     // Restart inactivity timer on every step
     _startInactivityTimer();
@@ -713,11 +719,42 @@ class AccurateStepCounterImpl {
       if (_warmupStartTime == null) {
         _warmupStartTime = now;
         _warmupStartStepCount = event.stepCount;
+        _lastWarmupCheckTime = now;
+        _warmupWindowStartStepCount = event.stepCount;
         _log('Warmup started');
         return;
       }
 
       final warmupElapsed = now.difference(_warmupStartTime!);
+
+      // Sliding window validation (check every 2 seconds)
+      if (_lastWarmupCheckTime != null) {
+        final windowElapsed = now.difference(_lastWarmupCheckTime!);
+        if (windowElapsed.inMilliseconds >= 2000) {
+          final windowSteps = event.stepCount - _warmupWindowStartStepCount;
+          final windowSeconds = windowElapsed.inMilliseconds / 1000.0;
+          final windowRate = windowSteps / windowSeconds;
+
+          if (windowRate > _maxStepsPerSecond) {
+            dev.log(
+              'AccurateStepCounter: Warmup failed (window) - rate ${windowRate.toStringAsFixed(2)}/s',
+            );
+            _warmupStartTime = now;
+            _warmupStartStepCount = event.stepCount;
+            _lastWarmupCheckTime = now;
+            _warmupWindowStartStepCount = event.stepCount;
+            return;
+          }
+
+          // Window passed - advance window
+          _lastWarmupCheckTime = now;
+          _warmupWindowStartStepCount = event.stepCount;
+        }
+      } else {
+        _lastWarmupCheckTime = now;
+        _warmupWindowStartStepCount = event.stepCount;
+      }
+
       if (warmupElapsed.inMilliseconds < _warmupDurationMs) {
         // Still in warmup - don't log yet, just track
         return;
@@ -890,7 +927,7 @@ class AccurateStepCounterImpl {
 
   /// Auto-log steps based on interval with warmup validation
   void _autoLogSteps(StepCountEvent event, int intervalMs) {
-    final now = DateTime.now();
+    final now = event.timestamp;
 
     // Restart inactivity timer on every step
     _startInactivityTimer();
@@ -901,11 +938,42 @@ class AccurateStepCounterImpl {
       if (_warmupStartTime == null) {
         _warmupStartTime = now;
         _warmupStartStepCount = event.stepCount;
+        _lastWarmupCheckTime = now;
+        _warmupWindowStartStepCount = event.stepCount;
         _log('Warmup started');
         return;
       }
 
       final warmupElapsed = now.difference(_warmupStartTime!);
+
+      // Sliding window validation (check every 2 seconds)
+      if (_lastWarmupCheckTime != null) {
+        final windowElapsed = now.difference(_lastWarmupCheckTime!);
+        if (windowElapsed.inMilliseconds >= 2000) {
+          final windowSteps = event.stepCount - _warmupWindowStartStepCount;
+          final windowSeconds = windowElapsed.inMilliseconds / 1000.0;
+          final windowRate = windowSteps / windowSeconds;
+
+          if (windowRate > _maxStepsPerSecond) {
+            dev.log(
+              'AccurateStepCounter: Warmup failed (window) - rate ${windowRate.toStringAsFixed(2)}/s',
+            );
+            _warmupStartTime = now;
+            _warmupStartStepCount = event.stepCount;
+            _lastWarmupCheckTime = now;
+            _warmupWindowStartStepCount = event.stepCount;
+            return;
+          }
+
+          // Window passed - advance window
+          _lastWarmupCheckTime = now;
+          _warmupWindowStartStepCount = event.stepCount;
+        }
+      } else {
+        _lastWarmupCheckTime = now;
+        _warmupWindowStartStepCount = event.stepCount;
+      }
+
       if (warmupElapsed.inMilliseconds < _warmupDurationMs) {
         // Still in warmup - don't log yet, just track
         return;
