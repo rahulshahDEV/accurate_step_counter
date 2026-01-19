@@ -250,6 +250,10 @@ Features:
 - Low-pass filter for noise reduction
 - Peak detection with configurable threshold
 - Minimum time between steps enforcement
+- **Sliding Window Validation** (v1.8.4+):
+  - Checks step rate in 2-second windows during warmup
+  - Prevents "shake dilution" where short bursts of shaking pass validation
+  - Ensures only sustained, realistic walking is counted
 - Configurable via `StepDetectorConfig`
 
 ## ⚙️ Advanced Configuration

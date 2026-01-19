@@ -5,6 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.8.4] - 2026-01-19
+
+### Fixed
+- 🏃 **Warmup Validation "Shake Dilution" Fix**
+  - **Problem**: Shaking the phone rapidly (e.g., 15 steps in 2 seconds) generated a high step rate (7.5 steps/sec), but when averaged over the full 8-second warmup period, it appeared as a safe 1.8 steps/sec, erroneously passing validation.
+  - **Fix**: Implemented **Sliding Window Validation**.
+  - The warmup phase now checks the step rate in **2-second intervals**.
+  - If the step rate exceeds `maxStepsPerSecond` (default 5.0) in **ANY** 2-second window, the warmup is immediately reset.
+  - Ensures short bursts of high-frequency noise (shaking) are caught immediately, even if followed by stillness.
+
+### Technical Details
+| Issue | Root Cause | Fix |
+|-------|-----------|-----|
+| Shakes passing warmup | High rate diluted by long average (8s) | Enforce rate limit on sliding 2s windows |
+
+### Tests Added
+- **Stress Test**: 300 randomized iterations of "Walk" vs "Shake" scenarios.
+  - Verified 150/150 walks passed.
+  - Verified 150/150 shakes were rejected.
+
+---
+
 ## [1.8.3] - 2026-01-14
 
 ### Fixed
