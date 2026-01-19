@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.8.5] - 2026-01-19
+
+### Fixed
+- 🔒 **Terminated State Sync Validation**
+  - **Problem**: When the app was reopened after being closed, shake steps detected by the hardware step counter were synced to the database WITHOUT validation, bypassing the warmup checks entirely.
+  - **Fix**: Added the same validation rules (`minStepsToValidate` and `maxStepsPerSecond`) to terminated state sync.
+  - Shake steps detected while the app was closed are now properly rejected during sync.
+  - Genuine walking steps detected during terminated state still sync correctly.
+
+### Technical Details
+| Issue | Root Cause | Fix |
+|-------|-----------|-----|
+| Shake steps synced on app reopen | `_syncStepsFromTerminatedState()` bypassed validation | Apply warmup validation rules to terminated sync |
+
+---
+
 ## [1.8.4] - 2026-01-19
 
 ### Fixed

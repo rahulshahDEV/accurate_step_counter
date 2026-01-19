@@ -1735,6 +1735,34 @@ class AccurateStepCounterImpl {
       );
       _log('Time range: $startTime to $endTime');
 
+      // === VALIDATION: Apply same rules as warmup validation ===
+      // Prevent shake steps from being synced on app restart
+      final duration = endTime.difference(startTime);
+      final durationSeconds = duration.inMilliseconds / 1000.0;
+
+      // Check minimum steps requirement
+      if (missedSteps < _minStepsToValidate && durationSeconds > 0) {
+        dev.log(
+          'AccurateStepCounter: Terminated sync rejected - only $missedSteps steps (need $_minStepsToValidate)',
+        );
+        return null;
+      }
+
+      // Check step rate to detect shakes
+      if (durationSeconds > 0) {
+        final stepsPerSecond = missedSteps / durationSeconds;
+        if (stepsPerSecond > _maxStepsPerSecond) {
+          dev.log(
+            'AccurateStepCounter: Terminated sync rejected - rate ${stepsPerSecond.toStringAsFixed(2)}/s exceeds max $_maxStepsPerSecond/s',
+          );
+          return null;
+        }
+      }
+
+      dev.log(
+        'AccurateStepCounter: Terminated sync validated - $missedSteps steps at ${durationSeconds > 0 ? (missedSteps / durationSeconds).toStringAsFixed(2) : "N/A"}/s',
+      );
+
       // Notify via callback if registered
       if (onTerminatedStepsDetected != null) {
         onTerminatedStepsDetected!(missedSteps, startTime, endTime);
