@@ -1,6 +1,6 @@
 name: accurate_step_counter
 description: A highly accurate step counter plugin using accelerometer-based detection with low-pass filtering and peak detection. Includes Hive database logging with warmup validation. Supports foreground, background, and terminated state tracking.
-version: 1.8.6
+version: 1.8.7
 homepage: https://github.com/rahulshahDEV/accurate_step_counter
 repository: https://github.com/rahulshahDEV/accurate_step_counter
 issue_tracker: https://github.com/rahulshahDEV/accurate_step_counter/issues
@@ -23,6 +23,8 @@ dev_dependencies:
   flutter_lints: ^5.0.0
   hive_generator: ^2.0.1
   build_runner: ^2.4.6
+  path_provider_platform_interface: ^2.1.2
+  plugin_platform_interface: ^2.1.8
 
 # For information on the generic Dart part of this file, see the
 # following page: https://dart.dev/tools/pub/pubspec
