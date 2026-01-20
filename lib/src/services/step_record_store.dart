@@ -88,6 +88,96 @@ class StepRecordStore {
     await _box!.add(record);
   }
 
+  /// Check for duplicate or overlapping records
+  ///
+  /// Returns true if a record with the same or overlapping time range already exists.
+  /// Uses a tolerance window to detect "fuzzy" duplicates (within 60 seconds).
+  ///
+  /// [fromTime] - Start time of the record to check
+  /// [toTime] - End time of the record to check
+  /// [stepCount] - Optional step count to also match (for exact duplicate detection)
+  /// [source] - Optional source to also match
+  ///
+  /// Example:
+  /// ```dart
+  /// final isDuplicate = await store.hasDuplicateRecord(
+  ///   fromTime: startTime,
+  ///   toTime: endTime,
+  ///   stepCount: 100,
+  /// );
+  /// if (!isDuplicate) {
+  ///   await store.insertRecord(record);
+  /// }
+  /// ```
+  Future<bool> hasDuplicateRecord({
+    required DateTime fromTime,
+    required DateTime toTime,
+    int? stepCount,
+    StepRecordSource? source,
+  }) async {
+    _ensureInitialized();
+
+    // Tolerance window for fuzzy matching (60 seconds)
+    const toleranceMs = 60000;
+    final fromStart = fromTime.subtract(
+      const Duration(milliseconds: toleranceMs),
+    );
+    final fromEnd = fromTime.add(const Duration(milliseconds: toleranceMs));
+    final toStart = toTime.subtract(const Duration(milliseconds: toleranceMs));
+    final toEnd = toTime.add(const Duration(milliseconds: toleranceMs));
+
+    for (final record in _box!.values) {
+      // Check if fromTime is within tolerance
+      final fromMatches =
+          record.fromTime.isAfter(fromStart) &&
+          record.fromTime.isBefore(fromEnd);
+
+      // Check if toTime is within tolerance
+      final toMatches =
+          record.toTime.isAfter(toStart) && record.toTime.isBefore(toEnd);
+
+      if (fromMatches && toMatches) {
+        // Time range matches - check optional step count
+        if (stepCount != null && record.stepCount != stepCount) {
+          continue; // Step count doesn't match
+        }
+
+        // Check optional source
+        if (source != null && record.source != source) {
+          continue; // Source doesn't match
+        }
+
+        // Found a duplicate
+        return true;
+      }
+    }
+
+    return false;
+  }
+
+  /// Check for any overlapping records in a time range
+  ///
+  /// Returns true if any existing record overlaps with the given time range.
+  /// Useful for preventing duplicate imports from external sources.
+  ///
+  /// [fromTime] - Start time of the range to check
+  /// [toTime] - End time of the range to check
+  Future<bool> hasOverlappingRecord({
+    required DateTime fromTime,
+    required DateTime toTime,
+  }) async {
+    _ensureInitialized();
+
+    for (final record in _box!.values) {
+      // Check for overlap: record.fromTime < toTime AND record.toTime > fromTime
+      if (record.fromTime.isBefore(toTime) && record.toTime.isAfter(fromTime)) {
+        return true;
+      }
+    }
+
+    return false;
+  }
+
   /// Read all step records
   ///
   /// Returns records sorted by fromTime (newest first).

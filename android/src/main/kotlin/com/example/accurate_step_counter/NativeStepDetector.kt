@@ -36,12 +36,18 @@ class NativeStepDetector(private val context: Context) : SensorEventListener {
     private var isRunning = false
     
     // Step counting
-    private var stepCount = 0
+    private var stepCount = 0 // Confirmed steps only
+    private var pendingStepCount = 0 // Unconfirmed raw detections
     
     // Accelerometer fallback variables
     private var threshold = DEFAULT_THRESHOLD
     private var filterAlpha = DEFAULT_FILTER_ALPHA
     private var minTimeBetweenStepsMs = DEFAULT_MIN_TIME_BETWEEN_STEPS_MS
+    
+    // Shake rejection configuration
+    private val maxStepsPerSecond = 4.0 // Max realistic walking/running rate
+    private val validationWindowMs = 1500 // 1.5 second validation window
+    private val minPendingSteps = 3 // Minimum steps before confirmation
     
     // Low-pass filter state
     private var filteredX = 0.0
@@ -52,6 +58,11 @@ class NativeStepDetector(private val context: Context) : SensorEventListener {
     private var previousMagnitude = 0.0
     private var wasAboveThreshold = false
     private var lastStepTime: Long = 0
+    
+    // Shake rejection state - sliding window validation
+    private var windowStartTime: Long = 0
+    private var windowStartPendingCount = 0
+    private var lastConfirmedPendingCount = 0
     
     init {
         initializeSensors()
@@ -181,6 +192,11 @@ class NativeStepDetector(private val context: Context) : SensorEventListener {
         previousMagnitude = 0.0
         wasAboveThreshold = false
         lastStepTime = 0
+        // Reset shake rejection state
+        pendingStepCount = 0
+        windowStartTime = 0
+        windowStartPendingCount = 0
+        lastConfirmedPendingCount = 0
     }
     
     override fun onSensorChanged(event: SensorEvent?) {
@@ -203,18 +219,20 @@ class NativeStepDetector(private val context: Context) : SensorEventListener {
     }
     
     /**
-     * Handle TYPE_ACCELEROMETER events with software step detection
+     * Handle TYPE_ACCELEROMETER events with software step detection and shake rejection
      * 
      * Algorithm:
      * 1. Apply low-pass filter to smooth data
-     * 2. Calculate magnitude
-     * 3. Detect peaks (upward then downward slope)
-     * 4. Validate timing between steps
+     * 2. Calculate magnitude and detect peaks
+     * 3. Track raw detections as "pending" steps
+     * 4. Use sliding window validation to confirm steps (shake rejection)
+     * 5. Only emit confirmed steps
      */
     private fun handleAccelerometerEvent(event: SensorEvent) {
         val x = event.values[0].toDouble()
         val y = event.values[1].toDouble()
         val z = event.values[2].toDouble()
+        val now = System.currentTimeMillis()
         
         // Step 1: Apply low-pass filter
         filteredX = applyLowPassFilter(filteredX, x)
@@ -226,29 +244,88 @@ class NativeStepDetector(private val context: Context) : SensorEventListener {
         
         // Step 3: Calculate difference from previous
         val diff = magnitude - previousMagnitude
+        previousMagnitude = magnitude
         
         // Step 4: Peak detection - upward slope
         if (diff > threshold) {
             wasAboveThreshold = true
         }
         
-        // Step 5: Peak detection - downward slope (step complete)
+        // Step 5: Peak detection - downward slope (raw step detected)
         if (diff < 0 && wasAboveThreshold) {
-            val now = System.currentTimeMillis()
-            
-            // Validate minimum time between steps
-            if (lastStepTime == 0L || (now - lastStepTime) >= minTimeBetweenStepsMs) {
-                stepCount++
-                lastStepTime = now
-                android.util.Log.d(TAG, "Step detected (accelerometer): $stepCount")
-                onStepDetected?.invoke(stepCount)
-            }
-            
             wasAboveThreshold = false
+            
+            // Validate minimum time between raw detections
+            if (lastStepTime == 0L || (now - lastStepTime) >= minTimeBetweenStepsMs) {
+                pendingStepCount++
+                lastStepTime = now
+                
+                // Initialize validation window on first pending step
+                if (windowStartTime == 0L) {
+                    windowStartTime = now
+                    windowStartPendingCount = pendingStepCount - 1
+                    android.util.Log.d(TAG, "Shake validation window started")
+                }
+            }
         }
         
-        // Update for next iteration
-        previousMagnitude = magnitude
+        // Step 6: Sliding window validation for shake rejection
+        validateAndConfirmSteps(now)
+    }
+    
+    /**
+     * Validate pending steps using sliding window and confirm if rate is reasonable
+     */
+    private fun validateAndConfirmSteps(now: Long) {
+        if (windowStartTime == 0L) return
+        
+        val windowElapsed = now - windowStartTime
+        
+        // Wait for validation window to complete
+        if (windowElapsed < validationWindowMs) return
+        
+        // Calculate step rate in this window
+        val windowSteps = pendingStepCount - windowStartPendingCount
+        val windowSeconds = windowElapsed / 1000.0
+        val stepsPerSecond = windowSteps / windowSeconds
+        
+        if (stepsPerSecond > maxStepsPerSecond) {
+            // Rate too high - likely shake, reject all pending steps in this window
+            android.util.Log.d(
+                TAG,
+                "Shake detected: ${String.format("%.2f", stepsPerSecond)}/s > $maxStepsPerSecond/s - rejecting $windowSteps steps"
+            )
+            
+            // Reset window but keep pending count (to track continuous shaking)
+            windowStartTime = now
+            windowStartPendingCount = pendingStepCount
+            return
+        }
+        
+        // Rate is reasonable - check if we have minimum steps to confirm
+        if (windowSteps < minPendingSteps) {
+            // Not enough steps yet, extend window
+            return
+        }
+        
+        // Confirm steps: emit the difference since last confirmation
+        val stepsToConfirm = pendingStepCount - lastConfirmedPendingCount
+        if (stepsToConfirm > 0) {
+            stepCount += stepsToConfirm
+            lastConfirmedPendingCount = pendingStepCount
+            
+            android.util.Log.d(
+                TAG,
+                "Confirmed $stepsToConfirm steps (rate: ${String.format("%.2f", stepsPerSecond)}/s), total: $stepCount"
+            )
+            
+            // Emit confirmed step event
+            onStepDetected?.invoke(stepCount)
+        }
+        
+        // Advance window for continuous walking
+        windowStartTime = now
+        windowStartPendingCount = pendingStepCount
     }
     
     private fun applyLowPassFilter(previous: Double, current: Double): Double {
