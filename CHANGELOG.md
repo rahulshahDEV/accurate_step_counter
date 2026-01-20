@@ -5,6 +5,29 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.8.8] - 2026-01-20
+
+### Fixed
+- ⚡ **Real-Time Step Counting Restored for Android 12 and Below**
+  - **Problem**: On Android 12 and below (using foreground service mode with `SensorsStepDetector`), steps were not showing in real-time. There was a 1.5+ second delay before any steps appeared.
+  - **Root Cause**: The shake rejection added in v1.8.6 required a 1.5-second validation window with at least 3 pending steps before emitting any step events. This was intended to prevent shake-based false steps but caused unacceptable latency.
+  - **Fix**: Reverted `SensorsStepDetector` (Dart) and `NativeStepDetector` (Kotlin) to emit steps immediately (like v1.8.3). Shake rejection is now handled **only at the logging layer** through the warmup validation in `AccurateStepCounterImpl`, not at the detector level.
+
+### Technical Details
+| Component | Change |
+|-----------|--------|
+| `SensorsStepDetector` | Removed sliding window validation; steps emit immediately on peak detection |
+| `NativeStepDetector` | Removed sliding window validation; steps emit immediately on peak detection |
+| Shake rejection | Now handled exclusively by warmup validation in `AccurateStepCounterImpl.startLogging()` |
+
+### Why This Change?
+- **Before (v1.8.6-1.8.7)**: User takes a step → waits 1.5 seconds → nothing → takes 2 more steps → finally sees "3 steps"
+- **After (v1.8.8)**: User takes a step → immediately sees "1 step" (like v1.8.3)
+
+The warmup validation in the logging layer (`StepRecordConfig.warmupDurationMs`, `minStepsToValidate`, `maxStepsPerSecond`) still provides shake rejection for **what gets saved to the database**, while allowing immediate visual feedback to the user.
+
+---
+
 ## [1.8.7] - 2026-01-20
 
 ### Fixed

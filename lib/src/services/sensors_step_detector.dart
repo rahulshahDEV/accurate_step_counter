@@ -10,28 +10,23 @@ import '../models/step_count_event.dart';
 ///
 /// This provides a Dart-based step detection algorithm using
 /// the accelerometer data from the sensors_plus package.
-/// Used for foreground service mode on Android 11 and below.
+/// Used for foreground service mode on Android 12 and below.
 ///
-/// Includes built-in shake rejection using sliding window validation.
+/// Note: This detector emits steps immediately for real-time display.
+/// Shake rejection is handled at the logging layer (AccurateStepCounterImpl)
+/// through warmup validation, not at the detector level.
 class SensorsStepDetector {
   // Configuration
   double _threshold;
   double _filterAlpha;
   int _minTimeBetweenStepsMs;
 
-  // Shake rejection configuration
-  static const double _maxStepsPerSecond =
-      4.0; // Max realistic walking/running rate
-  static const int _validationWindowMs = 1500; // 1.5 second validation window
-  static const int _minPendingSteps = 3; // Minimum steps before confirmation
-
   // Internal state
   StreamSubscription<UserAccelerometerEvent>? _accelerometerSubscription;
   final StreamController<StepCountEvent> _stepEventController =
       StreamController<StepCountEvent>.broadcast();
 
-  int _stepCount = 0; // Confirmed steps only
-  int _pendingStepCount = 0; // Unconfirmed raw detections
+  int _stepCount = 0;
   bool _isRunning = false;
   final bool _debugLogging;
 
@@ -44,11 +39,6 @@ class SensorsStepDetector {
   double _previousMagnitude = 0.0;
   bool _wasAboveThreshold = false;
   DateTime? _lastStepTime;
-
-  // Shake rejection state - sliding window validation
-  DateTime? _windowStartTime;
-  int _windowStartPendingCount = 0;
-  int _lastConfirmedPendingCount = 0;
 
   /// Creates a new SensorsStepDetector
   ///
@@ -133,7 +123,6 @@ class SensorsStepDetector {
   /// Reset step count to zero
   void reset() {
     _stepCount = 0;
-    _pendingStepCount = 0;
     _resetState();
     _log('Step count reset');
   }
@@ -152,26 +141,20 @@ class SensorsStepDetector {
     _previousMagnitude = 0.0;
     _wasAboveThreshold = false;
     _lastStepTime = null;
-    // Reset shake rejection state
-    _windowStartTime = null;
-    _windowStartPendingCount = 0;
-    _lastConfirmedPendingCount = 0;
-    _pendingStepCount = 0;
   }
 
-  /// Handle accelerometer event and detect steps with shake rejection
+  /// Handle accelerometer event and detect steps
   ///
   /// Algorithm:
   /// 1. Apply low-pass filter to smooth data
-  /// 2. Calculate magnitude and detect peaks
-  /// 3. Track raw detections as "pending" steps
-  /// 4. Use sliding window validation to confirm steps (shake rejection)
-  /// 5. Only emit confirmed steps
+  /// 2. Calculate magnitude
+  /// 3. Detect peaks (upward then downward slope)
+  /// 4. Validate timing between steps
+  /// 5. Emit step event immediately for real-time display
   void _handleAccelerometerEvent(UserAccelerometerEvent event) {
     final x = event.x;
     final y = event.y;
     final z = event.z;
-    final now = DateTime.now();
 
     // Step 1: Apply low-pass filter
     _filteredX = _applyLowPassFilter(_filteredX, x);
@@ -194,86 +177,32 @@ class SensorsStepDetector {
       _wasAboveThreshold = true;
     }
 
-    // Step 5: Peak detection - downward slope (raw step detected)
+    // Step 5: Peak detection - downward slope (step complete)
     if (diff < 0 && _wasAboveThreshold) {
-      _wasAboveThreshold = false;
+      final now = DateTime.now();
 
-      // Validate minimum time between raw detections
-      final canCountRaw =
+      // Validate minimum time between steps
+      final canCountStep =
           _lastStepTime == null ||
           now.difference(_lastStepTime!).inMilliseconds >=
               _minTimeBetweenStepsMs;
 
-      if (canCountRaw) {
-        _pendingStepCount++;
+      if (canCountStep) {
+        _stepCount++;
         _lastStepTime = now;
 
-        // Initialize validation window on first pending step
-        if (_windowStartTime == null) {
-          _windowStartTime = now;
-          _windowStartPendingCount = _pendingStepCount - 1;
-          _log('Shake validation window started');
+        // Emit step event immediately for real-time display
+        if (!_stepEventController.isClosed) {
+          _stepEventController.add(
+            StepCountEvent(stepCount: _stepCount, timestamp: now),
+          );
         }
+
+        _log('Step detected: $_stepCount');
       }
+
+      _wasAboveThreshold = false;
     }
-
-    // Step 6: Sliding window validation for shake rejection
-    _validateAndConfirmSteps(now);
-  }
-
-  /// Validate pending steps using sliding window and confirm if rate is reasonable
-  void _validateAndConfirmSteps(DateTime now) {
-    if (_windowStartTime == null) return;
-
-    final windowElapsed = now.difference(_windowStartTime!).inMilliseconds;
-
-    // Wait for validation window to complete
-    if (windowElapsed < _validationWindowMs) return;
-
-    // Calculate step rate in this window
-    final windowSteps = _pendingStepCount - _windowStartPendingCount;
-    final windowSeconds = windowElapsed / 1000.0;
-    final stepsPerSecond = windowSteps / windowSeconds;
-
-    if (stepsPerSecond > _maxStepsPerSecond) {
-      // Rate too high - likely shake, reject all pending steps in this window
-      _log(
-        'Shake detected: ${stepsPerSecond.toStringAsFixed(2)}/s > $_maxStepsPerSecond/s - rejecting $windowSteps steps',
-      );
-
-      // Reset window but keep pending count (to track continuous shaking)
-      _windowStartTime = now;
-      _windowStartPendingCount = _pendingStepCount;
-      return;
-    }
-
-    // Rate is reasonable - check if we have minimum steps to confirm
-    if (windowSteps < _minPendingSteps) {
-      // Not enough steps yet, extend window
-      return;
-    }
-
-    // Confirm steps: emit the difference since last confirmation
-    final stepsToConfirm = _pendingStepCount - _lastConfirmedPendingCount;
-    if (stepsToConfirm > 0) {
-      _stepCount += stepsToConfirm;
-      _lastConfirmedPendingCount = _pendingStepCount;
-
-      _log(
-        'Confirmed $stepsToConfirm steps (rate: ${stepsPerSecond.toStringAsFixed(2)}/s), total: $_stepCount',
-      );
-
-      // Emit confirmed step event
-      if (!_stepEventController.isClosed) {
-        _stepEventController.add(
-          StepCountEvent(stepCount: _stepCount, timestamp: now),
-        );
-      }
-    }
-
-    // Advance window for continuous walking
-    _windowStartTime = now;
-    _windowStartPendingCount = _pendingStepCount;
   }
 
   /// Apply low-pass filter to smooth accelerometer data
