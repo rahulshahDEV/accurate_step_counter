@@ -5,7 +5,88 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.8.7] - 2026-01-20
+
+### Fixed
+- 🔒 **Race Condition Fix: Duplicate External Step Writes**
+  - **Problem**: On Android 12+, when multiple widgets called `readFootSteps()` simultaneously (e.g., app open with multiple widgets mounting), duplicate external step records were created. The duplicates had identical step counts but `toTime` differed by only 1-2 seconds.
+  - **Root Cause**: Multiple concurrent calls to `writeStepsToAggregated()` would both pass the duplicate check simultaneously (before either had committed to the database), then both would write, creating duplicates.
+  - **Fix**: Implemented two-layer protection:
+    1. **Mutex Lock**: Added `Completer`-based async lock that serializes all `writeStepsToAggregated()` calls. Concurrent calls now wait for previous writes to complete.
+    2. **In-Memory Tracking**: Fast pre-check against the last external write's time, steps, and fromTime. Catches rapid duplicate calls within 30 seconds without database queries.
+
+### Technical Details
+| Component | Change |
+|-----------|--------|
+| `AccurateStepCounterImpl` | Added `_writeLock` (Completer), `_lastExternalWriteTime`, `_lastExternalWriteSteps`, `_lastExternalWriteFromTime` fields |
+| `writeStepsToAggregated()` | Now waits for any in-progress write to complete before proceeding |
+| Duplicate Detection | Two-layer: in-memory check (30s window) + database check (60s tolerance) |
+
+### Example Log
+```
+AccurateStepCounter: Waiting for previous write to complete...
+AccurateStepCounter: Skipped near-duplicate write (in-memory check): 2694 steps, last write was 2s ago
+```
+
+---
+
+## [1.8.6] - 2026-01-19
+
+### Fixed
+- 🔒 **Sensor-Level Shake Rejection for Android 12 and Below**
+  - **Problem**: On Android 12 and below, simple phone shakes incorrectly incremented the step count even when warmup validation was active. The warmup validation only filtered what got logged to the database, but the user-visible `currentStepCount` still increased from shakes.
+  - **Root Cause**: The `SensorsStepDetector` (Dart) and `NativeStepDetector` accelerometer fallback (Kotlin) lacked built-in shake rejection. Raw accelerometer peaks were immediately counted as steps.
+  - **Fix**: Added sliding window validation directly to both step detectors:
+    - Steps are now tracked as "pending" until validated
+    - A 1.5-second validation window checks the step rate
+    - If rate exceeds 4 steps/second (shaking), all pending steps in that window are rejected
+    - Minimum 3 pending steps required before confirmation
+    - Only confirmed steps increment the visible step count
+
+### Added
+- 🛡️ **Duplicate Prevention for External Step Writes**
+  - New `skipIfDuplicate` parameter in `writeStepsToAggregated()` (default: `true`)
+  - Prevents duplicate records when importing steps from external sources (Google Fit, Apple Health, etc.)
+  - Uses fuzzy matching (60-second tolerance) to detect duplicate time ranges
+  - Method now returns `bool` - `true` if written, `false` if skipped due to duplicate
+  
+  **New API Methods in `StepRecordStore`:**
+  - `hasDuplicateRecord()` - Check for existing records with matching time range
+  - `hasOverlappingRecord()` - Check for any overlapping records in a time range
+  
+  **Example:**
+  ```dart
+  final wasWritten = await stepCounter.writeStepsToAggregated(
+    stepCount: 5000,
+    fromTime: importStart,
+    toTime: importEnd,
+    source: StepRecordSource.external,
+    skipIfDuplicate: true, // Default - prevents duplicate imports
+  );
+  if (!wasWritten) {
+    print('Skipped - record already exists');
+  }
+  ```
+
+### Technical Details
+| Component | Change |
+|-----------|--------|
+| `SensorsStepDetector` (Dart) | Added `_pendingStepCount`, sliding window validation, `_validateAndConfirmSteps()` method |
+| `NativeStepDetector` (Kotlin) | Added `pendingStepCount`, sliding window validation, `validateAndConfirmSteps()` method |
+| Step Detection | Steps are no longer emitted immediately - they require 1.5s validation |
+| Shake Rejection | Rate > 4 steps/sec = shake detected, pending steps discarded |
+| `StepRecordStore` | Added `hasDuplicateRecord()` and `hasOverlappingRecord()` methods |
+| `writeStepsToAggregated` | New `skipIfDuplicate` parameter, now returns `Future<bool>` |
+
+### Why This Matters
+- **Shake Rejection**: Shaking phone no longer shows step increase - only validated walking steps count.
+- **Duplicate Prevention**: Re-importing the same steps from external sources won't create duplicate records.
+
+---
+
+
 ## [1.8.5] - 2026-01-19
+
 
 ### Fixed
 - 🔒 **Terminated State Sync Validation**

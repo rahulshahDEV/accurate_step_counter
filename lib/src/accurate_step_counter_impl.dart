@@ -77,6 +77,15 @@ class AccurateStepCounterImpl {
   int _inactivityTimeoutMs = 0;
   Timer? _inactivityTimer;
 
+  // Write lock to prevent concurrent writeStepsToAggregated calls
+  // This prevents race conditions where multiple writes happen before duplicate check completes
+  Completer<void>? _writeLock;
+
+  // Track last external write to detect near-duplicate writes
+  DateTime? _lastExternalWriteTime;
+  int? _lastExternalWriteSteps;
+  DateTime? _lastExternalWriteFromTime;
+
   /// Callback for handling missed steps from terminated state
   /// Parameters: (missedSteps, startTime, endTime)
   Function(int, DateTime, DateTime)? onTerminatedStepsDetected;
@@ -1543,11 +1552,44 @@ class AccurateStepCounterImpl {
   /// ```
   ///
   /// After writing, the aggregated stream will automatically emit the new total.
-  Future<void> writeStepsToAggregated({
+  /// Writes steps to the aggregated database with optional duplicate detection
+  ///
+  /// Returns `true` if steps were written, `false` if skipped due to duplicate.
+  ///
+  /// [stepCount] - Number of steps to write (must be positive)
+  /// [fromTime] - Start time of the activity
+  /// [toTime] - End time of the activity (defaults to now)
+  /// [source] - Source of the steps (defaults to external)
+  /// [skipIfDuplicate] - If true, skips writing if duplicate record exists (default: true)
+  ///
+  /// Example:
+  /// ```dart
+  /// // Safe external import with duplicate prevention (recommended)
+  /// final wasWritten = await stepCounter.writeStepsToAggregated(
+  ///   stepCount: 5000,
+  ///   fromTime: DateTime.now().subtract(Duration(hours: 2)),
+  ///   toTime: DateTime.now(),
+  ///   source: StepRecordSource.external,
+  ///   skipIfDuplicate: true, // Default - prevents duplicate imports
+  /// );
+  /// if (!wasWritten) {
+  ///   print('Skipped - record already exists');
+  /// }
+  ///
+  /// // Force write without duplicate check
+  /// await stepCounter.writeStepsToAggregated(
+  ///   stepCount: 100,
+  ///   fromTime: startTime,
+  ///   toTime: endTime,
+  ///   skipIfDuplicate: false, // Force write even if duplicate
+  /// );
+  /// ```
+  Future<bool> writeStepsToAggregated({
     required int stepCount,
     required DateTime fromTime,
     DateTime? toTime,
     StepRecordSource? source,
+    bool skipIfDuplicate = true,
   }) async {
     _ensureLoggingInitialized();
 
@@ -1568,37 +1610,105 @@ class AccurateStepCounterImpl {
       throw ArgumentError('toTime must be after fromTime');
     }
 
-    // Write to database
-    final entry = StepRecord(
-      stepCount: stepCount,
-      fromTime: fromTime,
-      toTime: endTime,
-      source: source ?? StepRecordSource.external,
-    );
+    final recordSource = source ?? StepRecordSource.external;
 
-    await _stepRecordStore.insertRecord(entry);
-    _log('Manually wrote $stepCount steps to aggregated database');
-
-    // Update stored steps to include the new manually added steps
-    final now = DateTime.now();
-    final startOfToday = DateTime(now.year, now.month, now.day);
-
-    // Recalculate today's total from database
-    final todayTotal = await _stepRecordStore.readTotalSteps(
-      from: startOfToday,
-      to: now,
-    );
-
-    // Update stored steps count
-    _aggregatedStoredSteps = todayTotal;
-
-    // Emit updated aggregated count
-    final newAggregatedCount = _aggregatedStoredSteps + _currentSessionSteps;
-    if (!_aggregatedStepController.isClosed) {
-      _aggregatedStepController.add(newAggregatedCount);
+    // === MUTEX LOCK: Prevent concurrent writes ===
+    // Wait for any in-progress write to complete before proceeding
+    // This prevents race conditions where duplicate checks pass simultaneously
+    if (_writeLock != null && !_writeLock!.isCompleted) {
+      _log('Waiting for previous write to complete...');
+      await _writeLock!.future;
     }
 
-    _log('Aggregated count updated to $newAggregatedCount');
+    // Create a new lock for this write operation
+    _writeLock = Completer<void>();
+
+    try {
+      // === IN-MEMORY DUPLICATE CHECK ===
+      // Fast check against last write to catch rapid duplicate calls
+      // This is faster than database check and catches most race conditions
+      if (skipIfDuplicate && recordSource == StepRecordSource.external) {
+        final now = DateTime.now();
+        if (_lastExternalWriteTime != null &&
+            _lastExternalWriteSteps == stepCount &&
+            _lastExternalWriteFromTime != null) {
+          // Check if this looks like a duplicate write (same steps, same fromTime, within 30 seconds)
+          final timeSinceLastWrite = now.difference(_lastExternalWriteTime!);
+          final fromTimeDiff = fromTime
+              .difference(_lastExternalWriteFromTime!)
+              .abs();
+
+          if (timeSinceLastWrite.inSeconds < 30 &&
+              fromTimeDiff.inSeconds < 60) {
+            _log(
+              'Skipped near-duplicate write (in-memory check): $stepCount steps, '
+              'last write was ${timeSinceLastWrite.inSeconds}s ago',
+            );
+            return false;
+          }
+        }
+      }
+
+      // === DATABASE DUPLICATE CHECK ===
+      // Check for duplicate record in database if requested
+      if (skipIfDuplicate) {
+        final isDuplicate = await _stepRecordStore.hasDuplicateRecord(
+          fromTime: fromTime,
+          toTime: endTime,
+          stepCount: stepCount,
+          source: recordSource,
+        );
+
+        if (isDuplicate) {
+          _log(
+            'Skipped duplicate write (database check): $stepCount steps from $fromTime to $endTime',
+          );
+          return false; // Record already exists
+        }
+      }
+
+      // Write to database
+      final entry = StepRecord(
+        stepCount: stepCount,
+        fromTime: fromTime,
+        toTime: endTime,
+        source: recordSource,
+      );
+
+      await _stepRecordStore.insertRecord(entry);
+      _log('Wrote $stepCount steps to aggregated database');
+
+      // Track this write for in-memory duplicate detection
+      if (recordSource == StepRecordSource.external) {
+        _lastExternalWriteTime = DateTime.now();
+        _lastExternalWriteSteps = stepCount;
+        _lastExternalWriteFromTime = fromTime;
+      }
+
+      // Update stored steps to include the new manually added steps
+      final now = DateTime.now();
+      final startOfToday = DateTime(now.year, now.month, now.day);
+
+      // Recalculate today's total from database
+      final todayTotal = await _stepRecordStore.readTotalSteps(
+        from: startOfToday,
+        to: now,
+      );
+
+      // Update stored steps count
+      _aggregatedStoredSteps = todayTotal;
+
+      // Emit updated aggregated count
+      final newAggregatedCount = _aggregatedStoredSteps + _currentSessionSteps;
+      if (!_aggregatedStepController.isClosed) {
+        _aggregatedStepController.add(newAggregatedCount);
+      }
+
+      return true; // Successfully written
+    } finally {
+      // Always release the lock, even if an error occurs
+      _writeLock?.complete();
+    }
   }
 
   /// Get step statistics for a date range
