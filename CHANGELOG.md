@@ -5,6 +5,42 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.8.9] - 2026-01-21
+
+### Fixed
+- 🔧 **Android 12+ Foreground Service Compatibility**
+  - **Problem**: Foreground service was not working properly on Android 12 and below due to several compatibility issues with newer Android versions.
+  - **Root Causes**:
+    1. Android 14+ requires explicit `foregroundServiceType` parameter in `startForeground()` call
+    2. Missing `BODY_SENSORS_BACKGROUND` permission for Android 13+ background sensor access
+    3. Missing `HIGH_SAMPLING_RATE_SENSORS` permission for health foreground service
+    4. Android 12+ throws `ForegroundServiceStartNotAllowedException` when starting service from background
+  - **Fixes Applied**:
+    1. Updated `StepCounterForegroundService.kt` to specify `ServiceInfo.FOREGROUND_SERVICE_TYPE_HEALTH` explicitly for Android 10+
+    2. Added `BODY_SENSORS_BACKGROUND` permission to AndroidManifest.xml
+    3. Added `HIGH_SAMPLING_RATE_SENSORS` permission to AndroidManifest.xml
+    4. Added proper exception handling for `ForegroundServiceStartNotAllowedException` with informative error messages
+    5. Added activity count check before starting foreground service on Android 12+
+
+### Added
+- 📢 **POST_NOTIFICATIONS Permission Request (Meltdown App)**
+  - Added automatic notification permission request for Android 13+ before starting foreground service
+  - This ensures the foreground service notification is visible to users
+
+### Technical Details
+| Android Version | Foreground Service Behavior |
+|-----------------|---------------------------|
+| **Android 14+ (API 34+)** | Explicit `FOREGROUND_SERVICE_TYPE_HEALTH` required |
+| **Android 12-13 (API 31-33)** | Background start restrictions, activity must be visible |
+| **Android 10-11 (API 29-30)** | No restrictions, service starts normally |
+| **Android 9 and below** | Uses `startService()` instead of `startForegroundService()` |
+
+### Permissions Added
+- `BODY_SENSORS_BACKGROUND` - Required for background sensor access on Android 13+
+- `HIGH_SAMPLING_RATE_SENSORS` - Required for health foreground service sensor access
+
+---
+
 ## [1.8.8] - 2026-01-20
 
 ### Fixed

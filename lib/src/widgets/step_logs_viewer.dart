@@ -288,7 +288,7 @@ class _StepLogsViewerState extends State<StepLogsViewer> {
                   selected: _selectedSource == StepRecordSource.foreground,
                   onSelected: (_) => _applyFilter(StepRecordSource.foreground),
                   visualDensity: VisualDensity.compact,
-                  selectedColor: Colors.green.withOpacity(0.3),
+                  selectedColor: Colors.green.withValues(alpha: 0.3),
                 ),
                 const SizedBox(width: 4),
                 FilterChip(
@@ -296,7 +296,7 @@ class _StepLogsViewerState extends State<StepLogsViewer> {
                   selected: _selectedSource == StepRecordSource.background,
                   onSelected: (_) => _applyFilter(StepRecordSource.background),
                   visualDensity: VisualDensity.compact,
-                  selectedColor: Colors.orange.withOpacity(0.3),
+                  selectedColor: Colors.orange.withValues(alpha: 0.3),
                 ),
                 const SizedBox(width: 4),
                 FilterChip(
@@ -304,7 +304,7 @@ class _StepLogsViewerState extends State<StepLogsViewer> {
                   selected: _selectedSource == StepRecordSource.terminated,
                   onSelected: (_) => _applyFilter(StepRecordSource.terminated),
                   visualDensity: VisualDensity.compact,
-                  selectedColor: Colors.red.withOpacity(0.3),
+                  selectedColor: Colors.red.withValues(alpha: 0.3),
                 ),
                 const SizedBox(width: 4),
                 FilterChip(
@@ -312,7 +312,7 @@ class _StepLogsViewerState extends State<StepLogsViewer> {
                   selected: _selectedSource == StepRecordSource.external,
                   onSelected: (_) => _applyFilter(StepRecordSource.external),
                   visualDensity: VisualDensity.compact,
-                  selectedColor: Colors.blue.withOpacity(0.3),
+                  selectedColor: Colors.blue.withValues(alpha: 0.3),
                 ),
                 if (widget.showDatePicker) ...[
                   const SizedBox(width: 8),
@@ -386,7 +386,7 @@ class _StepLogsViewerState extends State<StepLogsViewer> {
                               vertical: 1,
                             ),
                             decoration: BoxDecoration(
-                              color: sourceColor.withOpacity(0.2),
+                              color: sourceColor.withValues(alpha: 0.2),
                               borderRadius: BorderRadius.circular(3),
                             ),
                             child: Text(

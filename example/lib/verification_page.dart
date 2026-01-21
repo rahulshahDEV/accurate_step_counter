@@ -18,7 +18,6 @@ class _VerificationPageState extends State<VerificationPage> {
   final _stepCounter = AccurateStepCounter();
   final List<VerificationStep> _steps = [];
   bool _isRunning = false;
-  bool _allPassed = false;
 
   @override
   void initState() {
@@ -68,7 +67,8 @@ class _VerificationPageState extends State<VerificationPage> {
 
   Future<VerificationResult> _checkPermission() async {
     try {
-      final hasPermission = await _stepCounter.hasActivityRecognitionPermission();
+      final hasPermission = await _stepCounter
+          .hasActivityRecognitionPermission();
 
       if (!hasPermission) {
         final status = await Permission.activityRecognition.request();
@@ -163,9 +163,7 @@ class _VerificationPageState extends State<VerificationPage> {
 
   Future<VerificationResult> _enableLogging() async {
     try {
-      await _stepCounter.startLogging(
-        config: StepRecordConfig.walking(),
-      );
+      await _stepCounter.startLogging(config: StepRecordConfig.walking());
 
       if (_stepCounter.isLoggingEnabled) {
         return VerificationResult.success(
@@ -202,7 +200,6 @@ class _VerificationPageState extends State<VerificationPage> {
   Future<void> _runVerification() async {
     setState(() {
       _isRunning = true;
-      _allPassed = false;
       for (final step in _steps) {
         step.reset();
       }
@@ -236,7 +233,6 @@ class _VerificationPageState extends State<VerificationPage> {
 
     setState(() {
       _isRunning = false;
-      _allPassed = allSuccess;
     });
 
     if (allSuccess) {
@@ -292,18 +288,12 @@ class _VerificationPageState extends State<VerificationPage> {
               children: [
                 const Text(
                   'Step Counter Setup Verification',
-                  style: TextStyle(
-                    fontSize: 20,
-                    fontWeight: FontWeight.bold,
-                  ),
+                  style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
                 ),
                 const SizedBox(height: 8),
                 Text(
                   'This tool verifies that the step counter plugin is properly configured.',
-                  style: TextStyle(
-                    fontSize: 14,
-                    color: Colors.grey.shade700,
-                  ),
+                  style: TextStyle(fontSize: 14, color: Colors.grey.shade700),
                 ),
               ],
             ),
@@ -429,10 +419,7 @@ class _VerificationPageState extends State<VerificationPage> {
             const SizedBox(height: 8),
             Text(
               step.description,
-              style: TextStyle(
-                fontSize: 14,
-                color: Colors.grey.shade600,
-              ),
+              style: TextStyle(fontSize: 14, color: Colors.grey.shade600),
             ),
             if (step.message != null) ...[
               const SizedBox(height: 8),
@@ -524,21 +511,18 @@ class VerificationStep {
   }
 }
 
-enum VerificationStatus {
-  pending,
-  running,
-  success,
-  warning,
-  failure,
-}
+enum VerificationStatus { pending, running, success, warning, failure }
 
 class VerificationResult {
   final VerificationStatus status;
   final String message;
 
-  VerificationResult.success(this.message) : status = VerificationStatus.success;
-  VerificationResult.warning(this.message) : status = VerificationStatus.warning;
-  VerificationResult.failure(this.message) : status = VerificationStatus.failure;
+  VerificationResult.success(this.message)
+    : status = VerificationStatus.success;
+  VerificationResult.warning(this.message)
+    : status = VerificationStatus.warning;
+  VerificationResult.failure(this.message)
+    : status = VerificationStatus.failure;
 }
 
 class TimeoutException implements Exception {

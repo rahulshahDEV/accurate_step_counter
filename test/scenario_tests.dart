@@ -1,7 +1,5 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:accurate_step_counter/accurate_step_counter.dart';
-import 'package:accurate_step_counter/src/models/step_record.dart';
-import 'package:accurate_step_counter/src/models/step_record_source.dart';
 
 /// Comprehensive test scenarios based on TEST_SCENARIOS_COMPREHENSIVE.md
 void main() {
@@ -299,7 +297,7 @@ void main() {
     test('5.4 Dispose and reinitialize works', () async {
       // First initialization
       await stepCounter.initializeLogging(debugLogging: false);
-      final total1 = await stepCounter.getTotalSteps();
+      final _ = await stepCounter.getTotalSteps();
 
       // Dispose
       await stepCounter.dispose();

@@ -6,6 +6,12 @@
 
   <!-- Optional: For better sensor access on some devices -->
   <uses-permission android:name="android.permission.BODY_SENSORS"/>
+  
+  <!-- Required for background body sensor access on Android 13+ (API 33+) -->
+  <uses-permission android:name="android.permission.BODY_SENSORS_BACKGROUND"/>
+  
+  <!-- Required for high sampling rate sensors in health foreground service -->
+  <uses-permission android:name="android.permission.HIGH_SAMPLING_RATE_SENSORS"/>
 
   <!-- Required for foreground service on Android ≤10 -->
   <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>

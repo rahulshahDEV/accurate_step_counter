@@ -223,14 +223,31 @@ class AccurateStepCounterPlugin : FlutterPlugin, MethodCallHandler, SensorEventL
                         putExtra(StepCounterForegroundService.EXTRA_NOTIFICATION_TEXT, text)
                     }
                     
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    // On Android 12+ (API 31+), there are restrictions on starting foreground services from background
+                    // We should only start when app is in foreground (activity is visible)
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                        // Android 12+ - check if we have an active activity
+                        if (activityCount <= 0) {
+                            android.util.Log.w("AccurateStepCounter", 
+                                "Android 12+ detected but no visible activity - foreground service start may fail")
+                        }
+                        context.startForegroundService(intent)
+                    } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                         context.startForegroundService(intent)
                     } else {
                         context.startService(intent)
                     }
                     
-                    android.util.Log.d("AccurateStepCounter", "Foreground service started successfully")
+                    android.util.Log.d("AccurateStepCounter", "Foreground service started successfully (API ${Build.VERSION.SDK_INT})")
                     result.success(true)
+                } catch (e: android.app.ForegroundServiceStartNotAllowedException) {
+                    // Android 12+ specific exception - app tried to start foreground service from background
+                    android.util.Log.e("AccurateStepCounter", 
+                        "ForegroundServiceStartNotAllowedException: Cannot start foreground service from background on Android 12+. " +
+                        "Ensure app has a visible activity or uses an exemption like high-priority FCM.", e)
+                    result.error("FOREGROUND_START_NOT_ALLOWED", 
+                        "Cannot start foreground service from background on Android 12+. " +
+                        "Make sure to start the service while the app is in foreground.", null)
                 } catch (e: Exception) {
                     android.util.Log.e("AccurateStepCounter", "Failed to start foreground service: ${e.message}", e)
                     result.error("SERVICE_ERROR", "Failed to start foreground service: ${e.message}", null)
