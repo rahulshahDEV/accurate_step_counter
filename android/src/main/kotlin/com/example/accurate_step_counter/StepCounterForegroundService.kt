@@ -7,6 +7,7 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
@@ -113,8 +114,22 @@ class StepCounterForegroundService : Service() {
         acquireWakeLock()
         
         // Start as foreground service with notification
+        // On Android 14+ (API 34+), we must explicitly specify the foreground service type
         val notification = createNotification()
-        startForeground(NOTIFICATION_ID, notification)
+        
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            // Android 14+ requires explicit service type
+            startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_HEALTH)
+            android.util.Log.d("StepForegroundService", "Started with FOREGROUND_SERVICE_TYPE_HEALTH (Android 14+)")
+        } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            // Android 10-13: Use the type specified in manifest
+            startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_HEALTH)
+            android.util.Log.d("StepForegroundService", "Started with FOREGROUND_SERVICE_TYPE_HEALTH (Android 10-13)")
+        } else {
+            // Android 9 and below: No service type required
+            startForeground(NOTIFICATION_ID, notification)
+            android.util.Log.d("StepForegroundService", "Started without service type (Android 9 and below)")
+        }
         
         // Load saved session step count if resuming
         val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)

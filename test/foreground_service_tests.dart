@@ -3,7 +3,6 @@ import 'dart:async';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:accurate_step_counter/accurate_step_counter.dart';
 import 'package:accurate_step_counter/src/services/sensors_step_detector.dart';
-import 'package:accurate_step_counter/src/models/step_count_event.dart';
 
 /// Comprehensive test suite for both foreground service mode (Android ≤11)
 /// and non-foreground service mode (Android 12+)
