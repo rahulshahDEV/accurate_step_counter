@@ -20,9 +20,9 @@ A simple, accurate step counter for Flutter. Works in **foreground**, **backgrou
 
 ## 📱 Platform Support
 
-| Platform | Status |
-|----------|--------|
-| Android  | ✅ Full support (API 19+) |
+| Platform | Status | Note |
+|----------|--------|------|
+| Android  | ✅ Full support (API 19+) | Includes critical ANR fix for Android 12 (v1.8.10+) |
 | iOS      | ❌ Not supported |
 
 ## 🚀 Quick Start

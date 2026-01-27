@@ -179,7 +179,7 @@ class SensorsStepDetector {
 
     // Step 5: Peak detection - downward slope (step complete)
     if (diff < 0 && _wasAboveThreshold) {
-      final now = DateTime.now();
+      final now = DateTime.now().toUtc();
 
       // Validate minimum time between steps
       final canCountStep =
