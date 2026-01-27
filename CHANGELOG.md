@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.8.10] - 2026-01-27
+
+### Fixed
+- 🔥 **Critical Fix: Android 12 ANR (Application Not Responding)**
+  - **Problem**: On Android 12 and below (using `SensorsStepDetector` 50Hz loop), the app would freeze/crash with an ANR due to blocking timezone lookups (`tzset_unlocked`) on the main thread.
+  - **Fix**: Replaced `DateTime.now()` with `DateTime.now().toUtc()` in the high-frequency sensor loop. This avoids blocking filesystem operations for timezone data.
+  - **Stability**: Kept user-facing aggregation methods (e.g., `getTodayStepCount`) on Local Time (`DateTime.now()`) to ensure "Today" respects the user's local day boundary while keeping the dangerous high-speed loop on safe UTC.
+  - **Native**: Updated `NativeStepDetector` to also use UTC timestamps for extra safety on all Android versions.
+
+### Technical Details
+| Component | Old Behavior (Crash) | New Behavior (Safe) |
+|-----------|----------------------|---------------------|
+| `SensorsStepDetector` | `DateTime.now()` (Local) @ 50Hz | `DateTime.now().toUtc()` (UTC) @ 50Hz |
+| `getTodayStepCount` | `DateTime.now()` (Local) | `DateTime.now()` (Local) - Safe (low frequency) |
+
+---
+
 ## [1.8.9] - 2026-01-21
 
 ### Fixed

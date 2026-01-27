@@ -624,7 +624,7 @@ class AccurateStepCounterImpl {
     _isInWarmup = cfg.warmupDurationMs > 0;
     _warmupStartTime = null;
     _warmupStartStepCount = 0;
-    _lastRecordTime = DateTime.now();
+    _lastRecordTime = DateTime.now().toUtc();
     _lastRecordedStepCount = 0;
 
     // Initialize aggregated mode with today's data
@@ -1124,8 +1124,8 @@ class AccurateStepCounterImpl {
     }
 
     // Check if the time range spans multiple days
-    final fromDate = DateTime(fromTime.year, fromTime.month, fromTime.day);
-    final toDate = DateTime(toTime.year, toTime.month, toTime.day);
+    final fromDate = DateTime.utc(fromTime.year, fromTime.month, fromTime.day);
+    final toDate = DateTime.utc(toTime.year, toTime.month, toTime.day);
 
     // If same day, log as single entry
     if (fromDate == toDate) {
@@ -1156,7 +1156,7 @@ class AccurateStepCounterImpl {
 
     while (currentStart.isBefore(toTime)) {
       // Calculate end of current day (midnight of next day) or toTime if earlier
-      final currentDate = DateTime(
+      final currentDate = DateTime.utc(
         currentStart.year,
         currentStart.month,
         currentStart.day,
@@ -1604,7 +1604,7 @@ class AccurateStepCounterImpl {
       throw ArgumentError('Step count must be positive');
     }
 
-    final endTime = toTime ?? DateTime.now();
+    final endTime = toTime ?? DateTime.now().toUtc();
 
     if (endTime.isBefore(fromTime)) {
       throw ArgumentError('toTime must be after fromTime');
@@ -1628,7 +1628,7 @@ class AccurateStepCounterImpl {
       // Fast check against last write to catch rapid duplicate calls
       // This is faster than database check and catches most race conditions
       if (skipIfDuplicate && recordSource == StepRecordSource.external) {
-        final now = DateTime.now();
+        final now = DateTime.now().toUtc();
         if (_lastExternalWriteTime != null &&
             _lastExternalWriteSteps == stepCount &&
             _lastExternalWriteFromTime != null) {

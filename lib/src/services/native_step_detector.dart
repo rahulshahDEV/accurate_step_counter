@@ -132,8 +132,8 @@ class NativeStepDetector {
         final stepEvent = StepCountEvent(
           stepCount: stepCount,
           timestamp: timestamp != null
-              ? DateTime.fromMillisecondsSinceEpoch(timestamp)
-              : DateTime.now(),
+              ? DateTime.fromMillisecondsSinceEpoch(timestamp, isUtc: true)
+              : DateTime.now().toUtc(),
         );
 
         if (!_stepEventController.isClosed) {
