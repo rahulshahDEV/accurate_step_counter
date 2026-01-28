@@ -48,7 +48,7 @@ It only converts to "Local Time" when showing steps to the user. This means:
 
 ```yaml
 dependencies:
-  accurate_step_counter: ^1.8.11
+  accurate_step_counter: ^1.8.12
 ```
 
 ### 2. Add Permissions

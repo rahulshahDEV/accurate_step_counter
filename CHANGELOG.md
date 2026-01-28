@@ -5,6 +5,29 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.8.12] - 2026-01-28
+
+### Fixed
+- 🛡️ **Crash-Proof Data Retention: deleteRecordsBefore() Safety Improvements**
+  - **Problem**: `deleteRecordsBefore()` could crash the app if Hive box re-initialization failed during cold start recovery.
+  - **Root Cause**: After catching a "Box closed" error and re-initializing, the code accessed `_box!` without null checks, causing potential null pointer crashes.
+  - **Fix**:
+    - Added null/isOpen checks after `_ensureBoxOpen()` call
+    - Added null/isOpen checks after re-initialization in catch block
+    - Wrapped retry logic in try-catch to prevent crash if re-init fails
+    - Non-Hive errors now silently return instead of rethrowing
+    - Only calls `deleteAll` if there are actually keys to delete
+  - **Benefit**: Data retention policies (e.g., "delete logs older than 7 days") now work safely on all devices, including those with aggressive battery optimization.
+
+### Technical Details
+| Scenario | Old Behavior | New Behavior (Safe) |
+|----------|-------------|---------------------|
+| Box re-init fails | Crash (null access) | Silently returns, app continues |
+| Hive corruption | Crash (rethrow) | Silently returns, app continues |
+| No records to delete | Unnecessary deleteAll call | Skipped for efficiency |
+
+---
+
 ## [1.8.11] - 2026-01-28
 
 ### Fixed
@@ -14,18 +37,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Fix**: Added `_ensureBoxOpen()` method in `StepRecordStore` that checks if the box is still open and reopens it if needed before any database operation.
   - **Benefit**: Step logging and queries now work reliably after cold starts, even when Android aggressively kills the app.
 
-- 🛡️ **Improved Safety: deleteRecordsBefore() Now Crash-Proof**
-  - Made `deleteRecordsBefore()` method completely safe - it will never crash the app
-  - Added null checks after box re-initialization attempts
-  - Data retention failures are now silently handled (non-critical operation)
-  - Prevents potential crashes when using data retention policies
-
 ### Technical Details
 | Scenario | Old Behavior (ANR) | New Behavior (Safe) |
 |----------|-------------------|---------------------|
 | Cold start after app kill | Box closed, operations block/fail | Auto-reopens box, operations succeed |
 | Normal operation | Works fine | Works fine (no overhead) |
-| Data retention on cold start | Could crash if re-init failed | Silently continues, app works |
 
 ---
 
