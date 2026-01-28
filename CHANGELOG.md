@@ -14,11 +14,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Fix**: Added `_ensureBoxOpen()` method in `StepRecordStore` that checks if the box is still open and reopens it if needed before any database operation.
   - **Benefit**: Step logging and queries now work reliably after cold starts, even when Android aggressively kills the app.
 
+- 🛡️ **Improved Safety: deleteRecordsBefore() Now Crash-Proof**
+  - Made `deleteRecordsBefore()` method completely safe - it will never crash the app
+  - Added null checks after box re-initialization attempts
+  - Data retention failures are now silently handled (non-critical operation)
+  - Prevents potential crashes when using data retention policies
+
 ### Technical Details
 | Scenario | Old Behavior (ANR) | New Behavior (Safe) |
 |----------|-------------------|---------------------|
 | Cold start after app kill | Box closed, operations block/fail | Auto-reopens box, operations succeed |
 | Normal operation | Works fine | Works fine (no overhead) |
+| Data retention on cold start | Could crash if re-init failed | Silently continues, app works |
 
 ---
 
