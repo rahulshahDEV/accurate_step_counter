@@ -1,48 +1,19 @@
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:accurate_step_counter/accurate_step_counter.dart';
-import 'package:path_provider_platform_interface/path_provider_platform_interface.dart';
-import 'package:plugin_platform_interface/plugin_platform_interface.dart';
-
-/// Mock path provider for testing
-class FakePathProviderPlatform extends Fake
-    with MockPlatformInterfaceMixin
-    implements PathProviderPlatform {
-  @override
-  Future<String?> getApplicationDocumentsPath() async {
-    return '/tmp/test_hive_${DateTime.now().millisecondsSinceEpoch}';
-  }
-
-  @override
-  Future<String?> getTemporaryPath() async => '/tmp';
-
-  @override
-  Future<String?> getApplicationSupportPath() async => '/tmp';
-
-  @override
-  Future<String?> getLibraryPath() async => '/tmp';
-
-  @override
-  Future<String?> getExternalStoragePath() async => '/tmp';
-
-  @override
-  Future<List<String>?> getExternalCachePaths() async => ['/tmp'];
-
-  @override
-  Future<List<String>?> getExternalStoragePaths({
-    StorageDirectory? type,
-  }) async => ['/tmp'];
-
-  @override
-  Future<String?> getDownloadsPath() async => '/tmp';
-}
+import 'package:accurate_step_counter/src/database/database_helper.dart';
+import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
   setUpAll(() {
-    // Mock path provider
-    PathProviderPlatform.instance = FakePathProviderPlatform();
+    // Initialize sqflite FFI for testing
+    sqfliteFfiInit();
+    databaseFactory = databaseFactoryFfi;
+
+    // Enable test mode for in-memory database
+    DatabaseHelper.setTestMode();
 
     // Mock method channel for native step detector
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
@@ -77,18 +48,22 @@ void main() {
         );
   });
 
-  tearDownAll(() {
+  tearDownAll(() async {
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
         .setMockMethodCallHandler(
           const MethodChannel('accurate_step_counter'),
           null,
         );
+    DatabaseHelper.clearTestMode();
+    await DatabaseHelper.resetInstance();
   });
 
   group('Write Lock - Race Condition Prevention', () {
     late AccurateStepCounter stepCounter;
 
     setUp(() async {
+      // Reset database instance before each test
+      await DatabaseHelper.resetInstance();
       stepCounter = AccurateStepCounter();
     });
 

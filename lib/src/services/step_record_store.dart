@@ -1,15 +1,13 @@
 import 'dart:async';
 
-import 'package:hive_flutter/hive_flutter.dart';
+import 'package:sqflite/sqflite.dart';
 
+import '../database/database_helper.dart';
+import '../database/reactive_database.dart';
 import '../models/step_record.dart';
 import '../models/step_record_source.dart';
 
-// Export the generated adapters for registration
-export '../models/step_record.dart' show StepRecordAdapter;
-export '../models/step_record_source.dart' show StepRecordSourceAdapter;
-
-/// Local store for step records using Hive
+/// Local store for step records using SQLite
 ///
 /// This service provides a Health Connect-like API for storing and querying
 /// step data with support for real-time streams, aggregation, and filtering.
@@ -34,68 +32,44 @@ export '../models/step_record_source.dart' show StepRecordSourceAdapter;
 /// store.watchTotalSteps().listen((total) => print('Total: $total'));
 /// ```
 class StepRecordStore {
-  static const String _boxName = 'step_records';
+  static const String _tableName = 'step_records';
 
-  Box<StepRecord>? _box;
+  final DatabaseHelper _dbHelper = DatabaseHelper();
+  final ReactiveDatabase _reactiveDb = ReactiveDatabase();
   bool _isInitialized = false;
 
   /// Whether the store has been initialized
   bool get isInitialized => _isInitialized;
 
-  /// Initialize the Hive store
+  /// Initialize the SQLite store
   ///
   /// Must be called before any other methods. Can be called multiple times
   /// safely - subsequent calls are no-ops.
   Future<void> initialize() async {
     if (_isInitialized) return;
 
-    await Hive.initFlutter('accurate_step_counter');
-
-    // Register adapters
-    if (!Hive.isAdapterRegistered(1)) {
-      Hive.registerAdapter(StepRecordAdapter());
-    }
-    if (!Hive.isAdapterRegistered(2)) {
-      Hive.registerAdapter(StepRecordSourceAdapter());
-    }
-
-    _box = await Hive.openBox<StepRecord>(_boxName);
+    // Initialize the database (creates tables if needed)
+    await _dbHelper.database;
     _isInitialized = true;
   }
 
-  /// Ensure store is initialized and box is open
+  /// Ensure store is initialized and database is open
   ///
-  /// This method checks both initialization state AND whether the Hive box
+  /// This method checks both initialization state AND whether the database
   /// is actually open. This is critical for handling cold starts where
-  /// Android may have killed the app and closed the boxes.
-  Future<void> _ensureBoxOpen() async {
-    if (!_isInitialized || _box == null) {
-      // Not initialized at all - initialize from scratch
+  /// Android may have killed the app and closed the database.
+  Future<Database> _ensureDbOpen() async {
+    if (!_isInitialized) {
       await initialize();
-      return;
     }
-
-    // Check if box is still open (Android may have closed it)
-    if (!_box!.isOpen) {
-      // Box was closed (app was killed by Android) - reopen it
-      _box = await Hive.openBox<StepRecord>(_boxName);
-    }
-  }
-
-  /// Synchronous check for initialization - throws if not ready
-  /// Use _ensureBoxOpen() for operations that can wait for reopening
-  void _ensureInitialized() {
-    if (!_isInitialized || _box == null) {
-      throw StateError(
-        'StepRecordStore not initialized. Call initialize() first.',
-      );
-    }
+    await _dbHelper.ensureOpen();
+    return _dbHelper.database;
   }
 
   /// Insert a new step record
   ///
-  /// This method safely ensures the Hive box is open before writing.
-  /// Handles cold start scenarios where Android may have closed the box.
+  /// This method safely ensures the database is open before writing.
+  /// Handles cold start scenarios where Android may have closed the database.
   ///
   /// Example:
   /// ```dart
@@ -108,16 +82,18 @@ class StepRecordStore {
   /// ```
   Future<void> insertRecord(StepRecord record) async {
     try {
-      await _ensureBoxOpen();
-      await _box!.add(record);
+      final db = await _ensureDbOpen();
+      await db.insert(_tableName, record.toMap());
+      _reactiveDb.notifyRecordsChanged();
     } catch (e) {
-      // If box operations fail, try one more time with fresh initialization
-      if (e.toString().contains('Box has already been closed') ||
-          e.toString().contains('HiveError')) {
+      // If database operations fail, try one more time with fresh initialization
+      if (e.toString().contains('database') ||
+          e.toString().contains('DatabaseException')) {
         _isInitialized = false;
-        _box = null;
         await initialize();
-        await _box!.add(record);
+        final db = await _dbHelper.database;
+        await db.insert(_tableName, record.toMap());
+        _reactiveDb.notifyRecordsChanged();
       } else {
         rethrow;
       }
@@ -151,44 +127,37 @@ class StepRecordStore {
     int? stepCount,
     StepRecordSource? source,
   }) async {
-    await _ensureBoxOpen();
+    final db = await _ensureDbOpen();
 
     // Tolerance window for fuzzy matching (60 seconds)
     const toleranceMs = 60000;
-    final fromStart = fromTime.subtract(
-      const Duration(milliseconds: toleranceMs),
-    );
-    final fromEnd = fromTime.add(const Duration(milliseconds: toleranceMs));
-    final toStart = toTime.subtract(const Duration(milliseconds: toleranceMs));
-    final toEnd = toTime.add(const Duration(milliseconds: toleranceMs));
+    final fromStart = fromTime.toUtc().millisecondsSinceEpoch - toleranceMs;
+    final fromEnd = fromTime.toUtc().millisecondsSinceEpoch + toleranceMs;
+    final toStart = toTime.toUtc().millisecondsSinceEpoch - toleranceMs;
+    final toEnd = toTime.toUtc().millisecondsSinceEpoch + toleranceMs;
 
-    for (final record in _box!.values) {
-      // Check if fromTime is within tolerance
-      final fromMatches =
-          record.fromTime.isAfter(fromStart) &&
-          record.fromTime.isBefore(fromEnd);
+    String whereClause =
+        'from_time > ? AND from_time < ? AND to_time > ? AND to_time < ?';
+    List<dynamic> whereArgs = [fromStart, fromEnd, toStart, toEnd];
 
-      // Check if toTime is within tolerance
-      final toMatches =
-          record.toTime.isAfter(toStart) && record.toTime.isBefore(toEnd);
-
-      if (fromMatches && toMatches) {
-        // Time range matches - check optional step count
-        if (stepCount != null && record.stepCount != stepCount) {
-          continue; // Step count doesn't match
-        }
-
-        // Check optional source
-        if (source != null && record.source != source) {
-          continue; // Source doesn't match
-        }
-
-        // Found a duplicate
-        return true;
-      }
+    if (stepCount != null) {
+      whereClause += ' AND step_count = ?';
+      whereArgs.add(stepCount);
     }
 
-    return false;
+    if (source != null) {
+      whereClause += ' AND source = ?';
+      whereArgs.add(source.index);
+    }
+
+    final results = await db.query(
+      _tableName,
+      where: whereClause,
+      whereArgs: whereArgs,
+      limit: 1,
+    );
+
+    return results.isNotEmpty;
   }
 
   /// Check for any overlapping records in a time range
@@ -202,16 +171,20 @@ class StepRecordStore {
     required DateTime fromTime,
     required DateTime toTime,
   }) async {
-    await _ensureBoxOpen();
+    final db = await _ensureDbOpen();
 
-    for (final record in _box!.values) {
-      // Check for overlap: record.fromTime < toTime AND record.toTime > fromTime
-      if (record.fromTime.isBefore(toTime) && record.toTime.isAfter(fromTime)) {
-        return true;
-      }
-    }
+    final fromMs = fromTime.toUtc().millisecondsSinceEpoch;
+    final toMs = toTime.toUtc().millisecondsSinceEpoch;
 
-    return false;
+    // Check for overlap: record.fromTime < toTime AND record.toTime > fromTime
+    final results = await db.query(
+      _tableName,
+      where: 'from_time < ? AND to_time > ?',
+      whereArgs: [toMs, fromMs],
+      limit: 1,
+    );
+
+    return results.isNotEmpty;
   }
 
   /// Read all step records
@@ -226,25 +199,40 @@ class StepRecordStore {
     DateTime? to,
     StepRecordSource? source,
   }) async {
-    await _ensureBoxOpen();
+    final db = await _ensureDbOpen();
 
-    var entries = _box!.values.toList();
+    String? whereClause;
+    List<dynamic>? whereArgs;
 
-    // Apply filters
+    final conditions = <String>[];
+    final args = <dynamic>[];
+
     if (from != null) {
-      entries = entries.where((e) => e.toTime.isAfter(from)).toList();
+      conditions.add('to_time > ?');
+      args.add(from.toUtc().millisecondsSinceEpoch);
     }
     if (to != null) {
-      entries = entries.where((e) => !e.fromTime.isAfter(to)).toList();
+      conditions.add('from_time <= ?');
+      args.add(to.toUtc().millisecondsSinceEpoch);
     }
     if (source != null) {
-      entries = entries.where((e) => e.source == source).toList();
+      conditions.add('source = ?');
+      args.add(source.index);
     }
 
-    // Sort by fromTime descending (newest first)
-    entries.sort((a, b) => b.fromTime.compareTo(a.fromTime));
+    if (conditions.isNotEmpty) {
+      whereClause = conditions.join(' AND ');
+      whereArgs = args;
+    }
 
-    return entries;
+    final results = await db.query(
+      _tableName,
+      where: whereClause,
+      whereArgs: whereArgs,
+      orderBy: 'from_time DESC',
+    );
+
+    return results.map((map) => StepRecord.fromMap(map)).toList();
   }
 
   /// Read total step count (aggregate)
@@ -275,25 +263,21 @@ class StepRecordStore {
   /// Emits the current list immediately, then emits updates
   /// whenever records are added, modified, or deleted.
   ///
-  /// Handles closed box scenarios by ensuring box is open before watching.
+  /// Handles closed database scenarios by ensuring database is open before watching.
   Stream<List<StepRecord>> watchRecords({
     DateTime? from,
     DateTime? to,
     StepRecordSource? source,
   }) {
-    // Use async* generator to ensure box is open before watching
+    // Use async* generator to ensure database is open before watching
     Stream<List<StepRecord>> watchWithRetry() async* {
-      await _ensureBoxOpen();
+      await _ensureDbOpen();
 
       // Emit current value immediately
       yield await readRecords(from: from, to: to, source: source);
 
       // Then watch for changes
-      await for (final _ in _box!.watch()) {
-        // Re-check box is open on each event (defensive)
-        if (_box == null || !_box!.isOpen) {
-          await _ensureBoxOpen();
-        }
+      await for (final _ in _reactiveDb.recordChanges) {
         yield await readRecords(from: from, to: to, source: source);
       }
     }
@@ -306,21 +290,17 @@ class StepRecordStore {
   /// Emits the current total immediately, then emits updates
   /// whenever the total changes.
   ///
-  /// Handles closed box scenarios by ensuring box is open before watching.
+  /// Handles closed database scenarios by ensuring database is open before watching.
   Stream<int> watchTotalSteps({DateTime? from, DateTime? to}) {
-    // Use async* generator to ensure box is open before watching
+    // Use async* generator to ensure database is open before watching
     Stream<int> watchWithRetry() async* {
-      await _ensureBoxOpen();
+      await _ensureDbOpen();
 
       // Emit current value immediately
       yield await readTotalSteps(from: from, to: to);
 
       // Then watch for changes
-      await for (final _ in _box!.watch()) {
-        // Re-check box is open on each event (defensive)
-        if (_box == null || !_box!.isOpen) {
-          await _ensureBoxOpen();
-        }
+      await for (final _ in _reactiveDb.recordChanges) {
         yield await readTotalSteps(from: from, to: to);
       }
     }
@@ -330,22 +310,27 @@ class StepRecordStore {
 
   /// Get the number of records
   Future<int> getRecordCount() async {
-    await _ensureBoxOpen();
-    return _box!.length;
+    final db = await _ensureDbOpen();
+    final result = await db.rawQuery(
+      'SELECT COUNT(*) as count FROM $_tableName',
+    );
+    return Sqflite.firstIntValue(result) ?? 0;
   }
 
   /// Delete all step records
   Future<void> deleteAllRecords() async {
     try {
-      await _ensureBoxOpen();
-      await _box!.clear();
+      final db = await _ensureDbOpen();
+      await db.delete(_tableName);
+      _reactiveDb.notifyRecordsChanged();
     } catch (e) {
-      if (e.toString().contains('Box has already been closed') ||
-          e.toString().contains('HiveError')) {
+      if (e.toString().contains('database') ||
+          e.toString().contains('DatabaseException')) {
         _isInitialized = false;
-        _box = null;
         await initialize();
-        await _box!.clear();
+        final db = await _dbHelper.database;
+        await db.delete(_tableName);
+        _reactiveDb.notifyRecordsChanged();
       } else {
         rethrow;
       }
@@ -356,58 +341,38 @@ class StepRecordStore {
   ///
   /// [date] - Delete all records with toTime before this date
   ///
-  /// This method is safe to call even if no records exist or the box
+  /// This method is safe to call even if no records exist or the database
   /// was closed by Android. It will silently succeed if there's nothing
   /// to delete or if re-initialization fails.
   Future<void> deleteRecordsBefore(DateTime date) async {
     try {
-      await _ensureBoxOpen();
+      final db = await _ensureDbOpen();
 
-      // Safety check after ensureBoxOpen
-      if (_box == null || !_box!.isOpen) {
-        return; // Silently return if box couldn't be opened
-      }
-
-      final keysToDelete = <dynamic>[];
-
-      for (var i = 0; i < _box!.length; i++) {
-        final entry = _box!.getAt(i);
-        if (entry != null && entry.toTime.isBefore(date)) {
-          keysToDelete.add(_box!.keyAt(i));
-        }
-      }
-
-      if (keysToDelete.isNotEmpty) {
-        await _box!.deleteAll(keysToDelete);
-      }
+      await db.delete(
+        _tableName,
+        where: 'to_time < ?',
+        whereArgs: [date.toUtc().millisecondsSinceEpoch],
+      );
+      _reactiveDb.notifyRecordsChanged();
     } catch (e) {
-      if (e.toString().contains('Box has already been closed') ||
-          e.toString().contains('HiveError')) {
+      if (e.toString().contains('database') ||
+          e.toString().contains('DatabaseException')) {
         _isInitialized = false;
-        _box = null;
         try {
           await initialize();
-          // Safety check after re-initialization
-          if (_box == null || !_box!.isOpen) {
-            return; // Silently return if re-initialization failed
-          }
-          // Retry the operation
-          final keysToDelete = <dynamic>[];
-          for (var i = 0; i < _box!.length; i++) {
-            final entry = _box!.getAt(i);
-            if (entry != null && entry.toTime.isBefore(date)) {
-              keysToDelete.add(_box!.keyAt(i));
-            }
-          }
-          if (keysToDelete.isNotEmpty) {
-            await _box!.deleteAll(keysToDelete);
-          }
+          final db = await _dbHelper.database;
+          await db.delete(
+            _tableName,
+            where: 'to_time < ?',
+            whereArgs: [date.toUtc().millisecondsSinceEpoch],
+          );
+          _reactiveDb.notifyRecordsChanged();
         } catch (_) {
           // Silently fail - data retention is not critical enough to crash the app
           return;
         }
       } else {
-        // For non-Hive errors, log but don't crash
+        // For non-database errors, log but don't crash
         // Data retention failure should not prevent app from working
         return;
       }
@@ -473,9 +438,7 @@ class StepRecordStore {
   ///
   /// Should be called when completely done with the store.
   Future<void> close() async {
-    if (_box != null && _box!.isOpen) {
-      await _box!.close();
-    }
+    await _dbHelper.close();
     _isInitialized = false;
   }
 }

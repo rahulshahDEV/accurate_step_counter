@@ -5,6 +5,66 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.9.0] - 2026-01-28
+
+### 🎉 Major: Database Migration from Hive to sqflite
+
+This release replaces Hive with sqflite for persistent storage, bringing significant improvements in performance, reliability, and maintainability.
+
+### Changed
+- 💾 **Database Backend: Hive → sqflite**
+  - Replaced Hive with sqflite for all persistent storage
+  - New `DatabaseHelper` singleton manages SQLite database lifecycle
+  - New `ReactiveDatabase` provides reactive streams for change notifications
+  - SQL indexes on `from_time`, `to_time`, and `source` columns for fast queries
+
+### Added
+- 🚀 **Performance Improvements**
+  - Indexed SQL queries instead of in-memory filtering
+  - More efficient date range queries with SQL WHERE clauses
+  - Better concurrent access handling with SQLite's locking
+
+- 🧪 **Enhanced Testing**
+  - Uses `sqflite_common_ffi` for true in-memory database testing
+  - 35 tests passing (all existing tests migrated)
+
+### Removed
+- ❌ **Hive Dependencies Removed**
+  - No longer requires `hive`, `hive_flutter`, or `hive_generator`
+  - No more code generation required (`build_runner` not needed)
+  - Smaller package footprint
+
+### Technical Details
+| Aspect | Before (Hive) | After (sqflite) |
+|--------|--------------|-----------------|
+| Query Performance | Full table scan | Indexed SQL queries |
+| Bundle Size | Larger (Hive + adapters) | Smaller |
+| Date Filtering | In-memory filtering | SQL WHERE clauses |
+| Concurrent Access | Limited | SQLite locking |
+| Code Generation | Required build_runner | Not needed |
+| Testing | Requires mock path | sqflite_ffi in-memory |
+
+### Migration Notes
+- **Fresh Install**: No migration needed - database is created fresh
+- **Existing Users**: Step data from previous Hive-based versions will NOT be migrated automatically. If you need to preserve historical data, export it before upgrading.
+- **API Unchanged**: All public APIs remain the same. This is a drop-in replacement.
+
+### Database Schema
+```sql
+CREATE TABLE step_records (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  step_count INTEGER NOT NULL,
+  from_time INTEGER NOT NULL,  -- UTC milliseconds
+  to_time INTEGER NOT NULL,    -- UTC milliseconds
+  source INTEGER NOT NULL,
+  confidence REAL
+);
+CREATE INDEX idx_step_records_time ON step_records(from_time, to_time);
+CREATE INDEX idx_step_records_source ON step_records(source);
+```
+
+---
+
 ## [1.8.12] - 2026-01-28
 
 ### Fixed

@@ -10,7 +10,7 @@ A simple, accurate step counter for Flutter. Works in **foreground**, **backgrou
 ## ✨ Features
 
 - 🎯 **Accurate** - Uses sensors_plus accelerometer with peak detection algorithm
-- 💾 **Persistent** - Steps saved to local DB (Hive)
+- 💾 **Persistent** - Steps saved to local SQLite database
 - 📱 **All States** - Foreground, background, AND terminated
 - 🚀 **Simple API** - One-line setup, no complexity
 - 🔋 **Battery Efficient** - Event-driven, not polling
@@ -32,7 +32,7 @@ It only converts to "Local Time" when showing steps to the user. This means:
 
 *   **`SensorsStepDetector` (The Eyes)**: Watches the accelerometer ~50 times a second to find generic movement.
 *   **`AccurateStepCounter` (The Brain)**: Filters that movement. It ignores shakes and only counts real walking.
-*   **`StepRecordStore` (The Memory)**: Saves every valid step to a local database (Hive) so data is never lost.
+*   **`StepRecordStore` (The Memory)**: Saves every valid step to a local SQLite database so data is never lost.
 *   **`StepCounterForegroundService` (The Night Watchman)**: Keeps "The Eyes" open even when the app is closed (on older Androids).
 
 ## 📱 Platform Support
@@ -48,7 +48,7 @@ It only converts to "Local Time" when showing steps to the user. This means:
 
 ```yaml
 dependencies:
-  accurate_step_counter: ^1.8.12
+  accurate_step_counter: ^1.9.0
 ```
 
 ### 2. Add Permissions

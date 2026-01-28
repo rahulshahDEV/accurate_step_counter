@@ -1,18 +1,19 @@
 import 'dart:async';
 
-import 'package:hive_flutter/hive_flutter.dart';
+import 'package:sqflite/sqflite.dart';
 
+import '../database/database_helper.dart';
+import '../database/reactive_database.dart';
 import '../models/step_log_entry.dart';
 import '../models/step_log_source.dart';
 
-// Export the generated adapters for registration
-export '../models/step_log_entry.dart' show StepLogEntryAdapter;
-export '../models/step_log_source.dart' show StepLogSourceAdapter;
-
-/// Local database for storing step log entries using Hive
+/// Local database for storing step log entries using SQLite
 ///
 /// This service provides a Health Connect-like API for querying step data
 /// with support for real-time streams, aggregation, and filtering.
+///
+/// Note: This class is deprecated in favor of StepRecordStore. It is maintained
+/// for backwards compatibility and uses the separate step_logs table.
 ///
 /// Example:
 /// ```dart
@@ -33,16 +34,18 @@ export '../models/step_log_source.dart' show StepLogSourceAdapter;
 /// // Watch for real-time updates
 /// db.watchTotalSteps().listen((total) => print('Total: $total'));
 /// ```
+@Deprecated('Use StepRecordStore instead')
 class StepLogDatabase {
-  static const String _boxName = 'step_logs';
+  static const String _tableName = 'step_logs';
 
-  Box<StepLogEntry>? _box;
+  final DatabaseHelper _dbHelper = DatabaseHelper();
+  final ReactiveDatabase _reactiveDb = ReactiveDatabase();
   bool _isInitialized = false;
 
   /// Whether the database has been initialized
   bool get isInitialized => _isInitialized;
 
-  /// Initialize the Hive database
+  /// Initialize the SQLite database
   ///
   /// Must be called before any other methods. Can be called multiple times
   /// safely - subsequent calls are no-ops.
@@ -55,27 +58,18 @@ class StepLogDatabase {
   Future<void> initialize() async {
     if (_isInitialized) return;
 
-    await Hive.initFlutter('accurate_step_counter');
-
-    // Register adapters
-    if (!Hive.isAdapterRegistered(0)) {
-      Hive.registerAdapter(StepLogEntryAdapter());
-    }
-    if (!Hive.isAdapterRegistered(1)) {
-      Hive.registerAdapter(StepLogSourceAdapter());
-    }
-
-    _box = await Hive.openBox<StepLogEntry>(_boxName);
+    // Initialize the database (creates tables if needed)
+    await _dbHelper.database;
     _isInitialized = true;
   }
 
-  /// Ensure database is initialized
-  void _ensureInitialized() {
-    if (!_isInitialized || _box == null) {
-      throw StateError(
-        'StepLogDatabase not initialized. Call initialize() first.',
-      );
+  /// Ensure database is open and ready
+  Future<Database> _ensureDbOpen() async {
+    if (!_isInitialized) {
+      await initialize();
     }
+    await _dbHelper.ensureOpen();
+    return _dbHelper.database;
   }
 
   /// Log a new step entry
@@ -90,8 +84,9 @@ class StepLogDatabase {
   /// ));
   /// ```
   Future<void> logSteps(StepLogEntry entry) async {
-    _ensureInitialized();
-    await _box!.add(entry);
+    final db = await _ensureDbOpen();
+    await db.insert(_tableName, entry.toMap());
+    _reactiveDb.notifyLogsChanged();
   }
 
   /// Get all step log entries
@@ -119,27 +114,43 @@ class StepLogDatabase {
   Future<List<StepLogEntry>> getStepLogs({
     DateTime? from,
     DateTime? to,
+    // ignore: deprecated_member_use_from_same_package
     StepLogSource? source,
   }) async {
-    _ensureInitialized();
+    final db = await _ensureDbOpen();
 
-    var entries = _box!.values.toList();
+    String? whereClause;
+    List<dynamic>? whereArgs;
 
-    // Apply filters
+    final conditions = <String>[];
+    final args = <dynamic>[];
+
     if (from != null) {
-      entries = entries.where((e) => !e.toTime.isBefore(from)).toList();
+      conditions.add('to_time >= ?');
+      args.add(from.toUtc().millisecondsSinceEpoch);
     }
     if (to != null) {
-      entries = entries.where((e) => !e.fromTime.isAfter(to)).toList();
+      conditions.add('from_time <= ?');
+      args.add(to.toUtc().millisecondsSinceEpoch);
     }
     if (source != null) {
-      entries = entries.where((e) => e.source == source).toList();
+      conditions.add('source = ?');
+      args.add(source.index);
     }
 
-    // Sort by fromTime descending (newest first)
-    entries.sort((a, b) => b.fromTime.compareTo(a.fromTime));
+    if (conditions.isNotEmpty) {
+      whereClause = conditions.join(' AND ');
+      whereArgs = args;
+    }
 
-    return entries;
+    final results = await db.query(
+      _tableName,
+      where: whereClause,
+      whereArgs: whereArgs,
+      orderBy: 'from_time DESC',
+    );
+
+    return results.map((map) => StepLogEntry.fromMap(map)).toList();
   }
 
   /// Get total step count (aggregate)
@@ -176,6 +187,7 @@ class StepLogDatabase {
   /// final termSteps = await db.getStepsBySource(StepLogSource.terminated);
   /// ```
   Future<int> getStepsBySource(
+    // ignore: deprecated_member_use_from_same_package
     StepLogSource source, {
     DateTime? from,
     DateTime? to,
@@ -198,16 +210,22 @@ class StepLogDatabase {
   Stream<List<StepLogEntry>> watchStepLogs({
     DateTime? from,
     DateTime? to,
+    // ignore: deprecated_member_use_from_same_package
     StepLogSource? source,
   }) {
-    _ensureInitialized();
+    Stream<List<StepLogEntry>> watchWithRetry() async* {
+      await _ensureDbOpen();
 
-    return _box!
-        .watch()
-        .asyncMap((_) async {
-          return await getStepLogs(from: from, to: to, source: source);
-        })
-        .startWith(getStepLogs(from: from, to: to, source: source));
+      // Emit current value immediately
+      yield await getStepLogs(from: from, to: to, source: source);
+
+      // Then watch for changes
+      await for (final _ in _reactiveDb.logChanges) {
+        yield await getStepLogs(from: from, to: to, source: source);
+      }
+    }
+
+    return watchWithRetry();
   }
 
   /// Watch total step count in real-time
@@ -230,20 +248,28 @@ class StepLogDatabase {
   /// });
   /// ```
   Stream<int> watchTotalSteps({DateTime? from, DateTime? to}) {
-    _ensureInitialized();
+    Stream<int> watchWithRetry() async* {
+      await _ensureDbOpen();
 
-    return _box!
-        .watch()
-        .asyncMap((_) async {
-          return await getTotalSteps(from: from, to: to);
-        })
-        .startWith(getTotalSteps(from: from, to: to));
+      // Emit current value immediately
+      yield await getTotalSteps(from: from, to: to);
+
+      // Then watch for changes
+      await for (final _ in _reactiveDb.logChanges) {
+        yield await getTotalSteps(from: from, to: to);
+      }
+    }
+
+    return watchWithRetry();
   }
 
   /// Get the number of log entries
   Future<int> getEntryCount() async {
-    _ensureInitialized();
-    return _box!.length;
+    final db = await _ensureDbOpen();
+    final result = await db.rawQuery(
+      'SELECT COUNT(*) as count FROM $_tableName',
+    );
+    return Sqflite.firstIntValue(result) ?? 0;
   }
 
   /// Clear all step logs
@@ -253,8 +279,9 @@ class StepLogDatabase {
   /// await db.clearLogs();
   /// ```
   Future<void> clearLogs() async {
-    _ensureInitialized();
-    await _box!.clear();
+    final db = await _ensureDbOpen();
+    await db.delete(_tableName);
+    _reactiveDb.notifyLogsChanged();
   }
 
   /// Delete logs older than a specific date
@@ -269,18 +296,13 @@ class StepLogDatabase {
   /// );
   /// ```
   Future<void> deleteLogsBefore(DateTime date) async {
-    _ensureInitialized();
-
-    final keysToDelete = <dynamic>[];
-
-    for (var i = 0; i < _box!.length; i++) {
-      final entry = _box!.getAt(i);
-      if (entry != null && entry.toTime.isBefore(date)) {
-        keysToDelete.add(_box!.keyAt(i));
-      }
-    }
-
-    await _box!.deleteAll(keysToDelete);
+    final db = await _ensureDbOpen();
+    await db.delete(
+      _tableName,
+      where: 'to_time < ?',
+      whereArgs: [date.toUtc().millisecondsSinceEpoch],
+    );
+    _reactiveDb.notifyLogsChanged();
   }
 
   /// Get step statistics for a date range
@@ -314,14 +336,17 @@ class StepLogDatabase {
     final totalSteps = entries.fold<int>(0, (sum, e) => sum + e.stepCount);
 
     final foregroundSteps = entries
+        // ignore: deprecated_member_use_from_same_package
         .where((e) => e.source == StepLogSource.foreground)
         .fold<int>(0, (sum, e) => sum + e.stepCount);
 
     final backgroundSteps = entries
+        // ignore: deprecated_member_use_from_same_package
         .where((e) => e.source == StepLogSource.background)
         .fold<int>(0, (sum, e) => sum + e.stepCount);
 
     final terminatedSteps = entries
+        // ignore: deprecated_member_use_from_same_package
         .where((e) => e.source == StepLogSource.terminated)
         .fold<int>(0, (sum, e) => sum + e.stepCount);
 
@@ -352,19 +377,7 @@ class StepLogDatabase {
   ///
   /// Should be called when completely done with the database.
   Future<void> close() async {
-    if (_box != null && _box!.isOpen) {
-      await _box!.close();
-    }
+    await _dbHelper.close();
     _isInitialized = false;
-  }
-}
-
-/// Extension to add startWith functionality to Stream
-extension _StreamStartWith<T> on Stream<T> {
-  Stream<T> startWith(Future<T> value) async* {
-    yield await value;
-    await for (final item in this) {
-      yield item;
-    }
   }
 }
