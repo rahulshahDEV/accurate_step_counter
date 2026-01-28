@@ -63,7 +63,27 @@ class StepRecordStore {
     _isInitialized = true;
   }
 
-  /// Ensure store is initialized
+  /// Ensure store is initialized and box is open
+  ///
+  /// This method checks both initialization state AND whether the Hive box
+  /// is actually open. This is critical for handling cold starts where
+  /// Android may have killed the app and closed the boxes.
+  Future<void> _ensureBoxOpen() async {
+    if (!_isInitialized || _box == null) {
+      // Not initialized at all - initialize from scratch
+      await initialize();
+      return;
+    }
+
+    // Check if box is still open (Android may have closed it)
+    if (!_box!.isOpen) {
+      // Box was closed (app was killed by Android) - reopen it
+      _box = await Hive.openBox<StepRecord>(_boxName);
+    }
+  }
+
+  /// Synchronous check for initialization - throws if not ready
+  /// Use _ensureBoxOpen() for operations that can wait for reopening
   void _ensureInitialized() {
     if (!_isInitialized || _box == null) {
       throw StateError(
@@ -73,6 +93,9 @@ class StepRecordStore {
   }
 
   /// Insert a new step record
+  ///
+  /// This method safely ensures the Hive box is open before writing.
+  /// Handles cold start scenarios where Android may have closed the box.
   ///
   /// Example:
   /// ```dart
@@ -84,8 +107,21 @@ class StepRecordStore {
   /// ));
   /// ```
   Future<void> insertRecord(StepRecord record) async {
-    _ensureInitialized();
-    await _box!.add(record);
+    try {
+      await _ensureBoxOpen();
+      await _box!.add(record);
+    } catch (e) {
+      // If box operations fail, try one more time with fresh initialization
+      if (e.toString().contains('Box has already been closed') ||
+          e.toString().contains('HiveError')) {
+        _isInitialized = false;
+        _box = null;
+        await initialize();
+        await _box!.add(record);
+      } else {
+        rethrow;
+      }
+    }
   }
 
   /// Check for duplicate or overlapping records
@@ -115,7 +151,7 @@ class StepRecordStore {
     int? stepCount,
     StepRecordSource? source,
   }) async {
-    _ensureInitialized();
+    await _ensureBoxOpen();
 
     // Tolerance window for fuzzy matching (60 seconds)
     const toleranceMs = 60000;
@@ -166,7 +202,7 @@ class StepRecordStore {
     required DateTime fromTime,
     required DateTime toTime,
   }) async {
-    _ensureInitialized();
+    await _ensureBoxOpen();
 
     for (final record in _box!.values) {
       // Check for overlap: record.fromTime < toTime AND record.toTime > fromTime
@@ -190,7 +226,7 @@ class StepRecordStore {
     DateTime? to,
     StepRecordSource? source,
   }) async {
-    _ensureInitialized();
+    await _ensureBoxOpen();
 
     var entries = _box!.values.toList();
 
@@ -238,64 +274,120 @@ class StepRecordStore {
   ///
   /// Emits the current list immediately, then emits updates
   /// whenever records are added, modified, or deleted.
+  ///
+  /// Handles closed box scenarios by ensuring box is open before watching.
   Stream<List<StepRecord>> watchRecords({
     DateTime? from,
     DateTime? to,
     StepRecordSource? source,
   }) {
-    _ensureInitialized();
+    // Use async* generator to ensure box is open before watching
+    Stream<List<StepRecord>> watchWithRetry() async* {
+      await _ensureBoxOpen();
 
-    return _box!
-        .watch()
-        .asyncMap((_) async {
-          return await readRecords(from: from, to: to, source: source);
-        })
-        .startWith(readRecords(from: from, to: to, source: source));
+      // Emit current value immediately
+      yield await readRecords(from: from, to: to, source: source);
+
+      // Then watch for changes
+      await for (final _ in _box!.watch()) {
+        // Re-check box is open on each event (defensive)
+        if (_box == null || !_box!.isOpen) {
+          await _ensureBoxOpen();
+        }
+        yield await readRecords(from: from, to: to, source: source);
+      }
+    }
+
+    return watchWithRetry();
   }
 
   /// Watch total step count in real-time
   ///
   /// Emits the current total immediately, then emits updates
   /// whenever the total changes.
+  ///
+  /// Handles closed box scenarios by ensuring box is open before watching.
   Stream<int> watchTotalSteps({DateTime? from, DateTime? to}) {
-    _ensureInitialized();
+    // Use async* generator to ensure box is open before watching
+    Stream<int> watchWithRetry() async* {
+      await _ensureBoxOpen();
 
-    return _box!
-        .watch()
-        .asyncMap((_) async {
-          return await readTotalSteps(from: from, to: to);
-        })
-        .startWith(readTotalSteps(from: from, to: to));
+      // Emit current value immediately
+      yield await readTotalSteps(from: from, to: to);
+
+      // Then watch for changes
+      await for (final _ in _box!.watch()) {
+        // Re-check box is open on each event (defensive)
+        if (_box == null || !_box!.isOpen) {
+          await _ensureBoxOpen();
+        }
+        yield await readTotalSteps(from: from, to: to);
+      }
+    }
+
+    return watchWithRetry();
   }
 
   /// Get the number of records
   Future<int> getRecordCount() async {
-    _ensureInitialized();
+    await _ensureBoxOpen();
     return _box!.length;
   }
 
   /// Delete all step records
   Future<void> deleteAllRecords() async {
-    _ensureInitialized();
-    await _box!.clear();
+    try {
+      await _ensureBoxOpen();
+      await _box!.clear();
+    } catch (e) {
+      if (e.toString().contains('Box has already been closed') ||
+          e.toString().contains('HiveError')) {
+        _isInitialized = false;
+        _box = null;
+        await initialize();
+        await _box!.clear();
+      } else {
+        rethrow;
+      }
+    }
   }
 
   /// Delete records older than a specific date
   ///
   /// [date] - Delete all records with toTime before this date
   Future<void> deleteRecordsBefore(DateTime date) async {
-    _ensureInitialized();
+    try {
+      await _ensureBoxOpen();
 
-    final keysToDelete = <dynamic>[];
+      final keysToDelete = <dynamic>[];
 
-    for (var i = 0; i < _box!.length; i++) {
-      final entry = _box!.getAt(i);
-      if (entry != null && entry.toTime.isBefore(date)) {
-        keysToDelete.add(_box!.keyAt(i));
+      for (var i = 0; i < _box!.length; i++) {
+        final entry = _box!.getAt(i);
+        if (entry != null && entry.toTime.isBefore(date)) {
+          keysToDelete.add(_box!.keyAt(i));
+        }
+      }
+
+      await _box!.deleteAll(keysToDelete);
+    } catch (e) {
+      if (e.toString().contains('Box has already been closed') ||
+          e.toString().contains('HiveError')) {
+        _isInitialized = false;
+        _box = null;
+        await initialize();
+        // Retry the operation
+        final keysToDelete = <dynamic>[];
+        for (var i = 0; i < _box!.length; i++) {
+          final entry = _box!.getAt(i);
+          if (entry != null && entry.toTime.isBefore(date)) {
+            keysToDelete.add(_box!.keyAt(i));
+          }
+        }
+        await _box!.deleteAll(keysToDelete);
+      } else {
+        rethrow;
       }
     }
-
-    await _box!.deleteAll(keysToDelete);
   }
 
   /// Get step statistics for a date range
@@ -367,13 +459,3 @@ class StepRecordStore {
 // Backwards compatibility
 @Deprecated('Use StepRecordStore instead')
 typedef StepLogDatabase = StepRecordStore;
-
-/// Extension to add startWith functionality to Stream
-extension _StreamStartWith<T> on Stream<T> {
-  Stream<T> startWith(Future<T> value) async* {
-    yield await value;
-    await for (final item in this) {
-      yield item;
-    }
-  }
-}

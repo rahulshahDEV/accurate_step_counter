@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.8.11] - 2026-01-28
+
+### Fixed
+- 🔥 **Critical Fix: Hive Box Cold Start ANR**
+  - **Problem**: On Android, when the app was killed by the system and restarted (cold start), Hive database operations could cause ANR because the box was closed but the code assumed it was still open.
+  - **Root Cause**: After Android kills the app, Hive boxes are closed but the `_isInitialized` flag remained `true`, causing subsequent database operations to fail or block.
+  - **Fix**: Added `_ensureBoxOpen()` method in `StepRecordStore` that checks if the box is still open and reopens it if needed before any database operation.
+  - **Benefit**: Step logging and queries now work reliably after cold starts, even when Android aggressively kills the app.
+
+### Technical Details
+| Scenario | Old Behavior (ANR) | New Behavior (Safe) |
+|----------|-------------------|---------------------|
+| Cold start after app kill | Box closed, operations block/fail | Auto-reopens box, operations succeed |
+| Normal operation | Works fine | Works fine (no overhead) |
+
+---
+
 ## [1.8.10] - 2026-01-27
 
 ### Fixed
