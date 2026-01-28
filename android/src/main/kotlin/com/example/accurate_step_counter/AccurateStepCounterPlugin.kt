@@ -23,6 +23,13 @@ import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
 import io.flutter.plugin.common.MethodChannel.MethodCallHandler
 import io.flutter.plugin.common.MethodChannel.Result
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /** Accurate Step Counter Plugin
  *
@@ -33,12 +40,15 @@ import io.flutter.plugin.common.MethodChannel.Result
  * - Uses native step detector for foreground/background (realtime)
  * - Auto-starts foreground service when app is terminated on older APIs
  */
-class AccurateStepCounterPlugin : FlutterPlugin, MethodCallHandler, SensorEventListener, 
+class AccurateStepCounterPlugin : FlutterPlugin, MethodCallHandler, SensorEventListener,
                                    ActivityAware, Application.ActivityLifecycleCallbacks {
     private lateinit var channel: MethodChannel
     private lateinit var eventChannel: EventChannel
     private lateinit var context: Context
     private val mainHandler = Handler(Looper.getMainLooper())
+
+    // Coroutine scope for background operations (prevents ANR)
+    private val pluginScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
 
     private var sensorManager: SensorManager? = null
     private var stepCounterSensor: Sensor? = null
@@ -105,6 +115,9 @@ class AccurateStepCounterPlugin : FlutterPlugin, MethodCallHandler, SensorEventL
     }
 
     override fun onDetachedFromEngine(binding: FlutterPlugin.FlutterPluginBinding) {
+        // Cancel all coroutines to prevent leaks
+        pluginScope.cancel()
+
         channel.setMethodCallHandler(null)
         eventChannel.setStreamHandler(null)
         sensorManager?.unregisterListener(this)
@@ -156,13 +169,18 @@ class AccurateStepCounterPlugin : FlutterPlugin, MethodCallHandler, SensorEventL
             }
             "getStepCount" -> {
                 android.util.Log.d("AccurateStepCounter", "getStepCount method called")
-                val stepCount = getStepCountFromSensor()
-                if (stepCount != null) {
-                    android.util.Log.d("AccurateStepCounter", "Returning step count: $stepCount")
-                    result.success(stepCount)
-                } else {
-                    android.util.Log.e("AccurateStepCounter", "Step counter sensor not available")
-                    result.error("UNAVAILABLE", "Step counter sensor not available", null)
+                // Run on background thread to prevent ANR
+                pluginScope.launch {
+                    val stepCount = getStepCountFromSensorAsync()
+                    withContext(Dispatchers.Main) {
+                        if (stepCount != null) {
+                            android.util.Log.d("AccurateStepCounter", "Returning step count: $stepCount")
+                            result.success(stepCount)
+                        } else {
+                            android.util.Log.e("AccurateStepCounter", "Step counter sensor not available")
+                            result.error("UNAVAILABLE", "Step counter sensor not available", null)
+                        }
+                    }
                 }
             }
             "saveStepCount" -> {
@@ -191,13 +209,18 @@ class AccurateStepCounterPlugin : FlutterPlugin, MethodCallHandler, SensorEventL
             }
             "syncStepsFromTerminated" -> {
                 android.util.Log.d("AccurateStepCounter", "syncStepsFromTerminated method called")
-                val syncData = syncStepsFromTerminatedState()
-                if (syncData != null) {
-                    android.util.Log.d("AccurateStepCounter", "Sync completed successfully: $syncData")
-                } else {
-                    android.util.Log.d("AccurateStepCounter", "Sync completed with no data to sync")
+                // Run on background thread to prevent ANR (this calls getStepCountFromSensor internally)
+                pluginScope.launch {
+                    val syncData = syncStepsFromTerminatedStateAsync()
+                    withContext(Dispatchers.Main) {
+                        if (syncData != null) {
+                            android.util.Log.d("AccurateStepCounter", "Sync completed successfully: $syncData")
+                        } else {
+                            android.util.Log.d("AccurateStepCounter", "Sync completed with no data to sync")
+                        }
+                        result.success(syncData)
+                    }
                 }
-                result.success(syncData)
             }
             "getAndroidVersion" -> {
                 android.util.Log.d("AccurateStepCounter", "getAndroidVersion method called")
@@ -289,16 +312,19 @@ class AccurateStepCounterPlugin : FlutterPlugin, MethodCallHandler, SensorEventL
             "resetForegroundStepCount" -> {
                 android.util.Log.d("AccurateStepCounter", "resetForegroundStepCount method called")
                 // Reset via SharedPreferences since we can't directly access the service instance
-                // Using commit() instead of apply() to ensure synchronous write completes before next read
-                // This prevents race conditions on devices with aggressive lifecycle management (MIUI, Samsung)
-                val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-                prefs.edit().apply {
-                    putInt("foreground_step_count", 0)
-                    putInt("foreground_base_step", -1)
-                    commit()
+                // Run on background thread to prevent ANR, using apply() for async write
+                pluginScope.launch(Dispatchers.IO) {
+                    val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                    prefs.edit().apply {
+                        putInt("foreground_step_count", 0)
+                        putInt("foreground_base_step", -1)
+                        apply()
+                    }
+                    withContext(Dispatchers.Main) {
+                        android.util.Log.d("AccurateStepCounter", "Foreground step count reset completed")
+                        result.success(true)
+                    }
                 }
-                android.util.Log.d("AccurateStepCounter", "Foreground step count reset completed (synchronous)")
-                result.success(true)
             }
             // Native step detection methods
             "startNativeDetection" -> {
@@ -412,44 +438,47 @@ class AccurateStepCounterPlugin : FlutterPlugin, MethodCallHandler, SensorEventL
         }
     }
 
-    private fun getStepCountFromSensor(): Int? {
-        android.util.Log.d("StepCounter", "getStepCountFromSensor called, currentStepCount: $currentStepCount")
+    /**
+     * Get step count from sensor asynchronously (runs on IO dispatcher)
+     * This prevents ANR by not blocking the main thread
+     */
+    private suspend fun getStepCountFromSensorAsync(): Int? = withContext(Dispatchers.IO) {
+        android.util.Log.d("StepCounter", "getStepCountFromSensorAsync called, currentStepCount: $currentStepCount")
 
-        // Ensure sensor is registered and try to get fresh data
-        if (stepCounterSensor != null && sensorManager != null) {
-            // Re-register to trigger an immediate sensor event
-            sensorManager?.unregisterListener(this)
-            sensorManager?.registerListener(this, stepCounterSensor, SensorManager.SENSOR_DELAY_FASTEST)
-
-            android.util.Log.d("StepCounter", "Sensor re-registered to get fresh data")
+        // Re-register sensor on main thread to trigger an immediate sensor event
+        withContext(Dispatchers.Main) {
+            if (stepCounterSensor != null && sensorManager != null) {
+                sensorManager?.unregisterListener(this@AccurateStepCounterPlugin)
+                sensorManager?.registerListener(
+                    this@AccurateStepCounterPlugin,
+                    stepCounterSensor,
+                    SensorManager.SENSOR_DELAY_FASTEST
+                )
+                android.util.Log.d("StepCounter", "Sensor re-registered to get fresh data")
+            }
         }
 
         // If we have current data from sensor, return it
         if (currentStepCount > 0) {
             android.util.Log.d("StepCounter", "Returning current step count: $currentStepCount")
-            return currentStepCount
+            return@withContext currentStepCount
         }
 
-        // If currentStepCount is still 0, wait briefly for sensor callback
+        // Wait for sensor callback using non-blocking delay (on IO thread)
         // This happens on first app launch or when returning from terminated state
         val maxWaitTime = 1500L // Wait up to 1.5 seconds
         val startTime = System.currentTimeMillis()
         val checkInterval = 50L // Check every 50ms
 
         while (currentStepCount == 0 && (System.currentTimeMillis() - startTime) < maxWaitTime) {
-            try {
-                Thread.sleep(checkInterval)
-                android.util.Log.d("StepCounter", "Waiting for sensor... currentStepCount: $currentStepCount")
-            } catch (e: InterruptedException) {
-                android.util.Log.w("StepCounter", "Wait interrupted")
-                break
-            }
+            delay(checkInterval) // Non-blocking delay (coroutine suspend)
+            android.util.Log.d("StepCounter", "Waiting for sensor... currentStepCount: $currentStepCount")
         }
 
         // If we got data from sensor, return it
         if (currentStepCount > 0) {
             android.util.Log.d("StepCounter", "Got sensor data after waiting: $currentStepCount")
-            return currentStepCount
+            return@withContext currentStepCount
         }
 
         // If still no sensor data, try to get last known value from prefs
@@ -459,11 +488,11 @@ class AccurateStepCounterPlugin : FlutterPlugin, MethodCallHandler, SensorEventL
 
         if (savedCount > 0) {
             android.util.Log.d("StepCounter", "Using saved count from prefs: $savedCount")
-            return savedCount
+            return@withContext savedCount
         }
 
         android.util.Log.e("StepCounter", "No step count available from sensor or prefs")
-        return null
+        return@withContext null
     }
 
     private fun saveStepCountToPrefs(stepCount: Int, timestamp: Long) {
@@ -491,54 +520,55 @@ class AccurateStepCounterPlugin : FlutterPlugin, MethodCallHandler, SensorEventL
     }
 
     /**
-     * Sync steps from terminated state
+     * Sync steps from terminated state asynchronously (runs on IO dispatcher)
      * Returns validated step data that was missed while app was closed
+     * This prevents ANR by not blocking the main thread
      */
-    private fun syncStepsFromTerminatedState(): Map<String, Any>? {
+    private suspend fun syncStepsFromTerminatedStateAsync(): Map<String, Any>? = withContext(Dispatchers.IO) {
         try {
-            android.util.Log.d("StepSync", "=== Starting syncStepsFromTerminatedState ===")
-            
+            android.util.Log.d("StepSync", "=== Starting syncStepsFromTerminatedStateAsync ===")
+
             // Check if foreground service was running and has data - use its data instead
             // This fixes the Android 11 bug where session count was incorrectly used as baseline
             val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-            
+
             // Check if we've already synced this session to prevent double-counting
             if (syncAlreadyDoneThisSession) {
                 android.util.Log.d("StepSync", "Sync already done this session, returning null")
-                return null
+                return@withContext null
             }
-            
+
             val foregroundOsCount = prefs.getInt("foreground_os_step_count", -1)
             val foregroundStepCount = prefs.getInt("foreground_step_count", 0)
             val foregroundStartTime = prefs.getLong("foreground_start_timestamp", -1L)
-            
+
             if (foregroundOsCount > 0 && foregroundStepCount > 0 && foregroundStartTime > 0) {
                 android.util.Log.d("StepSync", "Found foreground service data:")
                 android.util.Log.d("StepSync", "  - OS step count: $foregroundOsCount")
                 android.util.Log.d("StepSync", "  - Session steps: $foregroundStepCount")
                 android.util.Log.d("StepSync", "  - Start time: $foregroundStartTime")
-                
+
                 // Update baseline with correct OS count (not session count!)
                 val now = System.currentTimeMillis()
                 saveStepCountToPrefs(foregroundOsCount, now)
-                
+
                 // Clear foreground service prefs to prevent double-counting
-                // Using commit() for synchronous atomic write
+                // Using apply() instead of commit() since we're on background thread
                 prefs.edit().apply {
                     remove("foreground_os_step_count")
                     remove("foreground_step_count")
                     remove("foreground_start_timestamp")
                     remove("foreground_last_update")
-                    commit()  // Synchronous to prevent race conditions
+                    apply()
                 }
-                
+
                 // Mark sync as done for this session
                 syncAlreadyDoneThisSession = true
-                
+
                 android.util.Log.d("StepSync", "Cleared foreground service data, returning $foregroundStepCount steps")
-                
+
                 // Return the session steps from foreground service (the actual walked steps)
-                return mapOf(
+                return@withContext mapOf(
                     "missedSteps" to foregroundStepCount,
                     "startTime" to foregroundStartTime,
                     "endTime" to now
@@ -547,14 +577,14 @@ class AccurateStepCounterPlugin : FlutterPlugin, MethodCallHandler, SensorEventL
 
             // No foreground service data - use standard TYPE_STEP_COUNTER sync (Android 12+ path)
             android.util.Log.d("StepSync", "No foreground service data, using TYPE_STEP_COUNTER sync")
-            
-            // Get current OS-level step count
-            val currentStepCount = getStepCountFromSensor()
+
+            // Get current OS-level step count (async)
+            val currentStepCount = getStepCountFromSensorAsync()
             android.util.Log.d("StepSync", "Current OS step count: $currentStepCount")
 
             if (currentStepCount == null || currentStepCount <= 0) {
                 android.util.Log.w("StepSync", "No current step count available from sensor")
-                return null
+                return@withContext null
             }
 
             // Get last saved step data
@@ -565,7 +595,7 @@ class AccurateStepCounterPlugin : FlutterPlugin, MethodCallHandler, SensorEventL
                 val now = System.currentTimeMillis()
                 saveStepCountToPrefs(currentStepCount, now)
                 android.util.Log.d("StepSync", "Saved baseline: $currentStepCount steps at $now")
-                return null
+                return@withContext null
             }
 
             val lastStepCount = lastSavedData["stepCount"] as Int
@@ -586,14 +616,14 @@ class AccurateStepCounterPlugin : FlutterPlugin, MethodCallHandler, SensorEventL
                 android.util.Log.d("StepSync", "No new steps detected (missedSteps: $missedSteps) - possible device reboot")
                 // Save current state anyway
                 saveStepCountToPrefs(currentStepCount, currentTime)
-                return null
+                return@withContext null
             }
 
             // Validation 2: Check if elapsed time is reasonable (not negative, not from future)
             if (elapsedTimeMs < 0) {
                 android.util.Log.w("StepSync", "Invalid timestamp - time went backwards (elapsed: $elapsedTimeMs ms)")
                 saveStepCountToPrefs(currentStepCount, currentTime)
-                return null
+                return@withContext null
             }
 
             // Validation 3: Check if missed steps is reasonable (not more than 50,000)
@@ -602,7 +632,7 @@ class AccurateStepCounterPlugin : FlutterPlugin, MethodCallHandler, SensorEventL
                 android.util.Log.w("StepSync", "Missed steps ($missedSteps) exceeds reasonable limit ($MAX_REASONABLE_STEPS)")
                 // Probably a sensor reset - save current state and return null
                 saveStepCountToPrefs(currentStepCount, currentTime)
-                return null
+                return@withContext null
             }
 
             // Validation 4: Check if step rate is reasonable (max 3 steps per second)
@@ -614,7 +644,7 @@ class AccurateStepCounterPlugin : FlutterPlugin, MethodCallHandler, SensorEventL
                 if (stepsPerSecond > 3.0) {
                     android.util.Log.w("StepSync", "Step rate (${"%.3f".format(stepsPerSecond)} steps/sec) is unreasonably high (max: 3.0)")
                     saveStepCountToPrefs(currentStepCount, currentTime)
-                    return null
+                    return@withContext null
                 }
             }
 
@@ -628,9 +658,9 @@ class AccurateStepCounterPlugin : FlutterPlugin, MethodCallHandler, SensorEventL
 
             // Mark sync as done for this session
             syncAlreadyDoneThisSession = true
-            
+
             // Return data for the application
-            return mapOf(
+            return@withContext mapOf(
                 "missedSteps" to missedSteps,
                 "startTime" to lastTimestamp,
                 "endTime" to currentTime
@@ -638,7 +668,7 @@ class AccurateStepCounterPlugin : FlutterPlugin, MethodCallHandler, SensorEventL
 
         } catch (e: Exception) {
             android.util.Log.e("StepSync", "Error syncing steps: ${e.message}", e)
-            return null
+            return@withContext null
         }
     }
 

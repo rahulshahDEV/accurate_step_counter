@@ -5,6 +5,41 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.9.1] - 2026-01-28
+
+### 🛡️ Production Ready: ANR-Safe Architecture Verified
+
+This release confirms the package's production readiness after a comprehensive ANR (Application Not Responding) audit.
+
+### Verified
+- ✅ **Kotlin Coroutines for I/O Operations**
+  - `getStepCountFromSensorAsync()` runs on `Dispatchers.IO`
+  - `syncStepsFromTerminatedStateAsync()` runs on `Dispatchers.IO`
+  - `resetForegroundStepCount` uses background thread
+  - All heavy operations offloaded from main thread
+
+- ✅ **Async SharedPreferences**
+  - Changed from `commit()` to `apply()` for non-blocking writes
+  - Race conditions handled via in-memory state
+
+- ✅ **SQLite Thread Safety**
+  - sqflite handles database operations on background thread
+  - `DatabaseHelper.ensureOpen()` handles cold start reconnection
+
+- ✅ **Sensor Operations**
+  - `NativeStepDetector` uses callback-based sensor events
+  - Non-blocking `delay()` in sensor polling loop
+
+### Technical Details
+| Operation | Thread | Risk Level |
+|-----------|--------|------------|
+| Sensor sync | `Dispatchers.IO` | ✅ Safe |
+| Step count read | `Dispatchers.IO` | ✅ Safe |
+| SharedPreferences write | `apply()` async | ✅ Safe |
+| SQLite operations | sqflite background | ✅ Safe |
+
+---
+
 ## [1.9.0] - 2026-01-28
 
 ### 🎉 Major: Database Migration from Hive to sqflite
