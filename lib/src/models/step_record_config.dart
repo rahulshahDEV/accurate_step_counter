@@ -36,7 +36,7 @@ class StepRecordConfig {
   /// Enable aggregated step counter mode
   ///
   /// When true:
-  /// - Steps are written to Hive on EVERY step detected (not interval-based)
+  /// - Steps are written to SQLite on EVERY step detected (not interval-based)
   /// - On app start, loads today's steps from midnight to now
   /// - Provides seamless aggregation like Health Connect
   /// - Use watchAggregatedStepCounter() to get live + stored count

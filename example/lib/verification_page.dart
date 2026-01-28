@@ -39,7 +39,7 @@ class _VerificationPageState extends State<VerificationPage> {
       ),
       VerificationStep(
         title: 'Initialize Logging',
-        description: 'Initialize Hive database for step logging',
+        description: 'Initialize SQLite database for step logging',
         check: _initializeLogging,
       ),
       VerificationStep(

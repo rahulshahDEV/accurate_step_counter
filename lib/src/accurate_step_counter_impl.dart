@@ -695,7 +695,7 @@ class AccurateStepCounterImpl {
     final now = DateTime.now();
     final startOfToday = DateTime(now.year, now.month, now.day);
 
-    // Load today's steps from Hive
+    // Load today's steps from SQLite
     final todaySteps = await _stepRecordStore.readTotalSteps(
       from: startOfToday,
       to: now,
@@ -860,7 +860,7 @@ class AccurateStepCounterImpl {
         }
       }
 
-      // Write steps to Hive immediately (not interval-based)
+      // Write steps to SQLite immediately (not interval-based)
       // This ensures every detected step event is persisted
       final source = _determineSource();
       final entry = StepRecord(
@@ -893,7 +893,7 @@ class AccurateStepCounterImpl {
   /// foreground vs background state for step logging.
   ///
   /// This method is safe to call during cold starts - it handles cases
-  /// where Hive boxes may be closed and need reopening.
+  /// where the SQLite database may be closed and needs reopening.
   ///
   /// Example:
   /// ```dart
@@ -1449,7 +1449,7 @@ class AccurateStepCounterImpl {
   /// Watch aggregated step count (stored + live) in real-time
   ///
   /// This is the Health Connect-like API that combines:
-  /// - All steps stored in Hive from today (midnight to now)
+  /// - All steps stored in SQLite from today (midnight to now)
   /// - Current live steps being detected
   ///
   /// When the app restarts:
@@ -1478,7 +1478,7 @@ class AccurateStepCounterImpl {
   /// This stream emits:
   /// - Initial value when subscribed (today's stored steps)
   /// - Updates on every new step detected
-  /// - Updates when app is restarted (loads from Hive)
+  /// - Updates when app is restarted (loads from SQLite)
   Stream<int> watchAggregatedStepCounter() {
     _ensureLoggingInitialized();
 

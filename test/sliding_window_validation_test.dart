@@ -2,6 +2,8 @@ import 'dart:async';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:accurate_step_counter/accurate_step_counter.dart';
+import 'package:accurate_step_counter/src/database/database_helper.dart';
+import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 
 // Testable subclass to inject events
 class TestableStepCounter extends AccurateStepCounter {
@@ -27,8 +29,14 @@ class TestableStepCounter extends AccurateStepCounter {
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
-  // Mock path_provider for Hive
+  // Initialize sqflite FFI for testing
   setUpAll(() {
+    sqfliteFfiInit();
+    databaseFactory = databaseFactoryFfi;
+
+    // Enable test mode for in-memory database
+    DatabaseHelper.setTestMode();
+
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
         .setMockMethodCallHandler(
           const MethodChannel('plugins.flutter.io/path_provider'),
@@ -38,10 +46,17 @@ void main() {
         );
   });
 
+  tearDownAll(() async {
+    DatabaseHelper.clearTestMode();
+    await DatabaseHelper.resetInstance();
+  });
+
   group('Sliding Window Validation Tests', () {
     late TestableStepCounter stepCounter;
 
     setUp(() async {
+      // Reset database instance before each test
+      await DatabaseHelper.resetInstance();
       stepCounter = TestableStepCounter();
       // Initialize logging to enable the DB and validation logic
       await stepCounter.initializeLogging(debugLogging: false);
