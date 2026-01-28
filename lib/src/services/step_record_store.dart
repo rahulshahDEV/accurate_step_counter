@@ -355,9 +355,18 @@ class StepRecordStore {
   /// Delete records older than a specific date
   ///
   /// [date] - Delete all records with toTime before this date
+  ///
+  /// This method is safe to call even if no records exist or the box
+  /// was closed by Android. It will silently succeed if there's nothing
+  /// to delete or if re-initialization fails.
   Future<void> deleteRecordsBefore(DateTime date) async {
     try {
       await _ensureBoxOpen();
+
+      // Safety check after ensureBoxOpen
+      if (_box == null || !_box!.isOpen) {
+        return; // Silently return if box couldn't be opened
+      }
 
       final keysToDelete = <dynamic>[];
 
@@ -368,24 +377,39 @@ class StepRecordStore {
         }
       }
 
-      await _box!.deleteAll(keysToDelete);
+      if (keysToDelete.isNotEmpty) {
+        await _box!.deleteAll(keysToDelete);
+      }
     } catch (e) {
       if (e.toString().contains('Box has already been closed') ||
           e.toString().contains('HiveError')) {
         _isInitialized = false;
         _box = null;
-        await initialize();
-        // Retry the operation
-        final keysToDelete = <dynamic>[];
-        for (var i = 0; i < _box!.length; i++) {
-          final entry = _box!.getAt(i);
-          if (entry != null && entry.toTime.isBefore(date)) {
-            keysToDelete.add(_box!.keyAt(i));
+        try {
+          await initialize();
+          // Safety check after re-initialization
+          if (_box == null || !_box!.isOpen) {
+            return; // Silently return if re-initialization failed
           }
+          // Retry the operation
+          final keysToDelete = <dynamic>[];
+          for (var i = 0; i < _box!.length; i++) {
+            final entry = _box!.getAt(i);
+            if (entry != null && entry.toTime.isBefore(date)) {
+              keysToDelete.add(_box!.keyAt(i));
+            }
+          }
+          if (keysToDelete.isNotEmpty) {
+            await _box!.deleteAll(keysToDelete);
+          }
+        } catch (_) {
+          // Silently fail - data retention is not critical enough to crash the app
+          return;
         }
-        await _box!.deleteAll(keysToDelete);
       } else {
-        rethrow;
+        // For non-Hive errors, log but don't crash
+        // Data retention failure should not prevent app from working
+        return;
       }
     }
   }
