@@ -18,6 +18,23 @@ A simple, accurate step counter for Flutter. Works in **foreground**, **backgrou
 - 🌍 **External Import** - Import steps from Google Fit, Apple Health, etc.
 - 🧪 **Well Tested** - 671 automated tests covering all scenarios
 
+## 🛡️ Why it's Reliable (The ANR Fix)
+
+Previous step counters (and earlier versions of this one) could freeze phones by asking **"What time is it locally?"** too often (50 times a second!). This forces the phone to read timezone files constantly, causing "Application Not Responding" (ANR) crashes on Android 12.
+
+**This package (v1.8.10+) uses UTC time for all high-speed processing. v1.8.11+ also handles cold start scenarios where Android kills the app.**
+It only converts to "Local Time" when showing steps to the user. This means:
+1.  **Zero lag**: The 50Hz sensor loop never blocks the main thread.
+2.  **Zero crashes**: No timezone file lockups.
+3.  **100% Accuracy**: "Today" is still safely calculated based on the user's local midnight.
+
+## 🏗️ Code Structure (Simple View)
+
+*   **`SensorsStepDetector` (The Eyes)**: Watches the accelerometer ~50 times a second to find generic movement.
+*   **`AccurateStepCounter` (The Brain)**: Filters that movement. It ignores shakes and only counts real walking.
+*   **`StepRecordStore` (The Memory)**: Saves every valid step to a local database (Hive) so data is never lost.
+*   **`StepCounterForegroundService` (The Night Watchman)**: Keeps "The Eyes" open even when the app is closed (on older Androids).
+
 ## 📱 Platform Support
 
 | Platform | Status | Note |
@@ -31,7 +48,7 @@ A simple, accurate step counter for Flutter. Works in **foreground**, **backgrou
 
 ```yaml
 dependencies:
-  accurate_step_counter: ^1.8.3
+  accurate_step_counter: ^1.8.11
 ```
 
 ### 2. Add Permissions

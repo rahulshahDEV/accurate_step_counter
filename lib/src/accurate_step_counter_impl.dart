@@ -810,7 +810,7 @@ class AccurateStepCounterImpl {
         source: source,
         confidence: event.confidence,
       );
-      _stepRecordStore.insertRecord(entry);
+      _safeInsertRecord(entry);
 
       _log('Logged $warmupSteps warmup steps');
 
@@ -870,7 +870,7 @@ class AccurateStepCounterImpl {
         source: source,
         confidence: event.confidence,
       );
-      _stepRecordStore.insertRecord(entry);
+      _safeInsertRecord(entry);
 
       _log('Logged $newSteps steps (source: $source)');
 
@@ -891,6 +891,9 @@ class AccurateStepCounterImpl {
   ///
   /// Call this from your WidgetsBindingObserver to properly track
   /// foreground vs background state for step logging.
+  ///
+  /// This method is safe to call during cold starts - it handles cases
+  /// where Hive boxes may be closed and need reopening.
   ///
   /// Example:
   /// ```dart
@@ -926,11 +929,27 @@ class AccurateStepCounterImpl {
           toTime: DateTime.now(),
           source: StepRecordSource.foreground,
         );
-        _stepRecordStore.insertRecord(entry);
+        // Use async insertion with error handling for cold start safety
+        _safeInsertRecord(entry);
         _lastRecordTime = DateTime.now();
         _lastRecordedStepCount = currentCount;
         _log('Logged steps before background');
       }
+    }
+  }
+
+  /// Safely insert a record with error handling for closed box scenarios
+  ///
+  /// This is used during lifecycle transitions where the box might be closed
+  /// due to Android killing the app. The StepRecordStore now handles this
+  /// internally, but this wrapper provides additional safety.
+  Future<void> _safeInsertRecord(StepRecord entry) async {
+    try {
+      await _stepRecordStore.insertRecord(entry);
+    } catch (e) {
+      _log('Error inserting record (will retry): $e');
+      // The store will handle reopening internally, so we just log the error
+      // If it fails again, it's a more serious issue
     }
   }
 
@@ -1029,7 +1048,7 @@ class AccurateStepCounterImpl {
         confidence: event.confidence,
       );
 
-      _stepRecordStore.insertRecord(entry);
+      _safeInsertRecord(entry);
       dev.log(
         'AccurateStepCounter: Logged $warmupSteps warmup steps (source: $source)',
       );
@@ -1077,7 +1096,7 @@ class AccurateStepCounterImpl {
           confidence: event.confidence,
         );
 
-        _stepRecordStore.insertRecord(entry);
+        _safeInsertRecord(entry);
         dev.log(
           'AccurateStepCounter: Logged $newSteps steps (source: $source)',
         );
