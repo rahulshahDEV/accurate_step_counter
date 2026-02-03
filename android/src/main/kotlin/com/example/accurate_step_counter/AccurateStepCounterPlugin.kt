@@ -226,6 +226,11 @@ class AccurateStepCounterPlugin : FlutterPlugin, MethodCallHandler, SensorEventL
                 android.util.Log.d("AccurateStepCounter", "getAndroidVersion method called")
                 result.success(Build.VERSION.SDK_INT)
             }
+            "isSamsungDevice" -> {
+                android.util.Log.d("AccurateStepCounter", "isSamsungDevice method called")
+                val isSamsung = Build.MANUFACTURER.equals("samsung", ignoreCase = true)
+                result.success(isSamsung)
+            }
             "startForegroundService" -> {
                 android.util.Log.d("AccurateStepCounter", "startForegroundService method called")
                 

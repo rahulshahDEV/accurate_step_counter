@@ -49,12 +49,31 @@ class DatabaseHelper {
     _instance = null;
   }
 
+  // Initialization lock
+  static Completer<Database>? _initCompleter;
+
   /// Get the database instance, initializing if needed
   Future<Database> get database async {
     if (_database != null && _database!.isOpen) {
       return _database!;
     }
-    _database = await _initDatabase();
+
+    if (_initCompleter != null) {
+      return _initCompleter!.future;
+    }
+
+    _initCompleter = Completer<Database>();
+    try {
+      _database = await _initDatabase();
+      _initCompleter!.complete(_database);
+    } catch (e) {
+      _initCompleter!.completeError(e);
+      _initCompleter = null; // Allow retry on failure
+      rethrow;
+    } finally {
+      _initCompleter = null;
+    }
+
     return _database!;
   }
 
@@ -141,9 +160,8 @@ class DatabaseHelper {
   /// This is critical for handling Android cold starts where the database
   /// connection may have been closed by the system.
   Future<void> ensureOpen() async {
-    if (_database == null || !_database!.isOpen) {
-      _database = await _initDatabase();
-    }
+    // Accessing the getter triggers safe initialization if needed
+    await database;
   }
 
   /// Close the database connection
@@ -162,6 +180,7 @@ class DatabaseHelper {
     final databasesPath = await getDatabasesPath();
     final path = join(databasesPath, _databaseName);
     await deleteDatabase(path);
-    _database = await _initDatabase();
+    // Force re-init safely
+    await database;
   }
 }
