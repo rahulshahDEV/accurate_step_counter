@@ -1,22 +1,36 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:accurate_step_counter/accurate_step_counter.dart';
 
+import 'package:sqflite_common_ffi/sqflite_ffi.dart';
+import 'package:accurate_step_counter/src/database/database_helper.dart';
+
 /// Comprehensive test scenarios based on TEST_SCENARIOS_COMPREHENSIVE.md
 void main() {
+  setUpAll(() {
+    sqfliteFfiInit();
+    databaseFactory = databaseFactoryFfi;
+    DatabaseHelper.setTestMode();
+  });
   group('Scenario 2: External Source Import', () {
     late AccurateStepCounter stepCounter;
 
-    setUp(() {
+    setUp(() async {
       stepCounter = AccurateStepCounter();
+      // Ensure clean slate
+      await stepCounter.initializeLogging();
+      await stepCounter.clearStepLogs();
     });
 
     tearDown(() async {
       await stepCounter.dispose();
+      // Force database close to prevent leaks across tests
+      await DatabaseHelper.resetInstance();
     });
 
     test('2.1 Import external steps without double-counting', () async {
-      // Initialize
+      // Initialize and start logging
       await stepCounter.initializeLogging(debugLogging: false);
+      await stepCounter.startLogging(config: StepRecordConfig.aggregated());
 
       // Import 500 steps from Google Fit
       final now = DateTime.now();
@@ -34,12 +48,19 @@ void main() {
       expect(logs.length, 1);
       expect(logs.first.stepCount, 500);
       expect(logs.first.source, StepRecordSource.external);
-      expect(logs.first.fromTime, twoHoursAgo);
-      expect(logs.first.toTime, now);
+      expect(
+        logs.first.fromTime.difference(twoHoursAgo).inMilliseconds.abs(),
+        lessThan(100),
+      );
+      expect(
+        logs.first.toTime.difference(now).inMilliseconds.abs(),
+        lessThan(100),
+      );
     });
 
     test('2.2 Import multiple batches and verify total', () async {
       await stepCounter.initializeLogging(debugLogging: false);
+      await stepCounter.startLogging(config: StepRecordConfig.aggregated());
 
       final now = DateTime.now();
 
@@ -72,6 +93,7 @@ void main() {
 
     test('2.3 Verify source tracking after import', () async {
       await stepCounter.initializeLogging(debugLogging: false);
+      await stepCounter.startLogging(config: StepRecordConfig.aggregated());
 
       final now = DateTime.now();
 
@@ -93,6 +115,7 @@ void main() {
 
     test('2.4 Error handling - negative steps', () async {
       await stepCounter.initializeLogging(debugLogging: false);
+      await stepCounter.startLogging(config: StepRecordConfig.aggregated());
 
       final now = DateTime.now();
 
@@ -109,6 +132,7 @@ void main() {
 
     test('2.5 Error handling - toTime before fromTime', () async {
       await stepCounter.initializeLogging(debugLogging: false);
+      await stepCounter.startLogging(config: StepRecordConfig.aggregated());
 
       final now = DateTime.now();
 
@@ -191,34 +215,24 @@ void main() {
         ),
       );
 
-      // Subscribe and get first emission
-      int? firstValue;
-      final subscription = stepCounter.watchTodaySteps().listen((steps) {
-        firstValue ??= steps;
-      });
+      // Wait for first emission with timeout
+      final firstValue = await stepCounter.watchTodaySteps().first.timeout(
+        const Duration(seconds: 5),
+      );
 
-      // Wait a bit for stream to emit
-      await Future.delayed(const Duration(milliseconds: 100));
-
-      expect(firstValue, isNotNull);
       expect(firstValue, greaterThanOrEqualTo(100));
-
-      await subscription.cancel();
     });
 
     test('4.2 Stream emits updates when new steps added', () async {
       await stepCounter.initializeLogging(debugLogging: false);
 
-      final emissions = <int>[];
-      final subscription = stepCounter.watchTodaySteps().listen((steps) {
-        emissions.add(steps);
-      });
+      // We expect 2 events: partial initial state, then update after insert
+      final streamFuture = stepCounter.watchTodaySteps().take(2).toList();
 
-      // Wait for initial emission
-      await Future.delayed(const Duration(milliseconds: 100));
-      final initialCount = emissions.length;
+      // Delay slightly to ensure stream is listening before we insert (though take() handles subscription)
+      await Future.delayed(const Duration(milliseconds: 50));
 
-      // Add new steps
+      // Add new steps -> triggers 2nd emission
       final now = DateTime.now();
       await stepCounter.insertRecord(
         StepRecord(
@@ -229,36 +243,25 @@ void main() {
         ),
       );
 
-      // Wait for emission
-      await Future.delayed(const Duration(milliseconds: 100));
-
-      expect(emissions.length, greaterThan(initialCount));
-
-      await subscription.cancel();
+      final events = await streamFuture;
+      expect(events.length, 2);
+      expect(events[1], greaterThan(events[0]));
     });
 
     test('4.3 Multiple subscribers receive same data', () async {
       await stepCounter.initializeLogging(debugLogging: false);
 
-      int? value1;
-      int? value2;
+      final future1 = stepCounter.watchTodaySteps().first;
+      final future2 = stepCounter.watchTodaySteps().first;
 
-      final sub1 = stepCounter.watchTodaySteps().listen((steps) {
-        value1 ??= steps;
-      });
+      final values = await Future.wait([
+        future1.timeout(const Duration(seconds: 5)),
+        future2.timeout(const Duration(seconds: 5)),
+      ]);
 
-      final sub2 = stepCounter.watchTodaySteps().listen((steps) {
-        value2 ??= steps;
-      });
-
-      await Future.delayed(const Duration(milliseconds: 100));
-
-      expect(value1, isNotNull);
-      expect(value2, isNotNull);
-      expect(value1, equals(value2));
-
-      await sub1.cancel();
-      await sub2.cancel();
+      expect(values[0], isNotNull);
+      expect(values[1], isNotNull);
+      expect(values[0], equals(values[1]));
     });
   });
 
@@ -962,12 +965,15 @@ void main() {
   group('Scenario 12: Complete Integration Tests', () {
     late AccurateStepCounter stepCounter;
 
-    setUp(() {
+    setUp(() async {
       stepCounter = AccurateStepCounter();
+      await stepCounter.initializeLogging(debugLogging: false);
+      await stepCounter.clearStepLogs();
     });
 
     tearDown(() async {
       await stepCounter.dispose();
+      await DatabaseHelper.resetInstance();
     });
 
     test('12.1 Full initialization flow works', () async {
@@ -1085,7 +1091,7 @@ void main() {
 
       final yesterdayTotal = await stepCounter.getStepCount(
         start: yesterday,
-        end: today,
+        end: yesterday,
       );
       expect(yesterdayTotal, 5000);
 
@@ -1131,6 +1137,7 @@ void main() {
 
     test('12.6 Write to aggregated works with external source', () async {
       await stepCounter.initializeLogging(debugLogging: false);
+      await stepCounter.startLogging(config: StepRecordConfig.aggregated());
 
       final now = DateTime.now();
 

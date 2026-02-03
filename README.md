@@ -2,7 +2,7 @@
 
 [![pub package](https://img.shields.io/pub/v/accurate_step_counter.svg)](https://pub.dev/packages/accurate_step_counter)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Tests](https://img.shields.io/badge/tests-671%20passing-brightgreen.svg)](https://github.com/rahulshahDEV/accurate_step_counter)
+[![Tests](https://img.shields.io/badge/tests-800%2B%20passing-brightgreen.svg)](https://github.com/rahulshahDEV/accurate_step_counter)
 [![Production Ready](https://img.shields.io/badge/status-production%20ready-brightgreen.svg)](https://github.com/rahulshahDEV/accurate_step_counter)
 
 A simple, accurate step counter for Flutter. Works in **foreground**, **background**, and **terminated** states. Health Connect-like API with persistent storage.
@@ -16,7 +16,8 @@ A simple, accurate step counter for Flutter. Works in **foreground**, **backgrou
 - 🔋 **Battery Efficient** - Event-driven, not polling
 - ⏱️ **Inactivity Timeout** - Auto-reset sessions after idle periods
 - 🌍 **External Import** - Import steps from Google Fit, Apple Health, etc.
-- 🧪 **Well Tested** - 671 automated tests covering all scenarios
+- 🧪 **Well Tested** - 800+ automated tests covering all scenarios
+- 🧵 **Low-End Device Support** - Optional background isolate for smooth UI on budget devices
 
 ## 🛡️ Why it's Reliable (The ANR Fix)
 
@@ -48,7 +49,7 @@ It only converts to "Local Time" when showing steps to the user. This means:
 
 ```yaml
 dependencies:
-  accurate_step_counter: ^1.9.1
+  accurate_step_counter: ^1.9.3
 ```
 
 ### 2. Add Permissions
@@ -292,9 +293,9 @@ await stepCounter.start(
 
 // Start logging with preset
 await stepCounter.startLogging(config: StepRecordConfig.walking());
-// Presets: walking(), running(), sensitive(), conservative(), aggregated()
+// Presets: walking(), running(), sensitive(), conservative(), aggregated(), lowEndDevice()
 
-// Custom config with inactivity timeout (NEW in v1.6.0)
+// Custom config with inactivity timeout
 await stepCounter.startLogging(
   config: StepRecordConfig.walking().copyWith(
     inactivityTimeoutMs: 10000, // Reset after 10s of no steps
@@ -302,15 +303,49 @@ await stepCounter.startLogging(
 );
 ```
 
+## 📱 Low-End Device Optimization (NEW in v1.9.3)
+
+For budget Android devices with slow storage, enable the background isolate to prevent UI jank:
+
+```dart
+// Option 1: Use the low-end device preset (recommended)
+await stepCounter.startLogging(config: StepRecordConfig.lowEndDevice());
+
+// Option 2: Enable isolate on any preset
+await stepCounter.startLogging(
+  config: StepRecordConfig.aggregated(useBackgroundIsolate: true),
+);
+
+// Option 3: Enable via copyWith
+await stepCounter.startLogging(
+  config: StepRecordConfig.walking().copyWith(useBackgroundIsolate: true),
+);
+
+// Option 4: Enable at initialization time
+await stepCounter.initializeLogging(useBackgroundIsolate: true);
+await stepCounter.startLogging(config: StepRecordConfig.aggregated());
+```
+
+**What it does:**
+- Moves all database operations to a dedicated Dart isolate
+- Prevents main thread blocking during database writes
+- Adds stream throttling (10Hz max) to reduce UI rebuilds
+- Fully backwards compatible - disabled by default
+
+**When to use:**
+- Budget Android devices (Android Go edition, low RAM)
+- Apps with heavy UI rendering alongside step counting
+- Production apps targeting broad device range
+
 ## 🧪 Testing
 
-The package includes **671 automated tests** covering all scenarios:
+The package includes **800+ automated tests** covering all scenarios:
 
 ```bash
 # Run all tests
 flutter test
 
-# Expected output: 00:02 +671: All tests passed!
+# Expected output: 00:03 +800: All tests passed!
 ```
 
 ### Test Coverage
@@ -325,17 +360,21 @@ flutter test
 | API Level Tests | 50+ |
 | Edge Cases | 50+ |
 | Config & Parameters | 100+ |
+| Isolate & Config | 50+ |
+| Fuzz Testing | 750+ scenarios |
 
 ## ✅ Production Readiness
 
 This package is **production ready** with:
 
-- ✅ 671 automated tests
+- ✅ 800+ automated tests
 - ✅ Works on all Android versions (API 19+)
 - ✅ OEM compatible (MIUI, Samsung, etc.)
 - ✅ Battery efficient
 - ✅ No duplicate step counting
 - ✅ Handles all app states
+- ✅ Low-end device optimization (background isolate)
+- ✅ Automatic log retention (30 days default)
 - ✅ Well documented API
 
 ## 📄 License

@@ -6,11 +6,17 @@ import '../database/database_helper.dart';
 import '../database/reactive_database.dart';
 import '../models/step_record.dart';
 import '../models/step_record_source.dart';
+import 'database_isolate.dart';
 
 /// Local store for step records using SQLite
 ///
 /// This service provides a Health Connect-like API for storing and querying
 /// step data with support for real-time streams, aggregation, and filtering.
+///
+/// For low-end devices, enable background isolate mode to prevent UI blocking:
+/// ```dart
+/// final store = StepRecordStore(useIsolate: true);
+/// ```
 ///
 /// Example:
 /// ```dart
@@ -38,18 +44,44 @@ class StepRecordStore {
   final ReactiveDatabase _reactiveDb = ReactiveDatabase();
   bool _isInitialized = false;
 
+  /// Whether to use background isolate for database operations
+  final bool _useIsolate;
+
+  /// Background isolate service (only created if useIsolate is true)
+  DatabaseIsolateService? _isolateService;
+
+  /// Creates a new StepRecordStore
+  ///
+  /// [useIsolate] - When true, database operations run in a background isolate
+  /// to prevent UI blocking on low-end devices. Default: false
+  StepRecordStore({bool useIsolate = false}) : _useIsolate = useIsolate {
+    if (_useIsolate) {
+      _isolateService = DatabaseIsolateService();
+    }
+  }
+
   /// Whether the store has been initialized
   bool get isInitialized => _isInitialized;
+
+  /// Whether this store is using background isolate mode
+  bool get isUsingIsolate => _useIsolate;
 
   /// Initialize the SQLite store
   ///
   /// Must be called before any other methods. Can be called multiple times
   /// safely - subsequent calls are no-ops.
+  ///
+  /// When using isolate mode, this spawns the background isolate.
   Future<void> initialize() async {
     if (_isInitialized) return;
 
-    // Initialize the database (creates tables if needed)
-    await _dbHelper.database;
+    if (_useIsolate) {
+      // Initialize the background isolate
+      await _isolateService!.initialize();
+    } else {
+      // Initialize the database directly (creates tables if needed)
+      await _dbHelper.database;
+    }
     _isInitialized = true;
   }
 
@@ -71,6 +103,8 @@ class StepRecordStore {
   /// This method safely ensures the database is open before writing.
   /// Handles cold start scenarios where Android may have closed the database.
   ///
+  /// In isolate mode, the write happens in a background isolate.
+  ///
   /// Example:
   /// ```dart
   /// await store.insertRecord(StepRecord(
@@ -81,6 +115,12 @@ class StepRecordStore {
   /// ));
   /// ```
   Future<void> insertRecord(StepRecord record) async {
+    if (_useIsolate) {
+      await _isolateService!.insertRecord(record);
+      _reactiveDb.notifyRecordsChanged();
+      return;
+    }
+
     try {
       final db = await _ensureDbOpen();
       await db.insert(_tableName, record.toMap());
@@ -105,6 +145,8 @@ class StepRecordStore {
   /// Returns true if a record with the same or overlapping time range already exists.
   /// Uses a tolerance window to detect "fuzzy" duplicates (within 60 seconds).
   ///
+  /// In isolate mode, the query runs in a background isolate.
+  ///
   /// [fromTime] - Start time of the record to check
   /// [toTime] - End time of the record to check
   /// [stepCount] - Optional step count to also match (for exact duplicate detection)
@@ -127,6 +169,15 @@ class StepRecordStore {
     int? stepCount,
     StepRecordSource? source,
   }) async {
+    if (_useIsolate) {
+      return _isolateService!.hasDuplicateRecord(
+        fromTime: fromTime,
+        toTime: toTime,
+        stepCount: stepCount,
+        source: source,
+      );
+    }
+
     final db = await _ensureDbOpen();
 
     // Tolerance window for fuzzy matching (60 seconds)
@@ -165,12 +216,21 @@ class StepRecordStore {
   /// Returns true if any existing record overlaps with the given time range.
   /// Useful for preventing duplicate imports from external sources.
   ///
+  /// In isolate mode, the query runs in a background isolate.
+  ///
   /// [fromTime] - Start time of the range to check
   /// [toTime] - End time of the range to check
   Future<bool> hasOverlappingRecord({
     required DateTime fromTime,
     required DateTime toTime,
   }) async {
+    if (_useIsolate) {
+      return _isolateService!.hasOverlappingRecord(
+        fromTime: fromTime,
+        toTime: toTime,
+      );
+    }
+
     final db = await _ensureDbOpen();
 
     final fromMs = fromTime.toUtc().millisecondsSinceEpoch;
@@ -191,6 +251,8 @@ class StepRecordStore {
   ///
   /// Returns records sorted by fromTime (newest first).
   ///
+  /// In isolate mode, the query runs in a background isolate.
+  ///
   /// [from] - Optional start time filter (inclusive)
   /// [to] - Optional end time filter (inclusive)
   /// [source] - Optional source filter
@@ -199,6 +261,10 @@ class StepRecordStore {
     DateTime? to,
     StepRecordSource? source,
   }) async {
+    if (_useIsolate) {
+      return _isolateService!.readRecords(from: from, to: to, source: source);
+    }
+
     final db = await _ensureDbOpen();
 
     String? whereClause;
@@ -237,9 +303,15 @@ class StepRecordStore {
 
   /// Read total step count (aggregate)
   ///
+  /// In isolate mode, uses optimized SQL aggregation in background isolate.
+  ///
   /// [from] - Optional start time filter (inclusive)
   /// [to] - Optional end time filter (inclusive)
   Future<int> readTotalSteps({DateTime? from, DateTime? to}) async {
+    if (_useIsolate) {
+      return _isolateService!.readTotalSteps(from: from, to: to);
+    }
+
     final entries = await readRecords(from: from, to: to);
     return entries.fold<int>(0, (sum, entry) => sum + entry.stepCount);
   }
@@ -309,7 +381,13 @@ class StepRecordStore {
   }
 
   /// Get the number of records
+  ///
+  /// In isolate mode, the query runs in a background isolate.
   Future<int> getRecordCount() async {
+    if (_useIsolate) {
+      return _isolateService!.getRecordCount();
+    }
+
     final db = await _ensureDbOpen();
     final result = await db.rawQuery(
       'SELECT COUNT(*) as count FROM $_tableName',
@@ -318,7 +396,15 @@ class StepRecordStore {
   }
 
   /// Delete all step records
+  ///
+  /// In isolate mode, the delete runs in a background isolate.
   Future<void> deleteAllRecords() async {
+    if (_useIsolate) {
+      await _isolateService!.deleteAllRecords();
+      _reactiveDb.notifyRecordsChanged();
+      return;
+    }
+
     try {
       final db = await _ensureDbOpen();
       await db.delete(_tableName);
@@ -339,12 +425,24 @@ class StepRecordStore {
 
   /// Delete records older than a specific date
   ///
+  /// In isolate mode, the delete runs in a background isolate.
+  ///
   /// [date] - Delete all records with toTime before this date
   ///
   /// This method is safe to call even if no records exist or the database
   /// was closed by Android. It will silently succeed if there's nothing
   /// to delete or if re-initialization fails.
   Future<void> deleteRecordsBefore(DateTime date) async {
+    if (_useIsolate) {
+      try {
+        await _isolateService!.deleteRecordsBefore(date);
+        _reactiveDb.notifyRecordsChanged();
+      } catch (_) {
+        // Silently fail - data retention is not critical enough to crash the app
+      }
+      return;
+    }
+
     try {
       final db = await _ensureDbOpen();
 
@@ -394,6 +492,7 @@ class StepRecordStore {
         'foregroundSteps': 0,
         'backgroundSteps': 0,
         'terminatedSteps': 0,
+        'externalSteps': 0,
       };
     }
 
@@ -409,6 +508,10 @@ class StepRecordStore {
 
     final terminatedSteps = entries
         .where((e) => e.source == StepRecordSource.terminated)
+        .fold<int>(0, (sum, e) => sum + e.stepCount);
+
+    final externalSteps = entries
+        .where((e) => e.source == StepRecordSource.external)
         .fold<int>(0, (sum, e) => sum + e.stepCount);
 
     // Calculate date range for daily average
@@ -429,6 +532,7 @@ class StepRecordStore {
       'foregroundSteps': foregroundSteps,
       'backgroundSteps': backgroundSteps,
       'terminatedSteps': terminatedSteps,
+      'externalSteps': externalSteps,
       'earliestRecord': earliest,
       'latestRecord': latest,
     };
@@ -437,8 +541,13 @@ class StepRecordStore {
   /// Close the store
   ///
   /// Should be called when completely done with the store.
+  /// In isolate mode, this also shuts down the background isolate.
   Future<void> close() async {
-    await _dbHelper.close();
+    if (_useIsolate) {
+      await _isolateService?.close();
+    } else {
+      await _dbHelper.close();
+    }
     _isInitialized = false;
   }
 }

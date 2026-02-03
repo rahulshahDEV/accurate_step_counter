@@ -18,6 +18,31 @@ import 'services/step_record_store.dart';
 ///
 /// This class provides the core functionality for accurate step counting
 /// using native Android step detection with optional foreground service.
+///
+/// Includes:
+/// - Real-time step counting
+/// - Aggregated logging with SQLite
+/// - Warmup validation logic for noise filtering
+/// - Foreground service management
+/// - Terminated state step recovery
+
+/// Helper class for buffered writes
+class PendingStep {
+  final int stepCount;
+  final DateTime fromTime;
+  final DateTime toTime;
+  final StepRecordSource source;
+  final double confidence;
+
+  PendingStep({
+    required this.stepCount,
+    required this.fromTime,
+    required this.toTime,
+    required this.source,
+    required this.confidence,
+  });
+}
+
 class AccurateStepCounterImpl {
   final NativeStepDetector _nativeDetector = NativeStepDetector();
   final StepCounterPlatform _platform = StepCounterPlatform.instance;
@@ -35,9 +60,10 @@ class AccurateStepCounterImpl {
   StreamSubscription<StepCountEvent>? _sensorsStepSubscription;
 
   // Step recording
-  final StepRecordStore _stepRecordStore = StepRecordStore();
+  StepRecordStore? _stepRecordStore;
   bool _recordingEnabled = false;
   bool _storeInitialized = false;
+  bool _useBackgroundIsolate = false;
   bool _debugLogging = false;
   StreamSubscription<StepCountEvent>? _stepRecordSubscription;
   DateTime? _lastRecordTime;
@@ -80,11 +106,19 @@ class AccurateStepCounterImpl {
   // Write lock to prevent concurrent writeStepsToAggregated calls
   // This prevents race conditions where multiple writes happen before duplicate check completes
   Completer<void>? _writeLock;
+  final List<PendingStep> _writeBuffer = [];
+  Timer? _writeBufferFlushTimer;
 
   // Track last external write to detect near-duplicate writes
   DateTime? _lastExternalWriteTime;
   int? _lastExternalWriteSteps;
   DateTime? _lastExternalWriteFromTime;
+
+  // Stream emission throttling for low-end device optimization
+  // Limits UI updates to max 10Hz instead of 50Hz
+  DateTime? _lastStreamEmitTime;
+  static const _minStreamEmitInterval = Duration(milliseconds: 100);
+  int _pendingStreamValue = 0;
 
   /// Callback for handling missed steps from terminated state
   /// Parameters: (missedSteps, startTime, endTime)
@@ -172,11 +206,15 @@ class AccurateStepCounterImpl {
         'AccurateStepCounter: Foreground service max API level is $maxApiLevel',
       );
 
+      // check for samsung devices
+      final isSamsung = await _platform.isSamsungDevice();
+
       // Use PERSISTENT foreground service for Android ≤ configured level
       // This ensures OEM battery optimization (MIUI, Samsung) doesn't kill the service
       if (_currentConfig!.useForegroundServiceOnOldDevices &&
           androidVersion > 0 &&
-          androidVersion <= maxApiLevel) {
+          androidVersion <= maxApiLevel &&
+          !isSamsung) {
         dev.log(
           'AccurateStepCounter: Using PERSISTENT foreground service for API ≤$maxApiLevel (OEM-compatible)',
         );
@@ -401,7 +439,9 @@ class AccurateStepCounterImpl {
     _inactivityTimer = null;
     await _foregroundStepController.close();
     await _aggregatedStepController.close();
-    await _stepRecordStore.close();
+    await _stepRecordStore?.close();
+    _stepRecordStore = null;
+    _storeInitialized = false;
     _currentConfig = null;
   }
 
@@ -435,6 +475,8 @@ class AccurateStepCounterImpl {
   /// });
   /// ```
   Future<void> initSteps({bool debugLogging = false}) async {
+    // Add small delay to prevent ANR on heavily loaded main thread
+    await Future.delayed(const Duration(milliseconds: 500));
     await initializeLogging(debugLogging: debugLogging);
     await start(config: StepDetectorConfig.walking());
     await startLogging(config: StepRecordConfig.aggregated());
@@ -456,7 +498,7 @@ class AccurateStepCounterImpl {
     _ensureLoggingInitialized();
     final now = DateTime.now();
     final startOfToday = DateTime(now.year, now.month, now.day);
-    return await _stepRecordStore.readTotalSteps(from: startOfToday, to: now);
+    return await _stepRecordStore!.readTotalSteps(from: startOfToday, to: now);
   }
 
   /// Get yesterday's step count
@@ -473,7 +515,7 @@ class AccurateStepCounterImpl {
     final now = DateTime.now();
     final startOfToday = DateTime(now.year, now.month, now.day);
     final startOfYesterday = startOfToday.subtract(const Duration(days: 1));
-    return await _stepRecordStore.readTotalSteps(
+    return await _stepRecordStore!.readTotalSteps(
       from: startOfYesterday,
       to: startOfToday,
     );
@@ -511,7 +553,7 @@ class AccurateStepCounterImpl {
 
     final endTime = isEndToday ? now : endMidnight.add(const Duration(days: 1));
 
-    return await _stepRecordStore.readTotalSteps(
+    return await _stepRecordStore!.readTotalSteps(
       from: startMidnight,
       to: endTime,
     );
@@ -532,7 +574,7 @@ class AccurateStepCounterImpl {
     _ensureLoggingInitialized();
     final now = DateTime.now();
     final startOfToday = DateTime(now.year, now.month, now.day);
-    return _stepRecordStore.watchTotalSteps(from: startOfToday);
+    return _stepRecordStore!.watchTotalSteps(from: startOfToday);
   }
 
   // ============================================================
@@ -554,13 +596,23 @@ class AccurateStepCounterImpl {
   /// await stepCounter.initializeLogging(debugLogging: kDebugMode);
   /// await stepCounter.start();
   /// ```
-  Future<void> initializeLogging({bool debugLogging = false}) async {
+  ///
+  /// [useBackgroundIsolate] - When true, database operations run in a background
+  /// isolate to prevent UI blocking on low-end devices. Default: false.
+  /// Note: This can also be set via [StepRecordConfig.useBackgroundIsolate] when
+  /// calling [startLogging]. The value from [startLogging] takes precedence.
+  Future<void> initializeLogging({
+    bool debugLogging = false,
+    bool useBackgroundIsolate = false,
+  }) async {
     if (_storeInitialized) return;
 
     _debugLogging = debugLogging;
-    await _stepRecordStore.initialize();
+    _useBackgroundIsolate = useBackgroundIsolate;
+    _stepRecordStore = StepRecordStore(useIsolate: useBackgroundIsolate);
+    await _stepRecordStore!.initialize();
     _storeInitialized = true;
-    _log('Logging database initialized');
+    _log('Logging database initialized (isolate: $useBackgroundIsolate)');
   }
 
   /// Internal logging helper - only logs if debugLogging is enabled
@@ -568,6 +620,26 @@ class AccurateStepCounterImpl {
     if (_debugLogging) {
       dev.log('AccurateStepCounter: $message');
     }
+  }
+
+  /// Emit aggregated step count to stream with throttling
+  ///
+  /// This method limits stream emissions to max 10Hz (100ms minimum interval)
+  /// to reduce UI rebuilds on low-end devices. The latest value is always
+  /// stored and will be emitted on the next allowed interval.
+  void _emitAggregatedCount(int count) {
+    if (_aggregatedStepController.isClosed) return;
+
+    final now = DateTime.now();
+    _pendingStreamValue = count;
+
+    if (_lastStreamEmitTime == null ||
+        now.difference(_lastStreamEmitTime!) >= _minStreamEmitInterval) {
+      _aggregatedStepController.add(count);
+      _lastStreamEmitTime = now;
+    }
+    // If throttled, the value is stored in _pendingStreamValue
+    // and will be emitted on the next step event that passes the throttle
   }
 
   /// Start auto-logging steps to the local database
@@ -602,6 +674,7 @@ class AccurateStepCounterImpl {
   /// - [StepRecordConfig.conservative] - Strict validation (10s warmup)
   /// - [StepRecordConfig.noValidation] - Raw logging (no validation)
   /// - [StepRecordConfig.aggregated] - Health Connect-like (continuous recording)
+  /// - [StepRecordConfig.lowEndDevice] - Optimized for low-end devices (isolate enabled)
   Future<void> startLogging({StepRecordConfig? config}) async {
     if (!_storeInitialized) {
       throw StateError(
@@ -613,6 +686,16 @@ class AccurateStepCounterImpl {
 
     // Use provided config or default
     final cfg = config ?? const StepRecordConfig();
+
+    // If config requests isolate mode but store wasn't initialized with it,
+    // recreate the store with isolate support
+    if (cfg.useBackgroundIsolate && !_useBackgroundIsolate) {
+      _log('Switching to background isolate mode');
+      await _stepRecordStore?.close();
+      _useBackgroundIsolate = true;
+      _stepRecordStore = StepRecordStore(useIsolate: true);
+      await _stepRecordStore!.initialize();
+    }
 
     _recordingEnabled = true;
     _aggregatedModeEnabled = cfg.enableAggregatedMode;
@@ -626,18 +709,32 @@ class AccurateStepCounterImpl {
     _warmupStartStepCount = 0;
     _lastRecordTime = DateTime.now().toUtc();
     _lastRecordedStepCount = 0;
+    _writeBuffer.clear();
+    _writeBufferFlushTimer?.cancel();
+    _writeBufferFlushTimer = null;
 
     // Initialize aggregated mode with today's data
     if (_aggregatedModeEnabled) {
       await _initializeAggregatedMode();
+      // Start buffer flush timer (every 3 seconds)
+      _writeBufferFlushTimer = Timer.periodic(
+        const Duration(seconds: 3),
+        (_) => _flushWriteBuffer(),
+      );
+    }
+
+    // Automatic log retention cleanup
+    if (cfg.retentionPeriod > Duration.zero) {
+      // Run in background to avoid delaying startup
+      unawaited(_cleanupOldLogs(cfg.retentionPeriod));
     }
 
     // Subscribe to step events for auto-logging
-    _stepRecordSubscription = stepEventStream.listen((event) {
+    _stepRecordSubscription = stepEventStream.listen((event) async {
       if (_aggregatedModeEnabled) {
-        _autoLogStepsContinuous(event);
+        await _autoLogStepsContinuous(event);
       } else {
-        _autoLogSteps(event, _recordIntervalMs);
+        await _autoLogSteps(event, _recordIntervalMs);
       }
     });
 
@@ -661,6 +758,8 @@ class AccurateStepCounterImpl {
     _recordingEnabled = false;
     _aggregatedModeEnabled = false;
     _log('Step logging stopped');
+    // Flush any remaining steps
+    await _flushWriteBuffer();
   }
 
   /// Reset warmup state for new walking session
@@ -690,13 +789,24 @@ class AccurateStepCounterImpl {
     );
   }
 
+  /// Clean up old logs based on retention period
+  Future<void> _cleanupOldLogs(Duration retentionPeriod) async {
+    try {
+      final cutoff = DateTime.now().subtract(retentionPeriod);
+      _log('Cleaning up logs older than $cutoff');
+      await _stepRecordStore!.deleteRecordsBefore(cutoff);
+    } catch (e) {
+      _log('Error cleaning up old logs: $e');
+    }
+  }
+
   /// Initialize aggregated mode by loading today's steps
   Future<void> _initializeAggregatedMode() async {
     final now = DateTime.now();
     final startOfToday = DateTime(now.year, now.month, now.day);
 
     // Load today's steps from SQLite
-    final todaySteps = await _stepRecordStore.readTotalSteps(
+    final todaySteps = await _stepRecordStore!.readTotalSteps(
       from: startOfToday,
       to: now,
     );
@@ -708,15 +818,17 @@ class AccurateStepCounterImpl {
     _sessionBaseStepCount = currentStepCount;
 
     // Emit initial value to stream immediately (this is the fix!)
+    // Use direct add for initial value (no throttling needed)
     if (!_aggregatedStepController.isClosed) {
       _aggregatedStepController.add(_aggregatedStoredSteps);
+      _lastStreamEmitTime = DateTime.now();
     }
 
     _log('Initialized aggregated mode: $todaySteps steps from today');
   }
 
   /// Auto-log steps continuously (write on every step) for aggregated mode
-  void _autoLogStepsContinuous(StepCountEvent event) {
+  Future<void> _autoLogStepsContinuous(StepCountEvent event) async {
     final now = event.timestamp;
 
     // Restart inactivity timer on every step
@@ -810,7 +922,7 @@ class AccurateStepCounterImpl {
         source: source,
         confidence: event.confidence,
       );
-      _safeInsertRecord(entry);
+      await _safeInsertRecord(entry);
 
       _log('Logged $warmupSteps warmup steps');
 
@@ -823,9 +935,7 @@ class AccurateStepCounterImpl {
       _currentSessionSteps = event.stepCount - _sessionBaseStepCount;
 
       // Emit aggregated count (stored from DB + new session steps)
-      _aggregatedStepController.add(
-        _aggregatedStoredSteps + _currentSessionSteps,
-      );
+      _emitAggregatedCount(_aggregatedStoredSteps + _currentSessionSteps);
       return;
     }
 
@@ -860,31 +970,30 @@ class AccurateStepCounterImpl {
         }
       }
 
-      // Write steps to SQLite immediately (not interval-based)
-      // This ensures every detected step event is persisted
       final source = _determineSource();
-      final entry = StepRecord(
-        stepCount: newSteps,
-        fromTime: _lastRecordTime!,
-        toTime: now,
-        source: source,
-        confidence: event.confidence,
-      );
-      _safeInsertRecord(entry);
+      final lastTime = _lastRecordTime!;
 
-      _log('Logged $newSteps steps (source: $source)');
+      // Update state immediately to prevent potential race conditions
+      _lastRecordTime = now;
+      _lastRecordedStepCount = event.stepCount;
+
+      // Buffer the write instead of hitting DB immediately
+      _bufferSteps(newSteps, lastTime, now, source, event.confidence);
+
+      _log('Buffered $newSteps steps (source: $source)');
 
       // Update session steps tracking
       _currentSessionSteps = event.stepCount - _sessionBaseStepCount;
 
-      // Emit aggregated count (stored from DB + new session steps)
-      _aggregatedStepController.add(
-        _aggregatedStoredSteps + _currentSessionSteps,
-      );
+      // Emit aggregated count (stored from DB + new session steps + buffered pending)
+      // Note: buffered steps are part of _currentSessionSteps implicitly
+      // Use throttled emission to reduce UI updates on low-end devices
+      _emitAggregatedCount(_aggregatedStoredSteps + _currentSessionSteps);
+    } else {
+      // Just update tracking if no new steps (or negative due to reset)
+      _lastRecordTime = now;
+      _lastRecordedStepCount = event.stepCount;
     }
-
-    _lastRecordTime = now;
-    _lastRecordedStepCount = event.stepCount;
   }
 
   /// Set the current app lifecycle state
@@ -945,7 +1054,7 @@ class AccurateStepCounterImpl {
   /// internally, but this wrapper provides additional safety.
   Future<void> _safeInsertRecord(StepRecord entry) async {
     try {
-      await _stepRecordStore.insertRecord(entry);
+      await _stepRecordStore!.insertRecord(entry);
     } catch (e) {
       _log('Error inserting record (will retry): $e');
       // The store will handle reopening internally, so we just log the error
@@ -954,7 +1063,7 @@ class AccurateStepCounterImpl {
   }
 
   /// Auto-log steps based on interval with warmup validation
-  void _autoLogSteps(StepCountEvent event, int intervalMs) {
+  Future<void> _autoLogSteps(StepCountEvent event, int intervalMs) async {
     final now = event.timestamp;
 
     // Restart inactivity timer on every step
@@ -1048,7 +1157,7 @@ class AccurateStepCounterImpl {
         confidence: event.confidence,
       );
 
-      _safeInsertRecord(entry);
+      await _safeInsertRecord(entry);
       dev.log(
         'AccurateStepCounter: Logged $warmupSteps warmup steps (source: $source)',
       );
@@ -1088,22 +1197,110 @@ class AccurateStepCounterImpl {
         }
 
         final source = _determineSource();
-        final entry = StepRecord(
-          stepCount: newSteps,
-          fromTime: _lastRecordTime!,
-          toTime: now,
-          source: source,
+        final lastTime = _lastRecordTime!;
+
+        // Update state first
+        _lastRecordTime = now;
+        _lastRecordedStepCount = event.stepCount;
+
+        await _logDistributedSteps(
+          newSteps,
+          lastTime,
+          now,
+          source,
           confidence: event.confidence,
         );
-
-        _safeInsertRecord(entry);
         dev.log(
           'AccurateStepCounter: Logged $newSteps steps (source: $source)',
         );
+      } else {
+        _lastRecordTime = now;
+        _lastRecordedStepCount = event.stepCount;
+      }
+    }
+  }
+
+  /// Log steps with distribution across days if needed
+  Future<void> _logDistributedSteps(
+    int stepCount,
+    DateTime fromTime,
+    DateTime toTime,
+    StepRecordSource source, {
+    double confidence = 1.0,
+  }) async {
+    // Check if time range spans across days
+    final fromDate = DateTime(fromTime.year, fromTime.month, fromTime.day);
+    final toDate = DateTime(toTime.year, toTime.month, toTime.day);
+
+    // If same day, log as single entry
+    if (fromDate == toDate) {
+      final entry = StepRecord(
+        stepCount: stepCount,
+        fromTime: fromTime,
+        toTime: toTime,
+        source: source,
+        confidence: confidence,
+      );
+      await _safeInsertRecord(entry);
+      return;
+    }
+
+    // Multiple days - distribute steps proportionally
+    final totalDurationMs = toTime.difference(fromTime).inMilliseconds;
+    if (totalDurationMs <= 0) {
+      // Should not happen for valid ranges, but safety check
+      final entry = StepRecord(
+        stepCount: stepCount,
+        fromTime: fromTime,
+        toTime: toTime,
+        source: source,
+        confidence: confidence,
+      );
+      await _safeInsertRecord(entry);
+      return;
+    }
+
+    int remainingSteps = stepCount;
+    DateTime currentStart = fromTime;
+
+    while (currentStart.isBefore(toTime)) {
+      final currentDate = DateTime(
+        currentStart.year,
+        currentStart.month,
+        currentStart.day,
+      );
+      // End of this day (first millisecond of next day, calculated to avoid gaps)
+      // Actually using midnight of next day is cleaner for comparison
+      final nextDay = currentDate.add(const Duration(days: 1));
+      final currentEnd = nextDay.isBefore(toTime) ? nextDay : toTime;
+
+      // Calculate proportion
+      final segmentDurationMs = currentEnd
+          .difference(currentStart)
+          .inMilliseconds;
+      final proportion = segmentDurationMs / totalDurationMs;
+
+      int segmentSteps;
+      if (currentEnd == toTime) {
+        // Last segment gets remainder
+        segmentSteps = remainingSteps;
+      } else {
+        segmentSteps = (stepCount * proportion).round();
+        remainingSteps -= segmentSteps;
       }
 
-      _lastRecordTime = now;
-      _lastRecordedStepCount = event.stepCount;
+      if (segmentSteps > 0) {
+        final entry = StepRecord(
+          stepCount: segmentSteps,
+          fromTime: currentStart,
+          toTime: currentEnd,
+          source: source,
+          confidence: confidence,
+        );
+        await _safeInsertRecord(entry);
+      }
+
+      currentStart = currentEnd;
     }
   }
 
@@ -1142,88 +1339,15 @@ class AccurateStepCounterImpl {
       return;
     }
 
-    // Check if the time range spans multiple days
-    final fromDate = DateTime.utc(fromTime.year, fromTime.month, fromTime.day);
-    final toDate = DateTime.utc(toTime.year, toTime.month, toTime.day);
-
-    // If same day, log as single entry
-    if (fromDate == toDate) {
-      final entry = StepRecord(
-        stepCount: stepCount,
-        fromTime: fromTime,
-        toTime: toTime,
-        source: StepRecordSource.terminated,
-      );
-      await _stepRecordStore.insertRecord(entry);
-      _log('Logged $stepCount terminated steps for single day');
-      return;
-    }
-
-    // Multiple days - distribute steps proportionally across days
-    final totalDurationMs = toTime.difference(fromTime).inMilliseconds;
-    if (totalDurationMs <= 0) {
-      _log('Skipping terminated steps - invalid duration');
-      return;
-    }
-
-    int remainingSteps = stepCount;
-    DateTime currentStart = fromTime;
-
-    dev.log(
-      'AccurateStepCounter: Distributing $stepCount terminated steps across multiple days',
+    // Use shared distribution logic
+    await _logDistributedSteps(
+      stepCount,
+      fromTime,
+      toTime,
+      StepRecordSource.terminated,
     );
 
-    while (currentStart.isBefore(toTime)) {
-      // Calculate end of current day (midnight of next day) or toTime if earlier
-      final currentDate = DateTime.utc(
-        currentStart.year,
-        currentStart.month,
-        currentStart.day,
-      );
-      // Use end of day (23:59:59.999) instead of midnight to avoid boundary issues
-      final endOfDay = currentDate
-          .add(const Duration(days: 1))
-          .subtract(const Duration(milliseconds: 1));
-      final currentEnd = endOfDay.isBefore(toTime) ? endOfDay : toTime;
-
-      // Calculate proportion of time in this day
-      final dayDurationMs = currentEnd.difference(currentStart).inMilliseconds;
-      final proportion = dayDurationMs / totalDurationMs;
-
-      // Calculate steps for this day (proportional distribution)
-      int daySteps;
-      if (currentEnd == toTime) {
-        // Last day - assign remaining steps to avoid rounding errors
-        daySteps = remainingSteps;
-      } else {
-        daySteps = (stepCount * proportion).round();
-        remainingSteps -= daySteps;
-      }
-
-      // Only log if there are steps for this day
-      if (daySteps > 0) {
-        final entry = StepRecord(
-          stepCount: daySteps,
-          fromTime: currentStart,
-          toTime: currentEnd,
-          source: StepRecordSource.terminated,
-        );
-        await _stepRecordStore.insertRecord(entry);
-
-        final dateStr =
-            '${currentStart.year}-${currentStart.month.toString().padLeft(2, '0')}-${currentStart.day.toString().padLeft(2, '0')}';
-        dev.log(
-          'AccurateStepCounter: Logged $daySteps terminated steps for $dateStr',
-        );
-      }
-
-      // Move to start of next day
-      currentStart = endOfDay;
-    }
-
-    _log(
-      'Distributed $stepCount terminated steps across ${toDate.difference(fromDate).inDays + 1} days',
-    );
+    _log('Logged $stepCount terminated steps (distributed if needed)');
   }
 
   /// Manually log a step entry
@@ -1245,7 +1369,7 @@ class AccurateStepCounterImpl {
         'Logging not initialized. Call initializeLogging() first.',
       );
     }
-    await _stepRecordStore.insertRecord(entry);
+    await _stepRecordStore!.insertRecord(entry);
   }
 
   /// Get total step count from logs (aggregate)
@@ -1268,7 +1392,7 @@ class AccurateStepCounterImpl {
   /// ```
   Future<int> getTotalSteps({DateTime? from, DateTime? to}) async {
     _ensureLoggingInitialized();
-    return await _stepRecordStore.readTotalSteps(from: from, to: to);
+    return await _stepRecordStore!.readTotalSteps(from: from, to: to);
   }
 
   /// Get steps for today (from midnight to now)
@@ -1284,7 +1408,7 @@ class AccurateStepCounterImpl {
     _ensureLoggingInitialized();
     final now = DateTime.now();
     final startOfToday = DateTime(now.year, now.month, now.day);
-    return await _stepRecordStore.readTotalSteps(from: startOfToday, to: now);
+    return await _stepRecordStore!.readTotalSteps(from: startOfToday, to: now);
   }
 
   /// Get steps for yesterday (full day from midnight to midnight)
@@ -1301,7 +1425,7 @@ class AccurateStepCounterImpl {
     final now = DateTime.now();
     final startOfToday = DateTime(now.year, now.month, now.day);
     final startOfYesterday = startOfToday.subtract(const Duration(days: 1));
-    return await _stepRecordStore.readTotalSteps(
+    return await _stepRecordStore!.readTotalSteps(
       from: startOfYesterday,
       to: startOfToday,
     );
@@ -1321,7 +1445,7 @@ class AccurateStepCounterImpl {
     final now = DateTime.now();
     final startOfToday = DateTime(now.year, now.month, now.day);
     final startOfYesterday = startOfToday.subtract(const Duration(days: 1));
-    return await _stepRecordStore.readTotalSteps(
+    return await _stepRecordStore!.readTotalSteps(
       from: startOfYesterday,
       to: now,
     );
@@ -1365,7 +1489,7 @@ class AccurateStepCounterImpl {
         ? now
         : endOfEndDate.add(const Duration(days: 1));
 
-    return await _stepRecordStore.readTotalSteps(from: start, to: end);
+    return await _stepRecordStore!.readTotalSteps(from: start, to: end);
   }
 
   /// Get step count by source
@@ -1383,7 +1507,7 @@ class AccurateStepCounterImpl {
     DateTime? to,
   }) async {
     _ensureLoggingInitialized();
-    return await _stepRecordStore.readStepsBySource(source, from: from, to: to);
+    return await _stepRecordStore!.readStepsBySource(source, from: from, to: to);
   }
 
   /// Get all step log entries
@@ -1403,7 +1527,7 @@ class AccurateStepCounterImpl {
     StepRecordSource? source,
   }) async {
     _ensureLoggingInitialized();
-    return await _stepRecordStore.readRecords(
+    return await _stepRecordStore!.readRecords(
       from: from,
       to: to,
       source: source,
@@ -1422,7 +1546,7 @@ class AccurateStepCounterImpl {
   /// ```
   Stream<int> watchTotalSteps({DateTime? from, DateTime? to}) {
     _ensureLoggingInitialized();
-    return _stepRecordStore.watchTotalSteps(from: from, to: to);
+    return _stepRecordStore!.watchTotalSteps(from: from, to: to);
   }
 
   /// Watch all step logs in real-time
@@ -1443,7 +1567,7 @@ class AccurateStepCounterImpl {
     StepRecordSource? source,
   }) {
     _ensureLoggingInitialized();
-    return _stepRecordStore.watchRecords(from: from, to: to, source: source);
+    return _stepRecordStore!.watchRecords(from: from, to: to, source: source);
   }
 
   /// Watch aggregated step count (stored + live) in real-time
@@ -1671,7 +1795,7 @@ class AccurateStepCounterImpl {
       // === DATABASE DUPLICATE CHECK ===
       // Check for duplicate record in database if requested
       if (skipIfDuplicate) {
-        final isDuplicate = await _stepRecordStore.hasDuplicateRecord(
+        final isDuplicate = await _stepRecordStore!.hasDuplicateRecord(
           fromTime: fromTime,
           toTime: endTime,
           stepCount: stepCount,
@@ -1686,15 +1810,8 @@ class AccurateStepCounterImpl {
         }
       }
 
-      // Write to database
-      final entry = StepRecord(
-        stepCount: stepCount,
-        fromTime: fromTime,
-        toTime: endTime,
-        source: recordSource,
-      );
-
-      await _stepRecordStore.insertRecord(entry);
+      // Write to database (with distribution if needed)
+      await _logDistributedSteps(stepCount, fromTime, endTime, recordSource);
       _log('Wrote $stepCount steps to aggregated database');
 
       // Track this write for in-memory duplicate detection
@@ -1709,7 +1826,7 @@ class AccurateStepCounterImpl {
       final startOfToday = DateTime(now.year, now.month, now.day);
 
       // Recalculate today's total from database
-      final todayTotal = await _stepRecordStore.readTotalSteps(
+      final todayTotal = await _stepRecordStore!.readTotalSteps(
         from: startOfToday,
         to: now,
       );
@@ -1717,10 +1834,12 @@ class AccurateStepCounterImpl {
       // Update stored steps count
       _aggregatedStoredSteps = todayTotal;
 
-      // Emit updated aggregated count
+      // Emit updated aggregated count immediately (no throttling for external writes
+      // since they're infrequent and user expects immediate UI update)
       final newAggregatedCount = _aggregatedStoredSteps + _currentSessionSteps;
       if (!_aggregatedStepController.isClosed) {
         _aggregatedStepController.add(newAggregatedCount);
+        _lastStreamEmitTime = DateTime.now();
       }
 
       return true; // Successfully written
@@ -1747,7 +1866,7 @@ class AccurateStepCounterImpl {
     DateTime? to,
   }) async {
     _ensureLoggingInitialized();
-    return await _stepRecordStore.getStats(from: from, to: to);
+    return await _stepRecordStore!.getStats(from: from, to: to);
   }
 
   /// Clear all step logs
@@ -1755,7 +1874,7 @@ class AccurateStepCounterImpl {
   /// Use with caution - this permanently deletes all logged data.
   Future<void> clearStepLogs() async {
     _ensureLoggingInitialized();
-    await _stepRecordStore.deleteAllRecords();
+    await _stepRecordStore!.deleteAllRecords();
     _log('All step logs cleared');
   }
 
@@ -1770,7 +1889,7 @@ class AccurateStepCounterImpl {
   /// ```
   Future<void> deleteStepLogsBefore(DateTime date) async {
     _ensureLoggingInitialized();
-    await _stepRecordStore.deleteRecordsBefore(date);
+    await _stepRecordStore!.deleteRecordsBefore(date);
     _log('Deleted logs before $date');
   }
 
@@ -1928,5 +2047,44 @@ class AccurateStepCounterImpl {
     }
 
     return await _syncStepsFromTerminatedState();
+  }
+
+  /// Buffer steps for batch writing
+  void _bufferSteps(
+    int stepCount,
+    DateTime fromTime,
+    DateTime toTime,
+    StepRecordSource source,
+    double confidence,
+  ) {
+    _writeBuffer.add(
+      PendingStep(
+        stepCount: stepCount,
+        fromTime: fromTime,
+        toTime: toTime,
+        source: source,
+        confidence: confidence,
+      ),
+    );
+  }
+
+  /// Flush buffered writes to DB in a single batch equivalent
+  Future<void> _flushWriteBuffer() async {
+    if (_writeBuffer.isEmpty) return;
+
+    final pending = List<PendingStep>.from(_writeBuffer);
+    _writeBuffer.clear();
+
+    _log('Flushing ${pending.length} buffered write operations');
+
+    for (final step in pending) {
+      await _logDistributedSteps(
+        step.stepCount,
+        step.fromTime,
+        step.toTime,
+        step.source,
+        confidence: step.confidence,
+      );
+    }
   }
 }

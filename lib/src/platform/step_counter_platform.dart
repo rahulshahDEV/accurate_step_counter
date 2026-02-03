@@ -210,6 +210,21 @@ class StepCounterPlatform {
     }
   }
 
+  /// Check if the device is manufactured by Samsung (Android only)
+  Future<bool> isSamsungDevice() async {
+    if (!Platform.isAndroid) {
+      return false;
+    }
+
+    try {
+      final result = await _channel.invokeMethod<bool>('isSamsungDevice');
+      return result ?? false;
+    } on PlatformException catch (e) {
+      dev.log('Error checking device manufacturer: ${e.message}', error: e);
+      return false;
+    }
+  }
+
   /// Start the foreground service for step counting
   ///
   /// This is used on Android ≤10 where terminated state sync doesn't work reliably.

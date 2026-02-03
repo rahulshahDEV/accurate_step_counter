@@ -13,22 +13,22 @@ This release confirms the package's production readiness after a comprehensive A
 
 ### Verified
 - ✅ **Kotlin Coroutines for I/O Operations**
-  - `getStepCountFromSensorAsync()` runs on `Dispatchers.IO`
-  - `syncStepsFromTerminatedStateAsync()` runs on `Dispatchers.IO`
-  - `resetForegroundStepCount` uses background thread
-  - All heavy operations offloaded from main thread
+-   `getStepCountFromSensorAsync()` runs on `Dispatchers.IO`
+-   `syncStepsFromTerminatedStateAsync()` runs on `Dispatchers.IO`
+-   `resetForegroundStepCount` uses background thread
+-   All heavy operations offloaded from main thread
 
 - ✅ **Async SharedPreferences**
-  - Changed from `commit()` to `apply()` for non-blocking writes
-  - Race conditions handled via in-memory state
+-   Changed from `commit()` to `apply()` for non-blocking writes
+-   Race conditions handled via in-memory state
 
 - ✅ **SQLite Thread Safety**
-  - sqflite handles database operations on background thread
-  - `DatabaseHelper.ensureOpen()` handles cold start reconnection
+-   sqflite handles database operations on background thread
+-   `DatabaseHelper.ensureOpen()` handles cold start reconnection
 
 - ✅ **Sensor Operations**
-  - `NativeStepDetector` uses callback-based sensor events
-  - Non-blocking `delay()` in sensor polling loop
+-   `NativeStepDetector` uses callback-based sensor events
+-   Non-blocking `delay()` in sensor polling loop
 
 ### Technical Details
 | Operation | Thread | Risk Level |
@@ -37,6 +37,90 @@ This release confirms the package's production readiness after a comprehensive A
 | Step count read | `Dispatchers.IO` | ✅ Safe |
 | SharedPreferences write | `apply()` async | ✅ Safe |
 | SQLite operations | sqflite background | ✅ Safe |
+
+---
+
+## [1.9.3] - 2026-02-03
+
+### Added
+- 🧹 **Automatic Log Retention Policy**
+  - Steps logs older than 30 days are now automatically deleted by default.
+  - Configurable via `StepRecordConfig.retentionPeriod` (default: 30 days).
+  - Helps manage app data size over long periods.
+  - Set to `Duration.zero` to keep logs forever.
+- ⚡ **Database Write Batching**
+  - Implemented 3-second write buffer for aggregated mode.
+  - Significantly reduces database I/O and main thread blocking on low-end devices during active use.
+  - Prevents jank when step updates occur rapidly (e.g., running).
+
+- 🧵 **Background Isolate for Database Operations (Optional)**
+  - New `useBackgroundIsolate` configuration option for low-end device optimization.
+  - When enabled, all database operations run in a dedicated Dart isolate, preventing UI thread blocking.
+  - New `StepRecordConfig.lowEndDevice()` preset with isolate enabled by default.
+  - All existing presets can enable isolate via parameter: `StepRecordConfig.aggregated(useBackgroundIsolate: true)`.
+  - Fully backwards compatible - disabled by default.
+
+- 📊 **Stream Emission Throttling**
+  - Added throttling to step count streams (max 10Hz instead of 50Hz).
+  - Reduces excessive UI rebuilds on low-end devices.
+  - Improves battery efficiency during active step counting.
+
+### API Changes
+- `initializeLogging()` now accepts optional `useBackgroundIsolate` parameter.
+- `StepRecordConfig` now has `useBackgroundIsolate` field (default: false).
+- New `StepRecordConfig.lowEndDevice()` preset for budget Android devices.
+- `StepRecordStore` now accepts `useIsolate` parameter in constructor.
+- `StepRecordStore.isUsingIsolate` getter to check current mode.
+
+### Usage Examples
+```dart
+// Option 1: Use the low-end device preset
+await stepCounter.startLogging(config: StepRecordConfig.lowEndDevice());
+
+// Option 2: Enable isolate on any preset
+await stepCounter.startLogging(
+  config: StepRecordConfig.aggregated(useBackgroundIsolate: true),
+);
+
+// Option 3: Enable via copyWith
+await stepCounter.startLogging(
+  config: StepRecordConfig.walking().copyWith(useBackgroundIsolate: true),
+);
+
+// Option 4: Enable at initialization
+await stepCounter.initializeLogging(useBackgroundIsolate: true);
+```
+
+---
+
+## [1.9.2] - 2026-02-03
+
+### 🛡️ Production Hardening: Samsung ANR & Midnight Fixes
+
+This release addresses critical ANR issues on specific devices and improves data accuracy for long-running tracking.
+
+### Fixed
+- 🔥 **Samsung ANR Mitigation (Android 11+)**
+  - **Problem**: Samsung devices on Android 11+ aggressively killed the app when the step counting foreground service was running, causing ANRs.
+  - **Fix**: Implemented native manufacturer check (`isSamsungDevice`).
+  - **Behavior**: Automatically disables the foreground service for Samsung devices on Android 11+, falling back to `TYPE_STEP_COUNTER` sync (which is reliable on these devices) or the `sensors_plus` implementation.
+
+- 🕛 **Midnight Step Distribution**
+  - **Problem**: Steps logged across the midnight boundary (e.g., a walk from 11:50 PM to 12:10 AM) were sometimes attributed entirely to the start day or end day.
+  - **Fix**: Implemented `_logDistributedSteps` logic.
+  - **Result**: Steps are now mathematically split based on time duration in each day (e.g., 50% to Day 1, 50% to Day 2).
+
+- ⚡ **Async Database Logging**
+  - **Problem**: Database writes on the main thread could cause frame drops.
+  - **Fix**: Moved all internal logging mechanisms (`_autoLogSteps`, `_autoLogStepsContinuous`) to fully asynchronous operations with proper `await` handling.
+
+### Removed
+- 📦 **Dependency Reduction**
+  - **Removed `device_info_plus`**: Replaced with a lightweight native Android platform channel implementation for checking device manufacturer. Reduces app size and potential dependency conflicts.
+
+### Verified
+- ✅ **750+ Real-Life Scenarios Passed**: Fuzz testing successfully simulated continuous walking, midnight crossings, and external data imports without errors.
+
 
 ---
 
