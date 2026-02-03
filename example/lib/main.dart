@@ -5,18 +5,41 @@ import 'package:flutter/material.dart';
 import 'package:accurate_step_counter/accurate_step_counter.dart';
 import 'package:permission_handler/permission_handler.dart';
 
+import 'verification_page.dart';
+
 void main() {
-  runApp(const StepCounterTestApp());
+  WidgetsFlutterBinding.ensureInitialized();
+  runApp(const StepCounterApp());
 }
 
-class StepCounterTestApp extends StatefulWidget {
-  const StepCounterTestApp({super.key});
+class StepCounterApp extends StatelessWidget {
+  const StepCounterApp({super.key});
 
   @override
-  State<StepCounterTestApp> createState() => _StepCounterTestAppState();
+  Widget build(BuildContext context) {
+    return MaterialApp(
+      title: 'Accurate Step Counter',
+      debugShowCheckedModeBanner: false,
+      theme: ThemeData(
+        colorScheme: ColorScheme.fromSeed(
+          seedColor: Colors.teal,
+          brightness: Brightness.dark,
+        ),
+        useMaterial3: true,
+      ),
+      home: const StepCounterHomePage(),
+    );
+  }
 }
 
-class _StepCounterTestAppState extends State<StepCounterTestApp>
+class StepCounterHomePage extends StatefulWidget {
+  const StepCounterHomePage({super.key});
+
+  @override
+  State<StepCounterHomePage> createState() => _StepCounterHomePageState();
+}
+
+class _StepCounterHomePageState extends State<StepCounterHomePage>
     with WidgetsBindingObserver {
   final _stepCounter = AccurateStepCounter();
 
@@ -68,58 +91,48 @@ class _StepCounterTestAppState extends State<StepCounterTestApp>
     try {
       _log('Initializing step counter...');
 
-      // Step 1: Initialize logging database
-      await _stepCounter.initializeLogging(debugLogging: true);
-      _log('✓ Database initialized');
-
-      // Step 2: Start step detector with walking config
-      // Set foregroundServiceMaxApiLevel: 32 to enable foreground service on Android 11-12
-      await _stepCounter.start(
-        config: StepDetectorConfig.walking().copyWith(
-          foregroundServiceMaxApiLevel:
-              32, // Enable foreground service with sensors_plus on Android 11/12
-        ),
-      );
-      _log('✓ Step detector started (sensors_plus on API ≤32)');
+      // Simple one-line initialization with debug logging
+      await _stepCounter.initSteps(debugLogging: true);
+      _log('✓ Step counter initialized');
 
       // Check detector type
       final isHardware = await _stepCounter.isUsingNativeDetector();
       setState(() => _detectorType = isHardware ? 'Hardware' : 'Accelerometer');
       _log('Detector type: $_detectorType');
 
-      // Step 3: Start logging with aggregated mode (no warmup by default)
-      // This loads today's steps from DB and starts continuous logging
-      await _stepCounter.startLogging(config: StepRecordConfig.aggregated());
-      _log('✓ Logging started (aggregated mode, no warmup)');
-
-      // Step 4: Subscribe to streams IMMEDIATELY after startLogging
-      // This ensures we catch the initial value from watchAggregatedStepCounter
-      _log('Setting up streams...');
-
-      // Aggregated count (stored + live) - Subscribe FIRST to catch initial value
+      // Subscribe to aggregated count stream (stored + live steps)
       _aggregatedSubscription = _stepCounter
           .watchAggregatedStepCounter()
-          .listen((steps) {
-            dev.log('AGGREGATED: $steps');
-            _log('AGGREGATED: $steps steps');
-            setState(() => _aggregatedCount = steps);
-          }, onError: (e) => _log('Aggregated stream error: $e'));
+          .listen(
+            (steps) {
+              dev.log('AGGREGATED: $steps');
+              _log('AGGREGATED: $steps steps');
+              setState(() => _aggregatedCount = steps);
+            },
+            onError: (e) => _log('Aggregated stream error: $e'),
+          );
       _log('✓ watchAggregatedStepCounter subscribed');
 
-      // DB total for today
-      _todaySubscription = _stepCounter.watchTodaySteps().listen((steps) {
-        dev.log('DB TOTAL: $steps');
-        setState(() => _todaySteps = steps);
-        _updateSourceStats();
-      }, onError: (e) => _log('Today stream error: $e'));
+      // Subscribe to DB total for today
+      _todaySubscription = _stepCounter.watchTodaySteps().listen(
+        (steps) {
+          dev.log('DB TOTAL: $steps');
+          setState(() => _todaySteps = steps);
+          _updateSourceStats();
+        },
+        onError: (e) => _log('Today stream error: $e'),
+      );
       _log('✓ watchTodaySteps subscribed');
 
-      // Raw step events from native detector
-      _stepSubscription = _stepCounter.stepEventStream.listen((event) {
-        dev.log('RAW STEP EVENT: ${event.stepCount}');
-        _log('RAW: ${event.stepCount} steps');
-        setState(() => _liveStepCount = event.stepCount);
-      }, onError: (e) => _log('Step stream error: $e'));
+      // Subscribe to raw step events from detector
+      _stepSubscription = _stepCounter.stepEventStream.listen(
+        (event) {
+          dev.log('RAW STEP EVENT: ${event.stepCount}');
+          _log('RAW: ${event.stepCount} steps');
+          setState(() => _liveStepCount = event.stepCount);
+        },
+        onError: (e) => _log('Step stream error: $e'),
+      );
       _log('✓ stepEventStream subscribed');
 
       // Terminated steps callback
@@ -128,8 +141,9 @@ class _StepCounterTestAppState extends State<StepCounterTestApp>
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(
-              content: Text('Synced $steps missed steps!'),
+              content: Text('Synced $steps missed steps from terminated state!'),
               backgroundColor: Colors.orange,
+              duration: const Duration(seconds: 3),
             ),
           );
         }
@@ -147,10 +161,17 @@ class _StepCounterTestAppState extends State<StepCounterTestApp>
 
       // Cleanup on error
       setState(() => _isInitialized = false);
-      await _stepSubscription?.cancel();
-      await _aggregatedSubscription?.cancel();
-      await _todaySubscription?.cancel();
+      await _cleanupStreams();
     }
+  }
+
+  Future<void> _cleanupStreams() async {
+    await _stepSubscription?.cancel();
+    await _aggregatedSubscription?.cancel();
+    await _todaySubscription?.cancel();
+    _stepSubscription = null;
+    _aggregatedSubscription = null;
+    _todaySubscription = null;
   }
 
   Future<void> _refreshData() async {
@@ -190,7 +211,7 @@ class _StepCounterTestAppState extends State<StepCounterTestApp>
     final now = DateTime.now();
     final time =
         '${now.hour.toString().padLeft(2, '0')}:${now.minute.toString().padLeft(2, '0')}:${now.second.toString().padLeft(2, '0')}';
-    dev.log('[StepTest] $message');
+    dev.log('[StepCounter] $message');
     setState(() {
       _logMessages.insert(0, '[$time] $message');
       if (_logMessages.length > 100) _logMessages.removeLast();
@@ -225,225 +246,261 @@ class _StepCounterTestAppState extends State<StepCounterTestApp>
     }
   }
 
+  Future<void> _openVerificationPage() async {
+    await Navigator.push(
+      context,
+      MaterialPageRoute(builder: (context) => const VerificationPage()),
+    );
+  }
+
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
-    _todaySubscription?.cancel();
-    _aggregatedSubscription?.cancel();
-    _stepSubscription?.cancel();
+    _cleanupStreams();
     _stepCounter.dispose();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
-    return MaterialApp(
-      title: 'Step Counter Debug',
-      theme: ThemeData(
-        colorScheme: ColorScheme.fromSeed(
-          seedColor: Colors.teal,
-          brightness: Brightness.dark,
-        ),
-        useMaterial3: true,
-      ),
-      home: Scaffold(
-        appBar: AppBar(
-          title: const Text('Step Counter Debug'),
-          actions: [
-            Chip(
-              label: Text(_appState),
-              backgroundColor: _appState == 'resumed'
-                  ? Colors.green
-                  : Colors.orange,
-            ),
-            const SizedBox(width: 8),
-          ],
-        ),
-        body: SingleChildScrollView(
-          padding: const EdgeInsets.all(16),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              // Status Card
-              Card(
-                color: _hasPermission
-                    ? Colors.green.shade900
-                    : Colors.red.shade900,
-                child: Padding(
-                  padding: const EdgeInsets.all(12),
-                  child: Column(
-                    children: [
-                      Text(
-                        _hasPermission
-                            ? '✓ Permission Granted'
-                            : '✗ Permission DENIED',
-                        style: const TextStyle(
-                          fontSize: 16,
-                          fontWeight: FontWeight.bold,
-                        ),
-                      ),
-                      Text('Detector: $_detectorType'),
-                      Text(
-                        'Status: ${_isInitialized ? 'Active' : 'Initializing...'}',
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-              const SizedBox(height: 16),
-
-              // Main Stats
-              Card(
-                child: Padding(
-                  padding: const EdgeInsets.all(16),
-                  child: Column(
-                    children: [
-                      Row(
-                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                        children: [
-                          const Text(
-                            'Aggregated\n(stored+live)',
-                            style: TextStyle(fontSize: 14),
-                          ),
-                          Text(
-                            '$_aggregatedCount',
-                            style: const TextStyle(
-                              fontSize: 56,
-                              fontWeight: FontWeight.bold,
-                              color: Colors.tealAccent,
-                            ),
-                          ),
-                        ],
-                      ),
-                      const Divider(),
-                      Row(
-                        mainAxisAlignment: MainAxisAlignment.spaceAround,
-                        children: [
-                          _buildMiniStat('DB Total', '$_todaySteps'),
-                          _buildMiniStat('Live', '$_liveStepCount'),
-                          _buildMiniStat('FG', '$_fgSteps', Colors.green),
-                          _buildMiniStat('BG', '$_bgSteps', Colors.orange),
-                          _buildMiniStat('Term', '$_termSteps', Colors.red),
-                        ],
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-              const SizedBox(height: 16),
-
-              // Action Buttons
-              Row(
-                children: [
-                  Expanded(
-                    child: ElevatedButton.icon(
-                      onPressed: _refreshData,
-                      icon: const Icon(Icons.refresh),
-                      label: const Text('Refresh'),
-                    ),
-                  ),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: ElevatedButton.icon(
-                      onPressed: _addTestSteps,
-                      icon: const Icon(Icons.add),
-                      label: const Text('+10 Steps'),
-                    ),
-                  ),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: ElevatedButton.icon(
-                      onPressed: _clearAllData,
-                      icon: const Icon(Icons.delete),
-                      label: const Text('Clear'),
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: Colors.red[700],
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 16),
-
-              // Step Logs (new widget)
-              Card(
-                child: Padding(
-                  padding: const EdgeInsets.all(12),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      const Text(
-                        'Step Logs (Database):',
-                        style: TextStyle(fontWeight: FontWeight.bold),
-                      ),
-                      const SizedBox(height: 8),
-                      if (_isInitialized)
-                        StepLogsViewer(
-                          stepCounter: _stepCounter,
-                          maxHeight: 200,
-                          showFilters: true,
-                          showExportButton: true,
-                          showDatePicker: false,
-                        )
-                      else
-                        const Center(
-                          child: Padding(
-                            padding: EdgeInsets.all(16),
-                            child: Text('Initializing...'),
-                          ),
-                        ),
-                    ],
-                  ),
-                ),
-              ),
-              const SizedBox(height: 16),
-
-              // Debug Log (raw events)
-              Card(
-                child: Padding(
-                  padding: const EdgeInsets.all(12),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      const Text(
-                        'Debug Log (Raw Events):',
-                        style: TextStyle(fontWeight: FontWeight.bold),
-                      ),
-                      const SizedBox(height: 8),
-                      Container(
-                        height: 200,
-                        decoration: BoxDecoration(
-                          color: Colors.black,
-                          borderRadius: BorderRadius.circular(8),
-                        ),
-                        child: ListView.builder(
-                          padding: const EdgeInsets.all(8),
-                          itemCount: _logMessages.length,
-                          itemBuilder: (context, index) {
-                            final msg = _logMessages[index];
-                            Color color = Colors.greenAccent;
-                            if (msg.contains('ERROR')) color = Colors.red;
-                            if (msg.contains('RAW:')) color = Colors.yellow;
-                            if (msg.contains('AGGREGATED:')) {
-                              color = Colors.cyan;
-                            }
-                            return Text(
-                              msg,
-                              style: TextStyle(
-                                fontFamily: 'monospace',
-                                fontSize: 10,
-                                color: color,
-                              ),
-                            );
-                          },
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-            ],
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Accurate Step Counter'),
+        actions: [
+          Chip(
+            label: Text(_appState),
+            backgroundColor:
+                _appState == 'resumed' ? Colors.green : Colors.orange,
           ),
+          const SizedBox(width: 8),
+          IconButton(
+            onPressed: _openVerificationPage,
+            icon: const Icon(Icons.verified),
+            tooltip: 'Setup Verification',
+          ),
+        ],
+      ),
+      body: SingleChildScrollView(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            // Status Card
+            Card(
+              color:
+                  _hasPermission ? Colors.green.shade900 : Colors.red.shade900,
+              child: Padding(
+                padding: const EdgeInsets.all(12),
+                child: Column(
+                  children: [
+                    Text(
+                      _hasPermission
+                          ? '✓ Permission Granted'
+                          : '✗ Permission DENIED',
+                      style: const TextStyle(
+                        fontSize: 16,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                    Text('Detector: $_detectorType'),
+                    Text(
+                      'Status: ${_isInitialized ? 'Active' : 'Initializing...'}',
+                    ),
+                  ],
+                ),
+              ),
+            ),
+            const SizedBox(height: 16),
+
+            // Main Stats - Aggregated Count
+            Card(
+              color: Colors.teal.shade900,
+              child: Padding(
+                padding: const EdgeInsets.all(24),
+                child: Column(
+                  children: [
+                    const Text(
+                      'Today\'s Steps',
+                      style: TextStyle(
+                        fontSize: 18,
+                        fontWeight: FontWeight.w500,
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    Text(
+                      '$_aggregatedCount',
+                      style: const TextStyle(
+                        fontSize: 72,
+                        fontWeight: FontWeight.bold,
+                        color: Colors.tealAccent,
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    const Text(
+                      'Aggregated (Stored + Live)',
+                      style: TextStyle(fontSize: 12, color: Colors.grey),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+            const SizedBox(height: 16),
+
+            // Source Breakdown
+            Card(
+              child: Padding(
+                padding: const EdgeInsets.all(16),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text(
+                      'Steps by Source',
+                      style: TextStyle(fontWeight: FontWeight.bold),
+                    ),
+                    const SizedBox(height: 12),
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceAround,
+                      children: [
+                        _buildMiniStat('Database', '$_todaySteps', Colors.blue),
+                        _buildMiniStat('Live', '$_liveStepCount', Colors.purple),
+                        _buildMiniStat('FG', '$_fgSteps', Colors.green),
+                        _buildMiniStat('BG', '$_bgSteps', Colors.orange),
+                        _buildMiniStat('Term', '$_termSteps', Colors.red),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+            ),
+            const SizedBox(height: 16),
+
+            // Action Buttons
+            Row(
+              children: [
+                Expanded(
+                  child: ElevatedButton.icon(
+                    onPressed: _refreshData,
+                    icon: const Icon(Icons.refresh),
+                    label: const Text('Refresh'),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: ElevatedButton.icon(
+                    onPressed: _addTestSteps,
+                    icon: const Icon(Icons.add),
+                    label: const Text('+10 Steps'),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: ElevatedButton.icon(
+                    onPressed: _clearAllData,
+                    icon: const Icon(Icons.delete),
+                    label: const Text('Clear'),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: Colors.red[700],
+                    ),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            ElevatedButton.icon(
+              onPressed: _openVerificationPage,
+              icon: const Icon(Icons.verified_user),
+              label: const Text('Run Setup Verification'),
+              style: ElevatedButton.styleFrom(
+                minimumSize: const Size(double.infinity, 48),
+              ),
+            ),
+            const SizedBox(height: 16),
+
+            // Step Logs Viewer
+            Card(
+              child: Padding(
+                padding: const EdgeInsets.all(12),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text(
+                      'Step Logs (Database):',
+                      style: TextStyle(fontWeight: FontWeight.bold),
+                    ),
+                    const SizedBox(height: 8),
+                    if (_isInitialized)
+                      StepLogsViewer(
+                        stepCounter: _stepCounter,
+                        maxHeight: 200,
+                        showFilters: true,
+                        showExportButton: true,
+                        showDatePicker: false,
+                      )
+                    else
+                      const Center(
+                        child: Padding(
+                          padding: EdgeInsets.all(16),
+                          child: Text('Initializing...'),
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+            ),
+            const SizedBox(height: 16),
+
+            // Debug Log
+            Card(
+              child: Padding(
+                padding: const EdgeInsets.all(12),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        const Text(
+                          'Debug Log:',
+                          style: TextStyle(fontWeight: FontWeight.bold),
+                        ),
+                        TextButton(
+                          onPressed: () => setState(() => _logMessages.clear()),
+                          child: const Text('Clear'),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 8),
+                    Container(
+                      height: 200,
+                      decoration: BoxDecoration(
+                        color: Colors.black,
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                      child: ListView.builder(
+                        padding: const EdgeInsets.all(8),
+                        itemCount: _logMessages.length,
+                        itemBuilder: (context, index) {
+                          final msg = _logMessages[index];
+                          Color color = Colors.greenAccent;
+                          if (msg.contains('ERROR')) color = Colors.red;
+                          if (msg.contains('RAW:')) color = Colors.yellow;
+                          if (msg.contains('AGGREGATED:')) color = Colors.cyan;
+                          return Text(
+                            msg,
+                            style: TextStyle(
+                              fontFamily: 'monospace',
+                              fontSize: 10,
+                              color: color,
+                            ),
+                          );
+                        },
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ],
         ),
       ),
     );
@@ -454,12 +511,13 @@ class _StepCounterTestAppState extends State<StepCounterTestApp>
       children: [
         Text(
           label,
-          style: TextStyle(fontSize: 10, color: color ?? Colors.grey),
+          style: TextStyle(fontSize: 11, color: color ?? Colors.grey),
         ),
+        const SizedBox(height: 4),
         Text(
           value,
           style: TextStyle(
-            fontSize: 16,
+            fontSize: 18,
             color: color,
             fontWeight: FontWeight.bold,
           ),

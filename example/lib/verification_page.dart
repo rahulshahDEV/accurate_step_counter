@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:accurate_step_counter/accurate_step_counter.dart';
 import 'package:permission_handler/permission_handler.dart';
@@ -127,7 +128,7 @@ class _VerificationPageState extends State<VerificationPage> {
   Future<VerificationResult> _startStepCounter() async {
     try {
       await _stepCounter.start(
-        config: StepDetectorConfig(
+        config: StepDetectorConfig.walking().copyWith(
           enableOsLevelSync: true,
           useForegroundServiceOnOldDevices: true,
         ),
@@ -163,11 +164,11 @@ class _VerificationPageState extends State<VerificationPage> {
 
   Future<VerificationResult> _enableLogging() async {
     try {
-      await _stepCounter.startLogging(config: StepRecordConfig.walking());
+      await _stepCounter.startLogging(config: StepRecordConfig.aggregated());
 
       if (_stepCounter.isLoggingEnabled) {
         return VerificationResult.success(
-          'Step logging enabled with walking preset',
+          'Step logging enabled with aggregated mode',
         );
       } else {
         return VerificationResult.failure('Failed to enable logging');
@@ -243,29 +244,30 @@ class _VerificationPageState extends State<VerificationPage> {
   void _showSuccessDialog() {
     showDialog(
       context: context,
-      builder: (context) => AlertDialog(
-        title: const Row(
-          children: [
-            Icon(Icons.check_circle, color: Colors.green, size: 32),
-            SizedBox(width: 12),
-            Text('Setup Complete!'),
-          ],
-        ),
-        content: const Text(
-          'All verification checks passed. Your step counter is ready for testing!\n\n'
-          'You can now:\n'
-          '• Test real-time step counting\n'
-          '• Try background mode\n'
-          '• Test terminated state recovery\n'
-          '• View comprehensive scenarios in TESTING_SCENARIOS.md',
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(context).pop(),
-            child: const Text('Start Testing'),
+      builder:
+          (context) => AlertDialog(
+            title: const Row(
+              children: [
+                Icon(Icons.check_circle, color: Colors.green, size: 32),
+                SizedBox(width: 12),
+                Text('Setup Complete!'),
+              ],
+            ),
+            content: const Text(
+              'All verification checks passed. Your step counter is ready for testing!\n\n'
+              'You can now:\n'
+              '• Test real-time step counting\n'
+              '• Try background mode\n'
+              '• Test terminated state recovery\n'
+              '• View step logs in the main app',
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.of(context).pop(),
+                child: const Text('Start Testing'),
+              ),
+            ],
           ),
-        ],
-      ),
     );
   }
 
@@ -319,13 +321,14 @@ class _VerificationPageState extends State<VerificationPage> {
               height: 50,
               child: ElevatedButton.icon(
                 onPressed: _isRunning ? null : _runVerification,
-                icon: _isRunning
-                    ? const SizedBox(
-                        width: 20,
-                        height: 20,
-                        child: CircularProgressIndicator(strokeWidth: 2),
-                      )
-                    : const Icon(Icons.play_arrow),
+                icon:
+                    _isRunning
+                        ? const SizedBox(
+                          width: 20,
+                          height: 20,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                        : const Icon(Icons.play_arrow),
                 label: Text(
                   _isRunning ? 'Running Verification...' : 'Run Verification',
                   style: const TextStyle(fontSize: 16),
@@ -517,15 +520,15 @@ class VerificationResult {
   final VerificationStatus status;
   final String message;
 
-  VerificationResult.success(this.message)
-    : status = VerificationStatus.success;
-  VerificationResult.warning(this.message)
-    : status = VerificationStatus.warning;
-  VerificationResult.failure(this.message)
-    : status = VerificationStatus.failure;
+  VerificationResult.success(this.message) : status = VerificationStatus.success;
+  VerificationResult.warning(this.message) : status = VerificationStatus.warning;
+  VerificationResult.failure(this.message) : status = VerificationStatus.failure;
 }
 
 class TimeoutException implements Exception {
   final String message;
   TimeoutException(this.message);
+  
+  @override
+  String toString() => 'TimeoutException: $message';
 }
