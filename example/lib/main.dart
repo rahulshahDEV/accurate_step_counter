@@ -6,6 +6,7 @@ import 'package:accurate_step_counter/accurate_step_counter.dart';
 import 'package:permission_handler/permission_handler.dart';
 
 import 'verification_page.dart';
+import 'warmup_test_page.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -253,6 +254,13 @@ class _StepCounterHomePageState extends State<StepCounterHomePage>
     );
   }
 
+  Future<void> _openWarmupTestPage() async {
+    await Navigator.push(
+      context,
+      MaterialPageRoute(builder: (context) => const WarmupTestPage()),
+    );
+  }
+
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
@@ -412,6 +420,16 @@ class _StepCounterHomePageState extends State<StepCounterHomePage>
               label: const Text('Run Setup Verification'),
               style: ElevatedButton.styleFrom(
                 minimumSize: const Size(double.infinity, 48),
+              ),
+            ),
+            const SizedBox(height: 8),
+            ElevatedButton.icon(
+              onPressed: _openWarmupTestPage,
+              icon: const Icon(Icons.timer),
+              label: const Text('Test Warmup Validation'),
+              style: ElevatedButton.styleFrom(
+                minimumSize: const Size(double.infinity, 48),
+                backgroundColor: Colors.orange.shade800,
               ),
             ),
             const SizedBox(height: 16),
