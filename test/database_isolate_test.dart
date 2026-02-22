@@ -1,5 +1,4 @@
 import 'package:flutter_test/flutter_test.dart';
-import 'package:accurate_step_counter/accurate_step_counter.dart';
 import 'package:accurate_step_counter/src/services/database_isolate.dart';
 
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
@@ -26,11 +25,10 @@ void main() {
 
   group('DatabaseRequest serialization', () {
     test('toMap and fromMap work correctly', () {
-      final request = DatabaseRequest(
-        42,
-        DatabaseMessageType.insert,
-        {'step_count': 100, 'from_time': 12345},
-      );
+      final request = DatabaseRequest(42, DatabaseMessageType.insert, {
+        'step_count': 100,
+        'from_time': 12345,
+      });
 
       final map = request.toMap();
       expect(map['id'], 42);
@@ -104,12 +102,30 @@ void main() {
     test('all expected message types exist', () {
       expect(DatabaseMessageType.values, contains(DatabaseMessageType.insert));
       expect(DatabaseMessageType.values, contains(DatabaseMessageType.query));
-      expect(DatabaseMessageType.values, contains(DatabaseMessageType.hasDuplicate));
-      expect(DatabaseMessageType.values, contains(DatabaseMessageType.hasOverlapping));
-      expect(DatabaseMessageType.values, contains(DatabaseMessageType.deleteBefore));
-      expect(DatabaseMessageType.values, contains(DatabaseMessageType.deleteAll));
-      expect(DatabaseMessageType.values, contains(DatabaseMessageType.readTotal));
-      expect(DatabaseMessageType.values, contains(DatabaseMessageType.getCount));
+      expect(
+        DatabaseMessageType.values,
+        contains(DatabaseMessageType.hasDuplicate),
+      );
+      expect(
+        DatabaseMessageType.values,
+        contains(DatabaseMessageType.hasOverlapping),
+      );
+      expect(
+        DatabaseMessageType.values,
+        contains(DatabaseMessageType.deleteBefore),
+      );
+      expect(
+        DatabaseMessageType.values,
+        contains(DatabaseMessageType.deleteAll),
+      );
+      expect(
+        DatabaseMessageType.values,
+        contains(DatabaseMessageType.readTotal),
+      );
+      expect(
+        DatabaseMessageType.values,
+        contains(DatabaseMessageType.getCount),
+      );
       expect(DatabaseMessageType.values, contains(DatabaseMessageType.close));
     });
   });
@@ -118,13 +134,18 @@ void main() {
   // the databaseFactoryFfi from the main isolate. The isolate creates its
   // own database connection which doesn't have access to the FFI factory.
   // These would work on a real device but not in unit tests.
-  group('DatabaseIsolateService operations', () {
-    test('initialize spawns isolate', () {
-      // Would test: await service.initialize(); expect(service.isInitialized, isTrue);
-    });
+  group(
+    'DatabaseIsolateService operations',
+    () {
+      test('initialize spawns isolate', () {
+        // Would test: await service.initialize(); expect(service.isInitialized, isTrue);
+      });
 
-    test('insert and query records', () {
-      // Would test actual database operations via isolate
-    });
-  }, skip: 'Isolate tests require real device - isolates cannot share FFI database factory');
+      test('insert and query records', () {
+        // Would test actual database operations via isolate
+      });
+    },
+    skip:
+        'Isolate tests require real device - isolates cannot share FFI database factory',
+  );
 }

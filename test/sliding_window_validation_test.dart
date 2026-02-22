@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:accurate_step_counter/accurate_step_counter.dart';
@@ -259,14 +260,14 @@ void main() {
             rejectedCount++;
           } else {
             // Debug info if failure
-            print('FAILED Shake #$i: Logged $total steps instead of 0');
+            debugPrint('FAILED Shake #$i: Logged $total steps instead of 0');
           }
           expect(total, 0, reason: 'Iteration $i (Shake): Should have 0 steps');
         } else {
           if (total > 0) {
             passedCount++;
           } else {
-            print('FAILED Walk #$i: Logged 0 steps');
+            debugPrint('FAILED Walk #$i: Logged 0 steps');
           }
           // We expect some steps. Since warmup is 3s, first ~3s steps (buffer) are logged once validated.
           // 10 steps * 0.5s = 5s total.
@@ -280,9 +281,9 @@ void main() {
         }
       }
 
-      print('Stress Test Summary:');
-      print('  Walks Passed: $passedCount / 150');
-      print('  Shakes Rejected: $rejectedCount / 150');
+      debugPrint('Stress Test Summary:');
+      debugPrint('  Walks Passed: $passedCount / 150');
+      debugPrint('  Shakes Rejected: $rejectedCount / 150');
 
       expect(passedCount, 150);
       expect(rejectedCount, 150);

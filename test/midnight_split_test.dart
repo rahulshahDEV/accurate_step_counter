@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:accurate_step_counter/accurate_step_counter.dart';
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
@@ -80,8 +81,12 @@ void main() {
       final rec1 = logs[0];
       final rec2 = logs[1];
 
-      print('Rec1: ${rec1.fromTime} -> ${rec1.toTime} (${rec1.stepCount})');
-      print('Rec2: ${rec2.fromTime} -> ${rec2.toTime} (${rec2.stepCount})');
+      debugPrint(
+        'Rec1: ${rec1.fromTime} -> ${rec1.toTime} (${rec1.stepCount})',
+      );
+      debugPrint(
+        'Rec2: ${rec2.fromTime} -> ${rec2.toTime} (${rec2.stepCount})',
+      );
 
       // Verify Record 1
       expect(rec1.stepCount, 60);

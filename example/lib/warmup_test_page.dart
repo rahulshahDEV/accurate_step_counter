@@ -33,10 +33,9 @@ class _WarmupTestPageState extends State<WarmupTestPage>
   bool _isInWarmup = false;
   int _warmupSteps = 0;
   int _validatedSteps = 0;
-  int _rejectedSteps = 0;
-  int _warmupDurationMs = 5000; // 5 seconds
-  int _minStepsToValidate = 8;
-  double _maxStepsPerSecond = 3.0;
+  final int _warmupDurationMs = 5000; // 5 seconds
+  final int _minStepsToValidate = 8;
+  final double _maxStepsPerSecond = 3.0;
 
   // UI state
   late AnimationController _pulseController;
@@ -112,7 +111,6 @@ class _WarmupTestPageState extends State<WarmupTestPage>
 
       // Start warmup timer
       _startWarmupTimer();
-
     } catch (e) {
       _log('ERROR: $e');
     }
@@ -180,7 +178,6 @@ class _WarmupTestPageState extends State<WarmupTestPage>
     setState(() {
       _warmupSteps = 0;
       _validatedSteps = 0;
-      _rejectedSteps = 0;
       _warmupElapsedMs = 0;
     });
 
@@ -521,7 +518,8 @@ class _WarmupTestPageState extends State<WarmupTestPage>
                         itemCount: _logMessages.length,
                         reverse: true,
                         itemBuilder: (context, index) {
-                          final msg = _logMessages[_logMessages.length - 1 - index];
+                          final msg =
+                              _logMessages[_logMessages.length - 1 - index];
                           Color color = Colors.greenAccent;
                           if (msg.contains('ERROR')) color = Colors.red;
                           if (msg.contains('Warmup')) color = Colors.orange;
@@ -547,7 +545,8 @@ class _WarmupTestPageState extends State<WarmupTestPage>
     );
   }
 
-  Widget _buildStatCard(String label, String value, Color color, IconData icon) {
+  Widget _buildStatCard(
+      String label, String value, Color color, IconData icon) {
     return Card(
       child: Padding(
         padding: const EdgeInsets.all(16),

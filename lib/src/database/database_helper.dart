@@ -9,7 +9,7 @@ import 'package:sqflite/sqflite.dart';
 /// schema creation, and connection management for Android cold starts.
 class DatabaseHelper {
   static const String _databaseName = 'accurate_step_counter.db';
-  static const int _databaseVersion = 1;
+  static const int _databaseVersion = 2;
 
   // Singleton instance
   static DatabaseHelper? _instance;
@@ -111,7 +111,8 @@ class DatabaseHelper {
         from_time INTEGER NOT NULL,
         to_time INTEGER NOT NULL,
         source INTEGER NOT NULL,
-        confidence REAL
+        confidence REAL,
+        idempotency_key TEXT
       )
     ''');
 
@@ -122,6 +123,12 @@ class DatabaseHelper {
 
     await db.execute('''
       CREATE INDEX idx_step_records_source ON step_records(source)
+    ''');
+
+    await db.execute('''
+      CREATE UNIQUE INDEX idx_step_records_idempotency
+      ON step_records(idempotency_key)
+      WHERE idempotency_key IS NOT NULL
     ''');
 
     // Step logs table (deprecated, for backwards compatibility)
@@ -148,11 +155,16 @@ class DatabaseHelper {
 
   /// Handle database upgrades
   Future<void> _onUpgrade(Database db, int oldVersion, int newVersion) async {
-    // Future migrations go here
-    // Example:
-    // if (oldVersion < 2) {
-    //   await db.execute('ALTER TABLE step_records ADD COLUMN new_field TEXT');
-    // }
+    if (oldVersion < 2) {
+      await db.execute(
+        'ALTER TABLE step_records ADD COLUMN idempotency_key TEXT',
+      );
+      await db.execute('''
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_step_records_idempotency
+        ON step_records(idempotency_key)
+        WHERE idempotency_key IS NOT NULL
+      ''');
+    }
   }
 
   /// Ensure the database is open

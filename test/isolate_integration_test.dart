@@ -1,6 +1,5 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:accurate_step_counter/accurate_step_counter.dart';
-import 'package:accurate_step_counter/src/services/step_record_store.dart';
 import 'package:accurate_step_counter/src/database/database_helper.dart';
 
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
@@ -52,12 +51,14 @@ void main() {
     test('insert and read records works without isolate', () async {
       final now = DateTime.now().toUtc();
 
-      await store.insertRecord(StepRecord(
-        stepCount: 100,
-        fromTime: now.subtract(const Duration(hours: 1)),
-        toTime: now,
-        source: StepRecordSource.foreground,
-      ));
+      await store.insertRecord(
+        StepRecord(
+          stepCount: 100,
+          fromTime: now.subtract(const Duration(hours: 1)),
+          toTime: now,
+          source: StepRecordSource.foreground,
+        ),
+      );
 
       final records = await store.readRecords();
       expect(records.length, 1);
@@ -67,19 +68,23 @@ void main() {
     test('readTotalSteps works without isolate', () async {
       final now = DateTime.now().toUtc();
 
-      await store.insertRecord(StepRecord(
-        stepCount: 100,
-        fromTime: now.subtract(const Duration(hours: 2)),
-        toTime: now.subtract(const Duration(hours: 1)),
-        source: StepRecordSource.foreground,
-      ));
+      await store.insertRecord(
+        StepRecord(
+          stepCount: 100,
+          fromTime: now.subtract(const Duration(hours: 2)),
+          toTime: now.subtract(const Duration(hours: 1)),
+          source: StepRecordSource.foreground,
+        ),
+      );
 
-      await store.insertRecord(StepRecord(
-        stepCount: 200,
-        fromTime: now.subtract(const Duration(hours: 1)),
-        toTime: now,
-        source: StepRecordSource.foreground,
-      ));
+      await store.insertRecord(
+        StepRecord(
+          stepCount: 200,
+          fromTime: now.subtract(const Duration(hours: 1)),
+          toTime: now,
+          source: StepRecordSource.foreground,
+        ),
+      );
 
       final total = await store.readTotalSteps();
       expect(total, 300);
@@ -103,15 +108,21 @@ void main() {
 
     test('presets can enable isolate via parameter', () {
       expect(
-        StepRecordConfig.walking(useBackgroundIsolate: true).useBackgroundIsolate,
+        StepRecordConfig.walking(
+          useBackgroundIsolate: true,
+        ).useBackgroundIsolate,
         isTrue,
       );
       expect(
-        StepRecordConfig.running(useBackgroundIsolate: true).useBackgroundIsolate,
+        StepRecordConfig.running(
+          useBackgroundIsolate: true,
+        ).useBackgroundIsolate,
         isTrue,
       );
       expect(
-        StepRecordConfig.aggregated(useBackgroundIsolate: true).useBackgroundIsolate,
+        StepRecordConfig.aggregated(
+          useBackgroundIsolate: true,
+        ).useBackgroundIsolate,
         isTrue,
       );
     });
@@ -161,10 +172,13 @@ void main() {
       expect(stepCounter.isLoggingInitialized, isTrue);
     });
 
-    test('initializeLogging without parameters uses default (no isolate)', () async {
-      await stepCounter.initializeLogging();
-      expect(stepCounter.isLoggingInitialized, isTrue);
-    });
+    test(
+      'initializeLogging without parameters uses default (no isolate)',
+      () async {
+        await stepCounter.initializeLogging();
+        expect(stepCounter.isLoggingInitialized, isTrue);
+      },
+    );
   });
 
   group('AccurateStepCounter without isolate mode', () {
@@ -299,10 +313,15 @@ void main() {
   // the databaseFactoryFfi from the main isolate. The isolate creates its
   // own database connection which doesn't have access to the FFI factory.
   // These would work on a real device but not in unit tests.
-  group('AccurateStepCounter with isolate mode (skipped in tests)', () {
-    test('initializeLogging with isolate works on real device', () {
-      // This test demonstrates the API but cannot run in unit tests
-      // because isolates don't share the FFI database factory
-    });
-  }, skip: 'Isolate tests require real device - isolates cannot share FFI database factory');
+  group(
+    'AccurateStepCounter with isolate mode (skipped in tests)',
+    () {
+      test('initializeLogging with isolate works on real device', () {
+        // This test demonstrates the API but cannot run in unit tests
+        // because isolates don't share the FFI database factory
+      });
+    },
+    skip:
+        'Isolate tests require real device - isolates cannot share FFI database factory',
+  );
 }

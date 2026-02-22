@@ -45,11 +45,7 @@ class DatabaseRequest {
 
   DatabaseRequest(this.id, this.type, this.data);
 
-  Map<String, dynamic> toMap() => {
-        'id': id,
-        'type': type.index,
-        'data': data,
-      };
+  Map<String, dynamic> toMap() => {'id': id, 'type': type.index, 'data': data};
 
   static DatabaseRequest fromMap(Map<String, dynamic> map) {
     return DatabaseRequest(
@@ -70,11 +66,11 @@ class DatabaseResponse {
   DatabaseResponse(this.id, this.success, this.result, [this.error]);
 
   Map<String, dynamic> toMap() => {
-        'id': id,
-        'success': success,
-        'result': result,
-        'error': error,
-      };
+    'id': id,
+    'success': success,
+    'result': result,
+    'error': error,
+  };
 
   static DatabaseResponse fromMap(Map<String, dynamic> map) {
     return DatabaseResponse(
@@ -108,7 +104,7 @@ class DatabaseResponse {
 class DatabaseIsolateService {
   static const String _tableName = 'step_records';
   static const String _databaseName = 'accurate_step_counter.db';
-  static const int _databaseVersion = 1;
+  static const int _databaseVersion = 2;
 
   Isolate? _isolate;
   SendPort? _sendPort;
@@ -134,10 +130,7 @@ class DatabaseIsolateService {
     _receivePort = ReceivePort();
 
     // Spawn the isolate with our entry point
-    _isolate = await Isolate.spawn(
-      _isolateEntryPoint,
-      _receivePort!.sendPort,
-    );
+    _isolate = await Isolate.spawn(_isolateEntryPoint, _receivePort!.sendPort);
 
     // Wait for the isolate to send its SendPort
     final completer = Completer<SendPort>();
@@ -194,8 +187,8 @@ class DatabaseIsolateService {
   }
 
   /// Insert a step record
-  Future<void> insertRecord(StepRecord record) async {
-    await _sendRequest<void>(DatabaseMessageType.insert, record.toMap());
+  Future<bool> insertRecord(StepRecord record) async {
+    return _sendRequest<bool>(DatabaseMessageType.insert, record.toMap());
   }
 
   /// Check for duplicate records
@@ -230,11 +223,12 @@ class DatabaseIsolateService {
     DateTime? to,
     StepRecordSource? source,
   }) async {
-    final result = await _sendRequest<List<dynamic>>(DatabaseMessageType.query, {
-      if (from != null) 'from': from.toUtc().millisecondsSinceEpoch,
-      if (to != null) 'to': to.toUtc().millisecondsSinceEpoch,
-      if (source != null) 'source': source.index,
-    });
+    final result =
+        await _sendRequest<List<dynamic>>(DatabaseMessageType.query, {
+          if (from != null) 'from': from.toUtc().millisecondsSinceEpoch,
+          if (to != null) 'to': to.toUtc().millisecondsSinceEpoch,
+          if (source != null) 'source': source.index,
+        });
 
     return result
         .map((map) => StepRecord.fromMap(Map<String, dynamic>.from(map as Map)))
@@ -337,6 +331,7 @@ class DatabaseIsolateService {
       path,
       version: _databaseVersion,
       onCreate: _onCreate,
+      onUpgrade: _onUpgrade,
       singleInstance: true,
     );
   }
@@ -350,7 +345,8 @@ class DatabaseIsolateService {
         from_time INTEGER NOT NULL,
         to_time INTEGER NOT NULL,
         source INTEGER NOT NULL,
-        confidence REAL
+        confidence REAL,
+        idempotency_key TEXT
       )
     ''');
 
@@ -361,6 +357,30 @@ class DatabaseIsolateService {
     await db.execute('''
       CREATE INDEX idx_step_records_source ON $_tableName(source)
     ''');
+
+    await db.execute('''
+      CREATE UNIQUE INDEX idx_step_records_idempotency
+      ON $_tableName(idempotency_key)
+      WHERE idempotency_key IS NOT NULL
+    ''');
+  }
+
+  /// Handle database upgrades in isolate mode.
+  static Future<void> _onUpgrade(
+    Database db,
+    int oldVersion,
+    int newVersion,
+  ) async {
+    if (oldVersion < 2) {
+      await db.execute(
+        'ALTER TABLE $_tableName ADD COLUMN idempotency_key TEXT',
+      );
+      await db.execute('''
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_step_records_idempotency
+        ON $_tableName(idempotency_key)
+        WHERE idempotency_key IS NOT NULL
+      ''');
+    }
   }
 
   /// Handle a request in the isolate
@@ -370,8 +390,12 @@ class DatabaseIsolateService {
   ) async {
     switch (request.type) {
       case DatabaseMessageType.insert:
-        await db.insert(_tableName, request.data);
-        return null;
+        final rowId = await db.insert(
+          _tableName,
+          request.data,
+          conflictAlgorithm: ConflictAlgorithm.ignore,
+        );
+        return rowId > 0;
 
       case DatabaseMessageType.query:
         return _queryRecords(db, request.data);
@@ -496,10 +520,7 @@ class DatabaseIsolateService {
   }
 
   /// Read total steps with optional filters
-  static Future<int> _readTotal(
-    Database db,
-    Map<String, dynamic> data,
-  ) async {
+  static Future<int> _readTotal(Database db, Map<String, dynamic> data) async {
     final conditions = <String>[];
     final args = <dynamic>[];
 
@@ -512,8 +533,9 @@ class DatabaseIsolateService {
       args.add(data['to']);
     }
 
-    final whereClause =
-        conditions.isNotEmpty ? 'WHERE ${conditions.join(' AND ')}' : '';
+    final whereClause = conditions.isNotEmpty
+        ? 'WHERE ${conditions.join(' AND ')}'
+        : '';
 
     final result = await db.rawQuery(
       'SELECT COALESCE(SUM(step_count), 0) as total FROM $_tableName $whereClause',

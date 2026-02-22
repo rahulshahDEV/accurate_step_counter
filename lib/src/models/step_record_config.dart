@@ -226,7 +226,7 @@ class StepRecordConfig {
       maxStepsPerSecond: 5.0,
       inactivityTimeoutMs: 0,
       enableAggregatedMode: true,
-      retentionPeriod: const Duration(days: 30),
+      retentionPeriod: Duration(days: 30),
       useBackgroundIsolate: true, // Enable isolate for low-end devices
     );
   }

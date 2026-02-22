@@ -1,16 +1,21 @@
 # accurate_step_counter_example
 
-Demonstrates how to use the accurate_step_counter plugin.
+Production-style demo app for `accurate_step_counter`.
 
-## Getting Started
+## What this example shows
 
-This project is a starting point for a Flutter application.
+- Permission request flow (`ACTIVITY_RECOGNITION` + notifications)
+- Explicit startup sequence:
+  - `initializeLogging(...)`
+  - `start(...)`
+  - `startLogging(...)`
+- Aggregated stream updates for today
+- Source-wise stats (foreground/background/terminated)
+- Manual terminated-state sync trigger
+- Lifecycle bridging via `setAppState(...)`
 
-A few resources to get you started if this is your first Flutter project:
+## Run
 
-- [Lab: Write your first Flutter app](https://docs.flutter.dev/get-started/codelab)
-- [Cookbook: Useful Flutter samples](https://docs.flutter.dev/cookbook)
-
-For help getting started with Flutter development, view the
-[online documentation](https://docs.flutter.dev/), which offers tutorials,
-samples, guidance on mobile development, and a full API reference.
+```bash
+flutter run
+```

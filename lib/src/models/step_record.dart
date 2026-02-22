@@ -23,6 +23,11 @@ class StepRecord {
   /// Detection confidence (0.0 - 1.0, if available)
   final double? confidence;
 
+  /// Deterministic idempotency key for exactly-once persistence semantics.
+  ///
+  /// When present, duplicate inserts with the same key are ignored by storage.
+  final String? idempotencyKey;
+
   StepRecord({
     this.id,
     required this.stepCount,
@@ -30,6 +35,7 @@ class StepRecord {
     required this.toTime,
     required this.source,
     this.confidence,
+    this.idempotencyKey,
   });
 
   /// Duration of this record in milliseconds
@@ -56,6 +62,7 @@ class StepRecord {
       ).toLocal(),
       source: StepRecordSource.values[map['source'] as int],
       confidence: map['confidence'] as double?,
+      idempotencyKey: map['idempotency_key'] as String?,
     );
   }
 
@@ -68,6 +75,7 @@ class StepRecord {
       'to_time': toTime.toUtc().millisecondsSinceEpoch,
       'source': source.index,
       'confidence': confidence,
+      'idempotency_key': idempotencyKey,
     };
   }
 
@@ -79,6 +87,7 @@ class StepRecord {
     DateTime? toTime,
     StepRecordSource? source,
     double? confidence,
+    String? idempotencyKey,
   }) {
     return StepRecord(
       id: id ?? this.id,
@@ -87,6 +96,7 @@ class StepRecord {
       toTime: toTime ?? this.toTime,
       source: source ?? this.source,
       confidence: confidence ?? this.confidence,
+      idempotencyKey: idempotencyKey ?? this.idempotencyKey,
     );
   }
 
@@ -103,7 +113,8 @@ class StepRecord {
         other.fromTime == fromTime &&
         other.toTime == toTime &&
         other.source == source &&
-        other.confidence == confidence;
+        other.confidence == confidence &&
+        other.idempotencyKey == idempotencyKey;
   }
 
   @override
@@ -112,7 +123,8 @@ class StepRecord {
         fromTime.hashCode ^
         toTime.hashCode ^
         source.hashCode ^
-        confidence.hashCode;
+        confidence.hashCode ^
+        idempotencyKey.hashCode;
   }
 }
 

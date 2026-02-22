@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:developer' as dev;
 
 import 'package:sqflite/sqflite.dart';
 
@@ -43,9 +44,11 @@ class StepRecordStore {
   final DatabaseHelper _dbHelper = DatabaseHelper();
   final ReactiveDatabase _reactiveDb = ReactiveDatabase();
   bool _isInitialized = false;
+  Future<void> _writeChain = Future<void>.value();
 
   /// Whether to use background isolate for database operations
   final bool _useIsolate;
+  final bool _performanceTracing;
 
   /// Background isolate service (only created if useIsolate is true)
   DatabaseIsolateService? _isolateService;
@@ -54,7 +57,9 @@ class StepRecordStore {
   ///
   /// [useIsolate] - When true, database operations run in a background isolate
   /// to prevent UI blocking on low-end devices. Default: false
-  StepRecordStore({bool useIsolate = false}) : _useIsolate = useIsolate {
+  StepRecordStore({bool useIsolate = false, bool performanceTracing = false})
+    : _useIsolate = useIsolate,
+      _performanceTracing = performanceTracing {
     if (_useIsolate) {
       _isolateService = DatabaseIsolateService();
     }
@@ -66,6 +71,19 @@ class StepRecordStore {
   /// Whether this store is using background isolate mode
   bool get isUsingIsolate => _useIsolate;
 
+  void _logPerf(String message) {
+    if (_performanceTracing) {
+      dev.log('StepRecordStore[perf]: $message');
+    }
+  }
+
+  /// Serialize all write operations through a single queue.
+  Future<T> _enqueueWrite<T>(Future<T> Function() operation) {
+    final next = _writeChain.then((_) => operation());
+    _writeChain = next.then<void>((_) {}, onError: (_) {});
+    return next;
+  }
+
   /// Initialize the SQLite store
   ///
   /// Must be called before any other methods. Can be called multiple times
@@ -74,6 +92,7 @@ class StepRecordStore {
   /// When using isolate mode, this spawns the background isolate.
   Future<void> initialize() async {
     if (_isInitialized) return;
+    final sw = Stopwatch()..start();
 
     if (_useIsolate) {
       // Initialize the background isolate
@@ -83,6 +102,9 @@ class StepRecordStore {
       await _dbHelper.database;
     }
     _isInitialized = true;
+    _logPerf(
+      'initialize(useIsolate: $_useIsolate) took ${sw.elapsedMilliseconds}ms',
+    );
   }
 
   /// Ensure store is initialized and database is open
@@ -91,11 +113,14 @@ class StepRecordStore {
   /// is actually open. This is critical for handling cold starts where
   /// Android may have killed the app and closed the database.
   Future<Database> _ensureDbOpen() async {
+    final sw = Stopwatch()..start();
     if (!_isInitialized) {
       await initialize();
     }
     await _dbHelper.ensureOpen();
-    return _dbHelper.database;
+    final db = await _dbHelper.database;
+    _logPerf('_ensureDbOpen took ${sw.elapsedMilliseconds}ms');
+    return db;
   }
 
   /// Insert a new step record
@@ -115,29 +140,48 @@ class StepRecordStore {
   /// ));
   /// ```
   Future<void> insertRecord(StepRecord record) async {
-    if (_useIsolate) {
-      await _isolateService!.insertRecord(record);
-      _reactiveDb.notifyRecordsChanged();
-      return;
-    }
-
-    try {
-      final db = await _ensureDbOpen();
-      await db.insert(_tableName, record.toMap());
-      _reactiveDb.notifyRecordsChanged();
-    } catch (e) {
-      // If database operations fail, try one more time with fresh initialization
-      if (e.toString().contains('database') ||
-          e.toString().contains('DatabaseException')) {
-        _isInitialized = false;
-        await initialize();
-        final db = await _dbHelper.database;
-        await db.insert(_tableName, record.toMap());
-        _reactiveDb.notifyRecordsChanged();
-      } else {
-        rethrow;
+    await _enqueueWrite(() async {
+      final sw = Stopwatch()..start();
+      if (_useIsolate) {
+        final inserted = await _isolateService!.insertRecord(record);
+        if (inserted) {
+          _reactiveDb.notifyRecordsChanged();
+        }
+        _logPerf('insertRecord(isolate) took ${sw.elapsedMilliseconds}ms');
+        return;
       }
-    }
+
+      try {
+        final db = await _ensureDbOpen();
+        final rowId = await db.insert(
+          _tableName,
+          record.toMap(),
+          conflictAlgorithm: ConflictAlgorithm.ignore,
+        );
+        if (rowId > 0) {
+          _reactiveDb.notifyRecordsChanged();
+        }
+      } catch (e) {
+        // If database operations fail, try one more time with fresh initialization
+        if (e.toString().contains('database') ||
+            e.toString().contains('DatabaseException')) {
+          _isInitialized = false;
+          await initialize();
+          final db = await _dbHelper.database;
+          final rowId = await db.insert(
+            _tableName,
+            record.toMap(),
+            conflictAlgorithm: ConflictAlgorithm.ignore,
+          );
+          if (rowId > 0) {
+            _reactiveDb.notifyRecordsChanged();
+          }
+        } else {
+          rethrow;
+        }
+      }
+      _logPerf('insertRecord(main) took ${sw.elapsedMilliseconds}ms');
+    });
   }
 
   /// Check for duplicate or overlapping records
@@ -261,8 +305,18 @@ class StepRecordStore {
     DateTime? to,
     StepRecordSource? source,
   }) async {
+    final sw = Stopwatch()..start();
     if (_useIsolate) {
-      return _isolateService!.readRecords(from: from, to: to, source: source);
+      final records = await _isolateService!.readRecords(
+        from: from,
+        to: to,
+        source: source,
+      );
+      _logPerf(
+        'readRecords(isolate) took ${sw.elapsedMilliseconds}ms '
+        '(rows: ${records.length})',
+      );
+      return records;
     }
 
     final db = await _ensureDbOpen();
@@ -298,7 +352,12 @@ class StepRecordStore {
       orderBy: 'from_time DESC',
     );
 
-    return results.map((map) => StepRecord.fromMap(map)).toList();
+    final records = results.map((map) => StepRecord.fromMap(map)).toList();
+    _logPerf(
+      'readRecords(main) took ${sw.elapsedMilliseconds}ms '
+      '(rows: ${records.length})',
+    );
+    return records;
   }
 
   /// Read total step count (aggregate)
@@ -308,12 +367,20 @@ class StepRecordStore {
   /// [from] - Optional start time filter (inclusive)
   /// [to] - Optional end time filter (inclusive)
   Future<int> readTotalSteps({DateTime? from, DateTime? to}) async {
+    final sw = Stopwatch()..start();
     if (_useIsolate) {
-      return _isolateService!.readTotalSteps(from: from, to: to);
+      final total = await _isolateService!.readTotalSteps(from: from, to: to);
+      _logPerf('readTotalSteps(isolate) took ${sw.elapsedMilliseconds}ms');
+      return total;
     }
 
     final entries = await readRecords(from: from, to: to);
-    return entries.fold<int>(0, (sum, entry) => sum + entry.stepCount);
+    final total = entries.fold<int>(0, (sum, entry) => sum + entry.stepCount);
+    _logPerf(
+      'readTotalSteps(main) took ${sw.elapsedMilliseconds}ms '
+      '(rows: ${entries.length})',
+    );
+    return total;
   }
 
   /// Read step count by source
@@ -399,28 +466,30 @@ class StepRecordStore {
   ///
   /// In isolate mode, the delete runs in a background isolate.
   Future<void> deleteAllRecords() async {
-    if (_useIsolate) {
-      await _isolateService!.deleteAllRecords();
-      _reactiveDb.notifyRecordsChanged();
-      return;
-    }
+    await _enqueueWrite(() async {
+      if (_useIsolate) {
+        await _isolateService!.deleteAllRecords();
+        _reactiveDb.notifyRecordsChanged();
+        return;
+      }
 
-    try {
-      final db = await _ensureDbOpen();
-      await db.delete(_tableName);
-      _reactiveDb.notifyRecordsChanged();
-    } catch (e) {
-      if (e.toString().contains('database') ||
-          e.toString().contains('DatabaseException')) {
-        _isInitialized = false;
-        await initialize();
-        final db = await _dbHelper.database;
+      try {
+        final db = await _ensureDbOpen();
         await db.delete(_tableName);
         _reactiveDb.notifyRecordsChanged();
-      } else {
-        rethrow;
+      } catch (e) {
+        if (e.toString().contains('database') ||
+            e.toString().contains('DatabaseException')) {
+          _isInitialized = false;
+          await initialize();
+          final db = await _dbHelper.database;
+          await db.delete(_tableName);
+          _reactiveDb.notifyRecordsChanged();
+        } else {
+          rethrow;
+        }
       }
-    }
+    });
   }
 
   /// Delete records older than a specific date
@@ -433,48 +502,50 @@ class StepRecordStore {
   /// was closed by Android. It will silently succeed if there's nothing
   /// to delete or if re-initialization fails.
   Future<void> deleteRecordsBefore(DateTime date) async {
-    if (_useIsolate) {
-      try {
-        await _isolateService!.deleteRecordsBefore(date);
-        _reactiveDb.notifyRecordsChanged();
-      } catch (_) {
-        // Silently fail - data retention is not critical enough to crash the app
-      }
-      return;
-    }
-
-    try {
-      final db = await _ensureDbOpen();
-
-      await db.delete(
-        _tableName,
-        where: 'to_time < ?',
-        whereArgs: [date.toUtc().millisecondsSinceEpoch],
-      );
-      _reactiveDb.notifyRecordsChanged();
-    } catch (e) {
-      if (e.toString().contains('database') ||
-          e.toString().contains('DatabaseException')) {
-        _isInitialized = false;
+    await _enqueueWrite(() async {
+      if (_useIsolate) {
         try {
-          await initialize();
-          final db = await _dbHelper.database;
-          await db.delete(
-            _tableName,
-            where: 'to_time < ?',
-            whereArgs: [date.toUtc().millisecondsSinceEpoch],
-          );
+          await _isolateService!.deleteRecordsBefore(date);
           _reactiveDb.notifyRecordsChanged();
         } catch (_) {
           // Silently fail - data retention is not critical enough to crash the app
-          return;
         }
-      } else {
-        // For non-database errors, log but don't crash
-        // Data retention failure should not prevent app from working
         return;
       }
-    }
+
+      try {
+        final db = await _ensureDbOpen();
+
+        await db.delete(
+          _tableName,
+          where: 'to_time < ?',
+          whereArgs: [date.toUtc().millisecondsSinceEpoch],
+        );
+        _reactiveDb.notifyRecordsChanged();
+      } catch (e) {
+        if (e.toString().contains('database') ||
+            e.toString().contains('DatabaseException')) {
+          _isInitialized = false;
+          try {
+            await initialize();
+            final db = await _dbHelper.database;
+            await db.delete(
+              _tableName,
+              where: 'to_time < ?',
+              whereArgs: [date.toUtc().millisecondsSinceEpoch],
+            );
+            _reactiveDb.notifyRecordsChanged();
+          } catch (_) {
+            // Silently fail - data retention is not critical enough to crash the app
+            return;
+          }
+        } else {
+          // For non-database errors, log but don't crash
+          // Data retention failure should not prevent app from working
+          return;
+        }
+      }
+    });
   }
 
   /// Get step statistics for a date range
@@ -543,6 +614,7 @@ class StepRecordStore {
   /// Should be called when completely done with the store.
   /// In isolate mode, this also shuts down the background isolate.
   Future<void> close() async {
+    await _writeChain.catchError((_) {});
     if (_useIsolate) {
       await _isolateService?.close();
     } else {

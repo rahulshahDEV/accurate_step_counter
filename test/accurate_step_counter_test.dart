@@ -67,6 +67,18 @@ void main() {
     test('currentConfig should be null initially', () {
       expect(stepCounter.currentConfig, isNull);
     });
+
+    test('runtimeState should be uninitialized initially', () {
+      expect(stepCounter.runtimeState, StepRuntimeState.uninitialized);
+    });
+
+    test('start and stop should update runtimeState', () async {
+      await stepCounter.start();
+      expect(stepCounter.runtimeState, StepRuntimeState.detectingForeground);
+
+      await stepCounter.stop();
+      expect(stepCounter.runtimeState, StepRuntimeState.stopped);
+    });
   });
 
   group('StepDetectorConfig', () {

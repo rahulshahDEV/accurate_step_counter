@@ -55,6 +55,9 @@ class _StepCounterHomePageState extends State<StepCounterHomePage>
   bool _hasPermission = false;
   String _appState = 'resumed';
   String _detectorType = 'Unknown';
+  StepRuntimeState _runtimeState = StepRuntimeState.uninitialized;
+  final bool _useBackgroundIsolate = true;
+  final bool _performanceTracing = false;
   final List<String> _logMessages = [];
 
   StreamSubscription<int>? _todaySubscription;
@@ -90,11 +93,23 @@ class _StepCounterHomePageState extends State<StepCounterHomePage>
 
   Future<void> _initStepCounter() async {
     try {
-      _log('Initializing step counter...');
+      _log('Initializing step counter (production flow)...');
 
-      // Simple one-line initialization with debug logging
-      await _stepCounter.initSteps(debugLogging: true);
-      _log('✓ Step counter initialized');
+      await _stepCounter.initializeLogging(
+        debugLogging: true,
+        useBackgroundIsolate: _useBackgroundIsolate,
+        performanceTracing: _performanceTracing,
+      );
+      _setRuntimeStateFromEngine();
+      await _stepCounter.start(config: StepDetectorConfig.walking());
+      _setRuntimeStateFromEngine();
+      await _stepCounter.startLogging(
+        config: StepRecordConfig.aggregated(
+          useBackgroundIsolate: _useBackgroundIsolate,
+        ),
+      );
+      _setRuntimeStateFromEngine();
+      _log('✓ Step counter initialized (explicit startup path)');
 
       // Check detector type
       final isHardware = await _stepCounter.isUsingNativeDetector();
@@ -102,16 +117,15 @@ class _StepCounterHomePageState extends State<StepCounterHomePage>
       _log('Detector type: $_detectorType');
 
       // Subscribe to aggregated count stream (stored + live steps)
-      _aggregatedSubscription = _stepCounter
-          .watchAggregatedStepCounter()
-          .listen(
-            (steps) {
-              dev.log('AGGREGATED: $steps');
-              _log('AGGREGATED: $steps steps');
-              setState(() => _aggregatedCount = steps);
-            },
-            onError: (e) => _log('Aggregated stream error: $e'),
-          );
+      _aggregatedSubscription =
+          _stepCounter.watchAggregatedStepCounter().listen(
+        (steps) {
+          dev.log('AGGREGATED: $steps');
+          _log('AGGREGATED: $steps steps');
+          setState(() => _aggregatedCount = steps);
+        },
+        onError: (e) => _log('Aggregated stream error: $e'),
+      );
       _log('✓ watchAggregatedStepCounter subscribed');
 
       // Subscribe to DB total for today
@@ -142,7 +156,8 @@ class _StepCounterHomePageState extends State<StepCounterHomePage>
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(
-              content: Text('Synced $steps missed steps from terminated state!'),
+              content:
+                  Text('Synced $steps missed steps from terminated state!'),
               backgroundColor: Colors.orange,
               duration: const Duration(seconds: 3),
             ),
@@ -180,8 +195,16 @@ class _StepCounterHomePageState extends State<StepCounterHomePage>
 
     final today = await _stepCounter.getTodayStepCount();
     setState(() => _todaySteps = today);
+    _setRuntimeStateFromEngine();
     await _updateSourceStats();
     _log('Refreshed: $today steps today');
+  }
+
+  void _setRuntimeStateFromEngine() {
+    if (!mounted) return;
+    setState(() {
+      _runtimeState = _stepCounter.runtimeState;
+    });
   }
 
   Future<void> _updateSourceStats() async {
@@ -202,6 +225,7 @@ class _StepCounterHomePageState extends State<StepCounterHomePage>
   void didChangeAppLifecycleState(AppLifecycleState state) {
     _stepCounter.setAppState(state);
     setState(() => _appState = state.name);
+    _setRuntimeStateFromEngine();
     _log('App state: ${state.name}');
     if (state == AppLifecycleState.resumed) {
       _refreshData();
@@ -213,6 +237,7 @@ class _StepCounterHomePageState extends State<StepCounterHomePage>
     final time =
         '${now.hour.toString().padLeft(2, '0')}:${now.minute.toString().padLeft(2, '0')}:${now.second.toString().padLeft(2, '0')}';
     dev.log('[StepCounter] $message');
+    if (!mounted) return;
     setState(() {
       _logMessages.insert(0, '[$time] $message');
       if (_logMessages.length > 100) _logMessages.removeLast();
@@ -244,6 +269,22 @@ class _StepCounterHomePageState extends State<StepCounterHomePage>
       _log('Added 10 test steps');
     } catch (e) {
       _log('Error: $e');
+    }
+  }
+
+  Future<void> _manualTerminatedSync() async {
+    if (!_isInitialized) return;
+    try {
+      final result = await _stepCounter.syncTerminatedSteps();
+      if (result == null) {
+        _log('Manual sync: no missed terminated-state steps');
+      } else {
+        final steps = result['missedSteps'];
+        _log('Manual sync: recovered $steps steps');
+      }
+      await _refreshData();
+    } catch (e) {
+      _log('Manual sync failed: $e');
     }
   }
 
@@ -314,6 +355,11 @@ class _StepCounterHomePageState extends State<StepCounterHomePage>
                     Text(
                       'Status: ${_isInitialized ? 'Active' : 'Initializing...'}',
                     ),
+                    Text('Runtime: ${_runtimeState.name}'),
+                    Text(
+                      'Flow: init → start detector → start logging'
+                      ' (isolate=${_useBackgroundIsolate ? 'on' : 'off'})',
+                    ),
                   ],
                 ),
               ),
@@ -370,7 +416,8 @@ class _StepCounterHomePageState extends State<StepCounterHomePage>
                       mainAxisAlignment: MainAxisAlignment.spaceAround,
                       children: [
                         _buildMiniStat('Database', '$_todaySteps', Colors.blue),
-                        _buildMiniStat('Live', '$_liveStepCount', Colors.purple),
+                        _buildMiniStat(
+                            'Live', '$_liveStepCount', Colors.purple),
                         _buildMiniStat('FG', '$_fgSteps', Colors.green),
                         _buildMiniStat('BG', '$_bgSteps', Colors.orange),
                         _buildMiniStat('Term', '$_termSteps', Colors.red),
@@ -418,6 +465,15 @@ class _StepCounterHomePageState extends State<StepCounterHomePage>
               onPressed: _openVerificationPage,
               icon: const Icon(Icons.verified_user),
               label: const Text('Run Setup Verification'),
+              style: ElevatedButton.styleFrom(
+                minimumSize: const Size(double.infinity, 48),
+              ),
+            ),
+            const SizedBox(height: 8),
+            ElevatedButton.icon(
+              onPressed: _manualTerminatedSync,
+              icon: const Icon(Icons.sync),
+              label: const Text('Manual Terminated Sync'),
               style: ElevatedButton.styleFrom(
                 minimumSize: const Size(double.infinity, 48),
               ),

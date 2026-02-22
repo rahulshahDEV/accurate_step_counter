@@ -5,7 +5,7 @@
 [![Tests](https://img.shields.io/badge/tests-800%2B%20passing-brightgreen.svg)](https://github.com/rahulshahDEV/accurate_step_counter)
 [![Production Ready](https://img.shields.io/badge/status-production%20ready-brightgreen.svg)](https://github.com/rahulshahDEV/accurate_step_counter)
 
-A simple, accurate step counter for Flutter. Works in **foreground**, **background**, and **terminated** states. Health Connect-like API with persistent storage.
+A production-focused, accurate step counter for Flutter on Android. Works in **foreground**, **background**, and **terminated** recovery states with persistent SQLite storage.
 
 ## ✨ Features
 
@@ -16,8 +16,23 @@ A simple, accurate step counter for Flutter. Works in **foreground**, **backgrou
 - 🔋 **Battery Efficient** - Event-driven, not polling
 - ⏱️ **Inactivity Timeout** - Auto-reset sessions after idle periods
 - 🌍 **External Import** - Import steps from Google Fit, Apple Health, etc.
-- 🧪 **Well Tested** - 800+ automated tests covering all scenarios
+- 🧪 **Well Tested** - 800+ automated tests covering lifecycle, dedupe, retention, and stress paths
 - 🧵 **Low-End Device Support** - Optional background isolate for smooth UI on budget devices
+
+## ✅ Production Readiness Scope
+
+This package is considered production-ready for the scope below:
+
+- Android plugin support only (no iOS implementation in this package yet)
+- Min Android SDK 24+
+- Duplicate-safe persistence via idempotency keys + single-writer queue
+- Terminated-state reconciliation with deterministic gap dedupe
+- ANR safeguards:
+  - DB work can run in background isolate
+  - native heavy work runs off main thread
+  - stream update throttling in aggregated mode
+
+It is not a medical device and should not be used for clinical/regulated step reporting.
 
 ## 🛡️ Why it's Reliable (The ANR Fix)
 
@@ -40,7 +55,7 @@ It only converts to "Local Time" when showing steps to the user. This means:
 
 | Platform | Status | Note |
 |----------|--------|------|
-| Android  | ✅ Full support (API 19+) | Includes critical ANR fix for Android 12 (v1.8.10+) |
+| Android  | ✅ Full support (API 24+) | Includes ANR-safe architecture and duplicate guards |
 | iOS      | ❌ Not supported |
 
 ## 🚀 Quick Start
@@ -49,7 +64,7 @@ It only converts to "Local Time" when showing steps to the user. This means:
 
 ```yaml
 dependencies:
-  accurate_step_counter: ^1.9.3
+  accurate_step_counter: ^1.9.4
 ```
 
 ### 2. Add Permissions
@@ -70,25 +85,20 @@ import 'package:accurate_step_counter/accurate_step_counter.dart';
 
 final stepCounter = AccurateStepCounter();
 
-// 🚀 One-line setup!
-await stepCounter.initSteps();
+// Recommended production startup (explicit phases)
+await stepCounter.initializeLogging(
+  useBackgroundIsolate: true,   // smoother UI on low-end devices
+  performanceTracing: false,    // enable while profiling
+);
+await stepCounter.start(config: StepDetectorConfig.walking());
+await stepCounter.startLogging(
+  config: StepRecordConfig.aggregated(useBackgroundIsolate: true),
+);
 
-// Get today's steps
 final todaySteps = await stepCounter.getTodayStepCount();
-
-// Watch real-time updates
 stepCounter.watchTodaySteps().listen((steps) {
   print('Steps today: $steps');
 });
-
-// Get yesterday's steps
-final yesterdaySteps = await stepCounter.getYesterdayStepCount();
-
-// Custom date range
-final weekSteps = await stepCounter.getStepCount(
-  start: DateTime.now().subtract(Duration(days: 7)),
-  end: DateTime.now(),
-);
 ```
 
 ## 📖 Complete Example
@@ -119,8 +129,12 @@ class _StepCounterPageState extends State<StepCounterPage>
     // Request permissions
     await Permission.activityRecognition.request();
     
-    // Initialize step counter
-    await _stepCounter.initSteps();
+    // Recommended production startup
+    await _stepCounter.initializeLogging(useBackgroundIsolate: true);
+    await _stepCounter.start(config: StepDetectorConfig.walking());
+    await _stepCounter.startLogging(
+      config: StepRecordConfig.aggregated(useBackgroundIsolate: true),
+    );
     
     // Watch today's steps (emits immediately with stored value!)
     _stepCounter.watchTodaySteps().listen((steps) {
@@ -171,6 +185,13 @@ class _StepCounterPageState extends State<StepCounterPage>
 | `watchTodaySteps()` | Real-time stream of today's steps |
 | `setAppState(state)` | Track foreground/background (call in `didChangeAppLifecycleState`) |
 | `dispose()` | Clean up resources |
+
+## 🔒 Duplicate Prevention Model
+
+- Exact-write idempotency keys are attached to records.
+- Storage uses conflict-ignore + unique idempotency index.
+- Writes are serialized through a single writer queue.
+- Terminated sync uses deterministic gap identity and skips already-processed gaps.
 
 ### Reading Logs
 
@@ -368,7 +389,7 @@ flutter test
 This package is **production ready** with:
 
 - ✅ 800+ automated tests
-- ✅ Works on all Android versions (API 19+)
+- ✅ Android support scope: API 24+
 - ✅ OEM compatible (MIUI, Samsung, etc.)
 - ✅ Battery efficient
 - ✅ No duplicate step counting

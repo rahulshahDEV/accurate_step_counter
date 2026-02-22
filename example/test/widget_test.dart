@@ -7,11 +7,11 @@ import 'package:accurate_step_counter_example/main.dart';
 void main() {
   testWidgets('App loads correctly', (WidgetTester tester) async {
     // Build our app and trigger a frame.
-    await tester.pumpWidget(const StepCounterTestApp());
+    await tester.pumpWidget(const StepCounterApp());
 
-    // Verify that the stats card is displayed
-    expect(find.text('Start with Preset:'), findsOneWidget);
-    expect(find.text('Walking'), findsOneWidget);
-    expect(find.text('Running'), findsOneWidget);
+    // Verify that core UI sections are visible
+    expect(find.text('Accurate Step Counter'), findsOneWidget);
+    expect(find.text('Today\'s Steps'), findsOneWidget);
+    expect(find.text('Run Setup Verification'), findsOneWidget);
   });
 }

@@ -9,6 +9,8 @@ import 'models/step_detector_config.dart';
 import 'models/step_record.dart';
 import 'models/step_record_config.dart';
 import 'models/step_record_source.dart';
+import 'models/step_runtime_state.dart';
+import 'models/terminated_sync_gap.dart';
 import 'platform/step_counter_platform.dart';
 import 'services/native_step_detector.dart';
 import 'services/sensors_step_detector.dart';
@@ -50,7 +52,6 @@ class AccurateStepCounterImpl {
   StepDetectorConfig? _currentConfig;
   bool _isStarted = false;
   bool _useForegroundService = false;
-  Timer? _foregroundStepPollTimer;
   final StreamController<StepCountEvent> _foregroundStepController =
       StreamController<StepCountEvent>.broadcast();
   int _lastForegroundStepCount = 0;
@@ -65,6 +66,8 @@ class AccurateStepCounterImpl {
   bool _storeInitialized = false;
   bool _useBackgroundIsolate = false;
   bool _debugLogging = false;
+  bool _performanceTracing = false;
+  StepRuntimeState _runtimeState = StepRuntimeState.uninitialized;
   StreamSubscription<StepCountEvent>? _stepRecordSubscription;
   DateTime? _lastRecordTime;
   int _lastRecordedStepCount = 0;
@@ -114,11 +117,14 @@ class AccurateStepCounterImpl {
   int? _lastExternalWriteSteps;
   DateTime? _lastExternalWriteFromTime;
 
+  // Terminated-sync single-flight and session-level dedupe.
+  Future<Map<String, dynamic>?>? _terminatedSyncInFlight;
+  final Set<String> _processedTerminatedGapKeys = <String>{};
+
   // Stream emission throttling for low-end device optimization
   // Limits UI updates to max 10Hz instead of 50Hz
   DateTime? _lastStreamEmitTime;
   static const _minStreamEmitInterval = Duration(milliseconds: 100);
-  int _pendingStreamValue = 0;
 
   /// Callback for handling missed steps from terminated state
   /// Parameters: (missedSteps, startTime, endTime)
@@ -135,6 +141,12 @@ class AccurateStepCounterImpl {
 
   /// Whether the app is currently in the foreground
   bool get isAppInForeground => _appLifecycleState == AppLifecycleState.resumed;
+
+  StepRuntimeState _activeRuntimeState() {
+    return isAppInForeground
+        ? StepRuntimeState.detectingForeground
+        : StepRuntimeState.detectingBackground;
+  }
 
   /// Stream of step count events
   ///
@@ -157,6 +169,9 @@ class AccurateStepCounterImpl {
 
   /// Whether the step counter is currently active
   bool get isStarted => _isStarted;
+
+  /// Current runtime state of the step counter engine.
+  StepRuntimeState get runtimeState => _runtimeState;
 
   /// Whether foreground service mode is being used
   bool get isUsingForegroundService => _useForegroundService;
@@ -194,112 +209,151 @@ class AccurateStepCounterImpl {
       throw StateError('Step counter is already started');
     }
 
-    _currentConfig = config ?? const StepDetectorConfig();
-    _useForegroundService = false;
+    final sw = Stopwatch()..start();
+    _setRuntimeState(StepRuntimeState.starting, reason: 'startCalled');
+    try {
+      _currentConfig = config ?? const StepDetectorConfig();
+      _useForegroundService = false;
 
-    // For Android, check if we should use foreground service
-    if (Platform.isAndroid) {
-      final androidVersion = await _platform.getAndroidVersion();
-      final maxApiLevel = _currentConfig!.foregroundServiceMaxApiLevel;
-      _log('Android API level is $androidVersion');
-      dev.log(
-        'AccurateStepCounter: Foreground service max API level is $maxApiLevel',
-      );
-
-      // check for samsung devices
-      final isSamsung = await _platform.isSamsungDevice();
-
-      // Use PERSISTENT foreground service for Android ≤ configured level
-      // This ensures OEM battery optimization (MIUI, Samsung) doesn't kill the service
-      if (_currentConfig!.useForegroundServiceOnOldDevices &&
-          androidVersion > 0 &&
-          androidVersion <= maxApiLevel &&
-          !isSamsung) {
-        dev.log(
-          'AccurateStepCounter: Using PERSISTENT foreground service for API ≤$maxApiLevel (OEM-compatible)',
+      // For Android, check if we should use foreground service
+      if (Platform.isAndroid) {
+        final androidVersion = await _traceAsync(
+          'start.getAndroidVersion',
+          _platform.getAndroidVersion,
         );
-        _useForegroundService = true;
+        final maxApiLevel = _currentConfig!.foregroundServiceMaxApiLevel;
+        _log('Android API level is $androidVersion');
+        dev.log(
+          'AccurateStepCounter: Foreground service max API level is $maxApiLevel',
+        );
 
-        // Initialize platform for OS-level sync and foreground service
-        if (_currentConfig!.enableOsLevelSync) {
-          await _platform.initialize();
+        // check for samsung devices
+        final isSamsung = await _traceAsync(
+          'start.isSamsungDevice',
+          _platform.isSamsungDevice,
+        );
 
-          // Sync steps from terminated state on app restart
-          // This recovers:
-          // 1. Steps saved to SharedPreferences before app was killed
-          // 2. Steps detected by TYPE_STEP_COUNTER while app was terminated
-          // Note: sensors_plus cannot run when app is killed, so OS-level
-          // step counter is the only source for terminated state steps.
-          await _syncStepsFromTerminatedState();
+        // Use PERSISTENT foreground service for Android ≤ configured level
+        // This ensures OEM battery optimization (MIUI, Samsung) doesn't kill the service
+        if (_currentConfig!.useForegroundServiceOnOldDevices &&
+            androidVersion > 0 &&
+            androidVersion <= maxApiLevel &&
+            !isSamsung) {
+          dev.log(
+            'AccurateStepCounter: Using PERSISTENT foreground service for API ≤$maxApiLevel (OEM-compatible)',
+          );
+          _useForegroundService = true;
+
+          // Initialize platform for OS-level sync and foreground service
+          if (_currentConfig!.enableOsLevelSync) {
+            await _traceAsync('start.platformInitialize', () async {
+              await _platform.initialize();
+              return;
+            });
+
+            // Sync steps from terminated state on app restart
+            // This recovers:
+            // 1. Steps saved to SharedPreferences before app was killed
+            // 2. Steps detected by TYPE_STEP_COUNTER while app was terminated
+            // Note: sensors_plus cannot run when app is killed, so OS-level
+            // step counter is the only source for terminated state steps.
+            await _traceAsync('start.syncTerminatedSteps', () async {
+              await _syncStepsFromTerminatedState();
+              return;
+            });
+          }
+
+          // Start the foreground service immediately (NOT on termination)
+          // This keeps the service running in ALL states for OEM compatibility
+          await _traceAsync('start.startForegroundService', () async {
+            await _platform.startForegroundService(
+              title: _currentConfig!.foregroundNotificationTitle,
+              text: _currentConfig!.foregroundNotificationText,
+            );
+            return;
+          });
+
+          // Use sensors_plus for step detection on Android ≤ maxApiLevel
+          // This replaces the native sensor implementation for better reliability
+          //
+          // IMPORTANT: Threshold normalization is required because:
+          // - NativeStepDetector uses raw accelerometer magnitude thresholds (10-20 range)
+          // - SensorsStepDetector uses magnitude DIFFERENCE thresholds (0.5-2.0 range)
+          // If a high threshold (intended for native) is passed, normalize it down.
+          final sensorsThreshold = _normalizeThresholdForSensors(
+            _currentConfig!.threshold,
+          );
+
+          _log(
+            'SensorsStepDetector threshold: $sensorsThreshold (original: ${_currentConfig!.threshold})',
+          );
+
+          _sensorsStepDetector = SensorsStepDetector(
+            threshold: sensorsThreshold,
+            filterAlpha: _currentConfig!.filterAlpha,
+            minTimeBetweenStepsMs: _currentConfig!.minTimeBetweenStepsMs,
+            debugLogging: _debugLogging,
+          );
+          await _traceAsync('start.sensorsDetectorStart', () async {
+            await _sensorsStepDetector!.start();
+            return;
+          });
+
+          // Listen to step events from sensors_plus
+          _sensorsStepSubscription = _sensorsStepDetector!.stepEventStream
+              .listen(
+                (event) {
+                  _lastForegroundStepCount = event.stepCount;
+
+                  // Emit event via foreground step controller
+                  if (!_foregroundStepController.isClosed) {
+                    _foregroundStepController.add(event);
+                  }
+
+                  // Update native side for persistence
+                  _platform.updateForegroundStepCount(event.stepCount);
+
+                  _log('sensors_plus step: ${event.stepCount}');
+                },
+                onError: (error) {
+                  _log('sensors_plus error: $error');
+                },
+              );
+
+          _isStarted = true;
+          _setRuntimeState(_activeRuntimeState(), reason: 'startComplete');
+          _logPerf('start.total took ${sw.elapsedMilliseconds}ms');
+          return;
         }
 
-        // Start the foreground service immediately (NOT on termination)
-        // This keeps the service running in ALL states for OEM compatibility
-        await _platform.startForegroundService(
-          title: _currentConfig!.foregroundNotificationTitle,
-          text: _currentConfig!.foregroundNotificationText,
-        );
+        // For Android 11+, use native detector + OS-level sync for terminated state
+        if (_currentConfig!.enableOsLevelSync) {
+          await _traceAsync('start.platformInitialize', () async {
+            await _platform.initialize();
+            return;
+          });
 
-        // Use sensors_plus for step detection on Android ≤ maxApiLevel
-        // This replaces the native sensor implementation for better reliability
-        //
-        // IMPORTANT: Threshold normalization is required because:
-        // - NativeStepDetector uses raw accelerometer magnitude thresholds (10-20 range)
-        // - SensorsStepDetector uses magnitude DIFFERENCE thresholds (0.5-2.0 range)
-        // If a high threshold (intended for native) is passed, normalize it down.
-        final sensorsThreshold = _normalizeThresholdForSensors(
-          _currentConfig!.threshold,
-        );
+          // Sync steps from terminated state (TYPE_STEP_COUNTER)
+          await _traceAsync('start.syncTerminatedSteps', () async {
+            await _syncStepsFromTerminatedState();
+            return;
+          });
+        }
+      }
 
-        _log(
-          'SensorsStepDetector threshold: $sensorsThreshold (original: ${_currentConfig!.threshold})',
-        );
-
-        _sensorsStepDetector = SensorsStepDetector(
-          threshold: sensorsThreshold,
-          filterAlpha: _currentConfig!.filterAlpha,
-          minTimeBetweenStepsMs: _currentConfig!.minTimeBetweenStepsMs,
-          debugLogging: _debugLogging,
-        );
-        await _sensorsStepDetector!.start();
-
-        // Listen to step events from sensors_plus
-        _sensorsStepSubscription = _sensorsStepDetector!.stepEventStream.listen(
-          (event) {
-            _lastForegroundStepCount = event.stepCount;
-
-            // Emit event via foreground step controller
-            if (!_foregroundStepController.isClosed) {
-              _foregroundStepController.add(event);
-            }
-
-            // Update native side for persistence
-            _platform.updateForegroundStepCount(event.stepCount);
-
-            _log('sensors_plus step: ${event.stepCount}');
-          },
-          onError: (error) {
-            _log('sensors_plus error: $error');
-          },
-        );
-
-        _isStarted = true;
+      // For Android 11+ or iOS, start native step detection
+      await _traceAsync('start.nativeDetectorStart', () async {
+        await _nativeDetector.start(config: _currentConfig);
         return;
-      }
+      });
 
-      // For Android 11+, use native detector + OS-level sync for terminated state
-      if (_currentConfig!.enableOsLevelSync) {
-        await _platform.initialize();
-
-        // Sync steps from terminated state (TYPE_STEP_COUNTER)
-        await _syncStepsFromTerminatedState();
-      }
+      _isStarted = true;
+      _setRuntimeState(_activeRuntimeState(), reason: 'startComplete');
+      _logPerf('start.total took ${sw.elapsedMilliseconds}ms');
+    } catch (_) {
+      _setRuntimeState(StepRuntimeState.error, reason: 'startFailed');
+      rethrow;
     }
-
-    // For Android 11+ or iOS, start native step detection
-    await _nativeDetector.start(config: _currentConfig);
-
-    _isStarted = true;
   }
 
   /// Stop step detection
@@ -317,21 +371,27 @@ class AccurateStepCounterImpl {
       return;
     }
 
-    if (_useForegroundService) {
-      // Stop sensors_plus step detection
-      await _sensorsStepSubscription?.cancel();
-      _sensorsStepSubscription = null;
-      await _sensorsStepDetector?.stop();
-      _sensorsStepDetector = null;
+    _setRuntimeState(StepRuntimeState.stopping, reason: 'stopCalled');
+    try {
+      if (_useForegroundService) {
+        // Stop sensors_plus step detection
+        await _sensorsStepSubscription?.cancel();
+        _sensorsStepSubscription = null;
+        await _sensorsStepDetector?.stop();
+        _sensorsStepDetector = null;
 
-      _stopForegroundStepPolling();
-      await _platform.stopForegroundService();
-      _useForegroundService = false;
-    } else {
-      await _nativeDetector.stop();
+        await _platform.stopForegroundService();
+        _useForegroundService = false;
+      } else {
+        await _nativeDetector.stop();
+      }
+
+      _isStarted = false;
+      _setRuntimeState(StepRuntimeState.stopped, reason: 'stopComplete');
+    } catch (_) {
+      _setRuntimeState(StepRuntimeState.error, reason: 'stopFailed');
+      rethrow;
     }
-
-    _isStarted = false;
   }
 
   /// Reset the step counter to zero
@@ -356,12 +416,6 @@ class AccurateStepCounterImpl {
     } else {
       _nativeDetector.resetStepCount();
     }
-  }
-
-  /// Stop polling for step count updates
-  void _stopForegroundStepPolling() {
-    _foregroundStepPollTimer?.cancel();
-    _foregroundStepPollTimer = null;
   }
 
   /// Normalize threshold for SensorsStepDetector
@@ -433,7 +487,6 @@ class AccurateStepCounterImpl {
     await _nativeDetector.dispose();
     await _sensorsStepDetector?.dispose();
     _sensorsStepDetector = null;
-    _stopForegroundStepPolling();
     await _stepRecordSubscription?.cancel();
     _inactivityTimer?.cancel();
     _inactivityTimer = null;
@@ -443,6 +496,7 @@ class AccurateStepCounterImpl {
     _stepRecordStore = null;
     _storeInitialized = false;
     _currentConfig = null;
+    _setRuntimeState(StepRuntimeState.uninitialized, reason: 'disposed');
   }
 
   // ============================================================
@@ -474,12 +528,35 @@ class AccurateStepCounterImpl {
   ///   print('Steps today: $steps');
   /// });
   /// ```
-  Future<void> initSteps({bool debugLogging = false}) async {
-    // Add small delay to prevent ANR on heavily loaded main thread
-    await Future.delayed(const Duration(milliseconds: 500));
-    await initializeLogging(debugLogging: debugLogging);
-    await start(config: StepDetectorConfig.walking());
-    await startLogging(config: StepRecordConfig.aggregated());
+  Future<void> initSteps({
+    bool debugLogging = false,
+    bool performanceTracing = false,
+  }) async {
+    final sw = Stopwatch()..start();
+    _setRuntimeState(StepRuntimeState.initializing, reason: 'initStepsStart');
+    try {
+      // Add small delay to prevent ANR on heavily loaded main thread
+      await _traceAsync(
+        'initSteps.startupDelay',
+        () => Future<void>.delayed(const Duration(milliseconds: 500)),
+      );
+      await initializeLogging(
+        debugLogging: debugLogging,
+        performanceTracing: performanceTracing,
+      );
+      await _traceAsync(
+        'initSteps.startDetector',
+        () => start(config: StepDetectorConfig.walking()),
+      );
+      await _traceAsync(
+        'initSteps.startLogging',
+        () => startLogging(config: StepRecordConfig.aggregated()),
+      );
+      _logPerf('initSteps.total took ${sw.elapsedMilliseconds}ms');
+    } catch (_) {
+      _setRuntimeState(StepRuntimeState.error, reason: 'initStepsFailed');
+      rethrow;
+    }
   }
 
   /// Get today's step count (since midnight)
@@ -496,6 +573,7 @@ class AccurateStepCounterImpl {
   /// ```
   Future<int> getTodayStepCount() async {
     _ensureLoggingInitialized();
+    await _flushPendingWritesIfNeeded();
     final now = DateTime.now();
     final startOfToday = DateTime(now.year, now.month, now.day);
     return await _stepRecordStore!.readTotalSteps(from: startOfToday, to: now);
@@ -512,6 +590,7 @@ class AccurateStepCounterImpl {
   /// ```
   Future<int> getYesterdayStepCount() async {
     _ensureLoggingInitialized();
+    await _flushPendingWritesIfNeeded();
     final now = DateTime.now();
     final startOfToday = DateTime(now.year, now.month, now.day);
     final startOfYesterday = startOfToday.subtract(const Duration(days: 1));
@@ -539,6 +618,7 @@ class AccurateStepCounterImpl {
     required DateTime end,
   }) async {
     _ensureLoggingInitialized();
+    await _flushPendingWritesIfNeeded();
 
     // Set start to midnight of start date
     final startMidnight = DateTime(start.year, start.month, start.day);
@@ -604,21 +684,86 @@ class AccurateStepCounterImpl {
   Future<void> initializeLogging({
     bool debugLogging = false,
     bool useBackgroundIsolate = false,
+    bool performanceTracing = false,
   }) async {
-    if (_storeInitialized) return;
+    if (_storeInitialized) {
+      _debugLogging = _debugLogging || debugLogging;
+      _performanceTracing = _performanceTracing || performanceTracing;
+      if (!_isStarted) {
+        _setRuntimeState(
+          StepRuntimeState.initialized,
+          reason: 'initializeLoggingAlreadyInitialized',
+        );
+      }
+      return;
+    }
 
-    _debugLogging = debugLogging;
-    _useBackgroundIsolate = useBackgroundIsolate;
-    _stepRecordStore = StepRecordStore(useIsolate: useBackgroundIsolate);
-    await _stepRecordStore!.initialize();
-    _storeInitialized = true;
-    _log('Logging database initialized (isolate: $useBackgroundIsolate)');
+    _setRuntimeState(
+      StepRuntimeState.initializing,
+      reason: 'initializeLoggingStart',
+    );
+
+    try {
+      _debugLogging = debugLogging;
+      _performanceTracing = performanceTracing;
+      _useBackgroundIsolate = useBackgroundIsolate;
+      _stepRecordStore = StepRecordStore(
+        useIsolate: useBackgroundIsolate,
+        performanceTracing: _performanceTracing,
+      );
+      await _traceAsync('initializeLogging.storeInit', () async {
+        await _stepRecordStore!.initialize();
+        return;
+      });
+      _storeInitialized = true;
+      _log('Logging database initialized (isolate: $useBackgroundIsolate)');
+      if (!_isStarted) {
+        _setRuntimeState(
+          StepRuntimeState.initialized,
+          reason: 'initializeLoggingComplete',
+        );
+      }
+    } catch (_) {
+      _setRuntimeState(
+        StepRuntimeState.error,
+        reason: 'initializeLoggingFailed',
+      );
+      rethrow;
+    }
   }
 
   /// Internal logging helper - only logs if debugLogging is enabled
   void _log(String message) {
     if (_debugLogging) {
       dev.log('AccurateStepCounter: $message');
+    }
+  }
+
+  void _setRuntimeState(StepRuntimeState nextState, {String? reason}) {
+    if (_runtimeState == nextState) return;
+    final previous = _runtimeState;
+    _runtimeState = nextState;
+    final reasonSuffix = reason == null ? '' : ' ($reason)';
+    _log('Runtime state: $previous -> $nextState$reasonSuffix');
+  }
+
+  /// Performance logging helper for ANR diagnostics.
+  void _logPerf(String message) {
+    if (_performanceTracing) {
+      dev.log('AccurateStepCounter[perf]: $message');
+    }
+  }
+
+  /// Measure async operation duration when performance tracing is enabled.
+  Future<T> _traceAsync<T>(String label, Future<T> Function() operation) async {
+    if (!_performanceTracing) {
+      return operation();
+    }
+    final sw = Stopwatch()..start();
+    try {
+      return await operation();
+    } finally {
+      _logPerf('$label took ${sw.elapsedMilliseconds}ms');
     }
   }
 
@@ -631,15 +776,19 @@ class AccurateStepCounterImpl {
     if (_aggregatedStepController.isClosed) return;
 
     final now = DateTime.now();
-    _pendingStreamValue = count;
 
     if (_lastStreamEmitTime == null ||
         now.difference(_lastStreamEmitTime!) >= _minStreamEmitInterval) {
       _aggregatedStepController.add(count);
       _lastStreamEmitTime = now;
     }
-    // If throttled, the value is stored in _pendingStreamValue
-    // and will be emitted on the next step event that passes the throttle
+  }
+
+  /// Flush pending buffered writes before read APIs that expect fresh data.
+  Future<void> _flushPendingWritesIfNeeded() async {
+    if (_aggregatedModeEnabled && _writeBuffer.isNotEmpty) {
+      await _flushWriteBuffer();
+    }
   }
 
   /// Start auto-logging steps to the local database
@@ -683,6 +832,7 @@ class AccurateStepCounterImpl {
     }
 
     if (_recordingEnabled) return;
+    final sw = Stopwatch()..start();
 
     // Use provided config or default
     final cfg = config ?? const StepRecordConfig();
@@ -693,8 +843,14 @@ class AccurateStepCounterImpl {
       _log('Switching to background isolate mode');
       await _stepRecordStore?.close();
       _useBackgroundIsolate = true;
-      _stepRecordStore = StepRecordStore(useIsolate: true);
-      await _stepRecordStore!.initialize();
+      _stepRecordStore = StepRecordStore(
+        useIsolate: true,
+        performanceTracing: _performanceTracing,
+      );
+      await _traceAsync('startLogging.switchToIsolateInit', () async {
+        await _stepRecordStore!.initialize();
+        return;
+      });
     }
 
     _recordingEnabled = true;
@@ -715,7 +871,10 @@ class AccurateStepCounterImpl {
 
     // Initialize aggregated mode with today's data
     if (_aggregatedModeEnabled) {
-      await _initializeAggregatedMode();
+      await _traceAsync('startLogging.initializeAggregatedMode', () async {
+        await _initializeAggregatedMode();
+        return;
+      });
       // Start buffer flush timer (every 3 seconds)
       _writeBufferFlushTimer = Timer.periodic(
         const Duration(seconds: 3),
@@ -747,6 +906,7 @@ class AccurateStepCounterImpl {
     } else {
       _log('Step logging started (no warmup)');
     }
+    _logPerf('startLogging.total took ${sw.elapsedMilliseconds}ms');
   }
 
   /// Stop auto-logging steps
@@ -1024,6 +1184,9 @@ class AccurateStepCounterImpl {
   void setAppState(AppLifecycleState state) {
     _appLifecycleState = state;
     _log('App state changed to $state');
+    if (_isStarted) {
+      _setRuntimeState(_activeRuntimeState(), reason: 'appLifecycleChanged');
+    }
 
     // If logging is enabled and app goes to background, log current steps
     if (_recordingEnabled &&
@@ -1052,9 +1215,30 @@ class AccurateStepCounterImpl {
   /// This is used during lifecycle transitions where the box might be closed
   /// due to Android killing the app. The StepRecordStore now handles this
   /// internally, but this wrapper provides additional safety.
+  String _buildIdempotencyKey(
+    int stepCount,
+    DateTime fromTime,
+    DateTime toTime,
+    StepRecordSource source,
+  ) {
+    final fromMs = fromTime.toUtc().millisecondsSinceEpoch;
+    final toMs = toTime.toUtc().millisecondsSinceEpoch;
+    return '${source.name}|$fromMs|$toMs|$stepCount';
+  }
+
   Future<void> _safeInsertRecord(StepRecord entry) async {
     try {
-      await _stepRecordStore!.insertRecord(entry);
+      final normalizedEntry = entry.idempotencyKey == null
+          ? entry.copyWith(
+              idempotencyKey: _buildIdempotencyKey(
+                entry.stepCount,
+                entry.fromTime,
+                entry.toTime,
+                entry.source,
+              ),
+            )
+          : entry;
+      await _stepRecordStore!.insertRecord(normalizedEntry);
     } catch (e) {
       _log('Error inserting record (will retry): $e');
       // The store will handle reopening internally, so we just log the error
@@ -1318,18 +1502,39 @@ class AccurateStepCounterImpl {
     }
   }
 
-  /// Log steps from terminated state sync
+  Future<bool> _isTerminatedGapAlreadyLogged(TerminatedSyncGap gap) async {
+    if (!_storeInitialized || _stepRecordStore == null) {
+      return false;
+    }
+
+    final segments = gap.splitIntoDailySegments();
+    if (segments.isEmpty) {
+      return false;
+    }
+
+    for (final segment in segments) {
+      final exists = await _stepRecordStore!.hasDuplicateRecord(
+        fromTime: segment.fromTime,
+        toTime: segment.toTime,
+        stepCount: segment.stepCount,
+        source: StepRecordSource.terminated,
+      );
+      if (!exists) {
+        return false;
+      }
+    }
+
+    return true;
+  }
+
+  /// Log steps from terminated state sync using deterministic gap-based keys.
   ///
   /// If the time range spans multiple days, steps are distributed proportionally
   /// across each day to ensure accurate daily step counts.
   ///
   /// Note: Only requires logging to be initialized, not enabled,
   /// so terminated steps are logged even before startLogging() is called.
-  Future<void> _logTerminatedSteps(
-    int stepCount,
-    DateTime fromTime,
-    DateTime toTime,
-  ) async {
+  Future<void> _logTerminatedSteps(TerminatedSyncGap gap) async {
     // Only require initialized, not enabled - terminated steps should
     // always be logged if database is ready, regardless of auto-logging state
     if (!_storeInitialized) {
@@ -1339,15 +1544,23 @@ class AccurateStepCounterImpl {
       return;
     }
 
-    // Use shared distribution logic
-    await _logDistributedSteps(
-      stepCount,
-      fromTime,
-      toTime,
-      StepRecordSource.terminated,
-    );
+    final segments = gap.splitIntoDailySegments();
+    for (final segment in segments) {
+      await _safeInsertRecord(
+        StepRecord(
+          stepCount: segment.stepCount,
+          fromTime: segment.fromTime,
+          toTime: segment.toTime,
+          source: StepRecordSource.terminated,
+          idempotencyKey: segment.idempotencyKey,
+        ),
+      );
+    }
 
-    _log('Logged $stepCount terminated steps (distributed if needed)');
+    _log(
+      'Logged ${gap.missedSteps} terminated steps '
+      '(${segments.length} segment(s), key=${gap.gapKey})',
+    );
   }
 
   /// Manually log a step entry
@@ -1369,7 +1582,7 @@ class AccurateStepCounterImpl {
         'Logging not initialized. Call initializeLogging() first.',
       );
     }
-    await _stepRecordStore!.insertRecord(entry);
+    await _safeInsertRecord(entry);
   }
 
   /// Get total step count from logs (aggregate)
@@ -1392,6 +1605,7 @@ class AccurateStepCounterImpl {
   /// ```
   Future<int> getTotalSteps({DateTime? from, DateTime? to}) async {
     _ensureLoggingInitialized();
+    await _flushPendingWritesIfNeeded();
     return await _stepRecordStore!.readTotalSteps(from: from, to: to);
   }
 
@@ -1406,6 +1620,7 @@ class AccurateStepCounterImpl {
   /// ```
   Future<int> getTodaySteps() async {
     _ensureLoggingInitialized();
+    await _flushPendingWritesIfNeeded();
     final now = DateTime.now();
     final startOfToday = DateTime(now.year, now.month, now.day);
     return await _stepRecordStore!.readTotalSteps(from: startOfToday, to: now);
@@ -1422,6 +1637,7 @@ class AccurateStepCounterImpl {
   /// ```
   Future<int> getYesterdaySteps() async {
     _ensureLoggingInitialized();
+    await _flushPendingWritesIfNeeded();
     final now = DateTime.now();
     final startOfToday = DateTime(now.year, now.month, now.day);
     final startOfYesterday = startOfToday.subtract(const Duration(days: 1));
@@ -1442,6 +1658,7 @@ class AccurateStepCounterImpl {
   /// ```
   Future<int> getTodayAndYesterdaySteps() async {
     _ensureLoggingInitialized();
+    await _flushPendingWritesIfNeeded();
     final now = DateTime.now();
     final startOfToday = DateTime(now.year, now.month, now.day);
     final startOfYesterday = startOfToday.subtract(const Duration(days: 1));
@@ -1473,6 +1690,7 @@ class AccurateStepCounterImpl {
   /// ```
   Future<int> getStepsInRange(DateTime startDate, DateTime endDate) async {
     _ensureLoggingInitialized();
+    await _flushPendingWritesIfNeeded();
 
     // Set start to midnight of startDate
     final start = DateTime(startDate.year, startDate.month, startDate.day);
@@ -1507,7 +1725,12 @@ class AccurateStepCounterImpl {
     DateTime? to,
   }) async {
     _ensureLoggingInitialized();
-    return await _stepRecordStore!.readStepsBySource(source, from: from, to: to);
+    await _flushPendingWritesIfNeeded();
+    return await _stepRecordStore!.readStepsBySource(
+      source,
+      from: from,
+      to: to,
+    );
   }
 
   /// Get all step log entries
@@ -1527,6 +1750,7 @@ class AccurateStepCounterImpl {
     StepRecordSource? source,
   }) async {
     _ensureLoggingInitialized();
+    await _flushPendingWritesIfNeeded();
     return await _stepRecordStore!.readRecords(
       from: from,
       to: to,
@@ -1866,6 +2090,7 @@ class AccurateStepCounterImpl {
     DateTime? to,
   }) async {
     _ensureLoggingInitialized();
+    await _flushPendingWritesIfNeeded();
     return await _stepRecordStore!.getStats(from: from, to: to);
   }
 
@@ -1874,6 +2099,7 @@ class AccurateStepCounterImpl {
   /// Use with caution - this permanently deletes all logged data.
   Future<void> clearStepLogs() async {
     _ensureLoggingInitialized();
+    await _flushPendingWritesIfNeeded();
     await _stepRecordStore!.deleteAllRecords();
     _log('All step logs cleared');
   }
@@ -1889,6 +2115,7 @@ class AccurateStepCounterImpl {
   /// ```
   Future<void> deleteStepLogsBefore(DateTime date) async {
     _ensureLoggingInitialized();
+    await _flushPendingWritesIfNeeded();
     await _stepRecordStore!.deleteRecordsBefore(date);
     _log('Deleted logs before $date');
   }
@@ -1962,6 +2189,28 @@ class AccurateStepCounterImpl {
   ///
   /// Returns the synced data or null if no steps were missed.
   Future<Map<String, dynamic>?> _syncStepsFromTerminatedState() async {
+    if (_terminatedSyncInFlight != null) {
+      return _terminatedSyncInFlight!;
+    }
+
+    final future = _performTerminatedSync();
+    _terminatedSyncInFlight = future;
+    try {
+      return await future;
+    } finally {
+      if (identical(_terminatedSyncInFlight, future)) {
+        _terminatedSyncInFlight = null;
+      }
+    }
+  }
+
+  Future<Map<String, dynamic>?> _performTerminatedSync() async {
+    final sw = Stopwatch()..start();
+    final previousState = _runtimeState;
+    _setRuntimeState(
+      StepRuntimeState.recoveringAfterTermination,
+      reason: 'terminatedSyncStart',
+    );
     try {
       dev.log(
         'AccurateStepCounter: Checking for steps from terminated state...',
@@ -1977,11 +2226,17 @@ class AccurateStepCounterImpl {
       final missedSteps = result['missedSteps'] as int;
       final startTime = result['startTime'] as DateTime;
       final endTime = result['endTime'] as DateTime;
+      final gap = TerminatedSyncGap(
+        missedSteps: missedSteps,
+        startTime: startTime,
+        endTime: endTime,
+      );
 
       dev.log(
         'AccurateStepCounter: Syncing $missedSteps steps from terminated state',
       );
       _log('Time range: $startTime to $endTime');
+      _log('Gap key: ${gap.gapKey}');
 
       // === VALIDATION: Apply same rules as warmup validation ===
       // Prevent shake steps from being synced on app restart
@@ -2011,18 +2266,52 @@ class AccurateStepCounterImpl {
         'AccurateStepCounter: Terminated sync validated - $missedSteps steps at ${durationSeconds > 0 ? (missedSteps / durationSeconds).toStringAsFixed(2) : "N/A"}/s',
       );
 
+      // Session-level dedupe avoids duplicate callback/logging from repeated calls.
+      if (_processedTerminatedGapKeys.contains(gap.gapKey)) {
+        _log('Skipping already processed terminated gap in this session');
+        return null;
+      }
+
+      // Persistent dedupe against existing records (including pre-idempotency rows).
+      if (await _isTerminatedGapAlreadyLogged(gap)) {
+        _processedTerminatedGapKeys.add(gap.gapKey);
+        _log('Skipping terminated sync gap already present in database');
+        return null;
+      }
+
       // Notify via callback if registered
       if (onTerminatedStepsDetected != null) {
         onTerminatedStepsDetected!(missedSteps, startTime, endTime);
       }
 
-      // Log terminated steps to database if logging is enabled
-      await _logTerminatedSteps(missedSteps, startTime, endTime);
+      // Log terminated steps to database if logging is enabled.
+      await _logTerminatedSteps(gap);
+      _processedTerminatedGapKeys.add(gap.gapKey);
 
       return result;
     } catch (e) {
+      _setRuntimeState(StepRuntimeState.error, reason: 'terminatedSyncFailed');
       _log('Error syncing steps after termination: $e');
       return null;
+    } finally {
+      if (_runtimeState != StepRuntimeState.error) {
+        if (_isStarted) {
+          _setRuntimeState(
+            _activeRuntimeState(),
+            reason: 'terminatedSyncComplete',
+          );
+        } else if (_storeInitialized) {
+          _setRuntimeState(
+            StepRuntimeState.initialized,
+            reason: 'terminatedSyncComplete',
+          );
+        } else {
+          _setRuntimeState(previousState, reason: 'terminatedSyncComplete');
+        }
+      }
+      _logPerf(
+        '_syncStepsFromTerminatedState.total took ${sw.elapsedMilliseconds}ms',
+      );
     }
   }
 
