@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.9.5] - 2026-02-22
+
+### Fixed
+- 🔥 **Background Isolate `sqflite` Initialization Error**
+  - **Problem**: In `v1.9.3` when `useBackgroundIsolate` was enabled, `sqflite` failed to initialize within the background isolate (throwing `Bad state: databaseFactory not initialized`). This occurred because Flutter engine bindings were missing in the newly spawned pure Dart isolate context.
+  - **Fix**: Added explicit `DartPluginRegistrant.ensureInitialized()` and `WidgetsFlutterBinding.ensureInitialized()` to `_isolateEntryPoint` inside `DatabaseIsolateService`.
+  - **Benefit**: Background isolate `StepRecordConfig.lowEndDevice()` configuration now cleanly records and processes database logs on native Android devices during both foreground and terminated execution cycles without runtime exception errors.
+
 ## [1.9.4] - 2026-02-22
 
 ### Added

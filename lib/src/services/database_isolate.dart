@@ -1,6 +1,9 @@
 import 'dart:async';
 import 'dart:isolate';
 
+import 'dart:ui';
+
+import 'package:flutter/services.dart';
 import 'package:path/path.dart';
 import 'package:sqflite/sqflite.dart';
 
@@ -130,7 +133,11 @@ class DatabaseIsolateService {
     _receivePort = ReceivePort();
 
     // Spawn the isolate with our entry point
-    _isolate = await Isolate.spawn(_isolateEntryPoint, _receivePort!.sendPort);
+    RootIsolateToken rootToken = RootIsolateToken.instance!;
+    _isolate = await Isolate.spawn(_isolateEntryPoint, [
+      _receivePort!.sendPort,
+      rootToken,
+    ]);
 
     // Wait for the isolate to send its SendPort
     final completer = Completer<SendPort>();
@@ -288,7 +295,13 @@ class DatabaseIsolateService {
   }
 
   /// Entry point for the database isolate
-  static void _isolateEntryPoint(SendPort mainSendPort) async {
+  static void _isolateEntryPoint(dynamic args) async {
+    final List<dynamic> argsList = args as List<dynamic>;
+    final SendPort mainSendPort = argsList[0] as SendPort;
+    final RootIsolateToken token = argsList[1] as RootIsolateToken;
+
+    BackgroundIsolateBinaryMessenger.ensureInitialized(token);
+
     final receivePort = ReceivePort();
     mainSendPort.send(receivePort.sendPort);
 

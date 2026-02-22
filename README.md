@@ -2,7 +2,7 @@
 
 [![pub package](https://img.shields.io/pub/v/accurate_step_counter.svg)](https://pub.dev/packages/accurate_step_counter)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Tests](https://img.shields.io/badge/tests-800%2B%20passing-brightgreen.svg)](https://github.com/rahulshahDEV/accurate_step_counter)
+[![Tests](https://img.shields.io/badge/tests-828%20passing-brightgreen.svg)](https://github.com/rahulshahDEV/accurate_step_counter)
 [![Production Ready](https://img.shields.io/badge/status-production%20ready-brightgreen.svg)](https://github.com/rahulshahDEV/accurate_step_counter)
 
 A production-focused, accurate step counter for Flutter on Android. Works in **foreground**, **background**, and **terminated** recovery states with persistent SQLite storage.
@@ -16,7 +16,7 @@ A production-focused, accurate step counter for Flutter on Android. Works in **f
 - 🔋 **Battery Efficient** - Event-driven, not polling
 - ⏱️ **Inactivity Timeout** - Auto-reset sessions after idle periods
 - 🌍 **External Import** - Import steps from Google Fit, Apple Health, etc.
-- 🧪 **Well Tested** - 800+ automated tests covering lifecycle, dedupe, retention, and stress paths
+- 🧪 **Well Tested** - 828 automated tests covering lifecycle, dedupe, retention, and stress paths
 - 🧵 **Low-End Device Support** - Optional background isolate for smooth UI on budget devices
 
 ## ✅ Production Readiness Scope
@@ -64,7 +64,7 @@ It only converts to "Local Time" when showing steps to the user. This means:
 
 ```yaml
 dependencies:
-  accurate_step_counter: ^1.9.4
+  accurate_step_counter: ^1.9.5
 ```
 
 ### 2. Add Permissions
@@ -360,13 +360,13 @@ await stepCounter.startLogging(config: StepRecordConfig.aggregated());
 
 ## 🧪 Testing
 
-The package includes **800+ automated tests** covering all scenarios:
+The package includes **828 automated tests** covering all scenarios:
 
 ```bash
 # Run all tests
 flutter test
 
-# Expected output: 00:03 +800: All tests passed!
+# Expected output: 00:03 +828: All tests passed!
 ```
 
 ### Test Coverage
@@ -388,7 +388,7 @@ flutter test
 
 This package is **production ready** with:
 
-- ✅ 800+ automated tests
+- ✅ 828 automated tests
 - ✅ Android support scope: API 24+
 - ✅ OEM compatible (MIUI, Samsung, etc.)
 - ✅ Battery efficient
