@@ -55,6 +55,7 @@ class _StepCounterHomePageState extends State<StepCounterHomePage>
   bool _hasPermission = false;
   String _appState = 'resumed';
   String _detectorType = 'Unknown';
+  bool _nativeServiceRunning = false;
   StepRuntimeState _runtimeState = StepRuntimeState.uninitialized;
   final bool _useBackgroundIsolate = true;
   final bool _performanceTracing = false;
@@ -111,43 +112,42 @@ class _StepCounterHomePageState extends State<StepCounterHomePage>
       _setRuntimeStateFromEngine();
       _log('✓ Step counter initialized (explicit startup path)');
 
-      // Check detector type
+      // Check detector type and native service status
       final isHardware = await _stepCounter.isUsingNativeDetector();
-      setState(() => _detectorType = isHardware ? 'Hardware' : 'Accelerometer');
-      _log('Detector type: $_detectorType');
+      final serviceRunning = await _stepCounter.isNativeStepServiceRunning();
+      setState(() {
+        _detectorType = isHardware ? 'Hardware' : 'Accelerometer';
+        _nativeServiceRunning = serviceRunning;
+      });
+      _log('Detector: $_detectorType, Native service: $serviceRunning');
+      _log(
+        'Using native step service: ${_stepCounter.isUsingNativeStepService}',
+      );
 
       // Subscribe to aggregated count stream (stored + live steps)
-      _aggregatedSubscription =
-          _stepCounter.watchAggregatedStepCounter().listen(
-        (steps) {
-          dev.log('AGGREGATED: $steps');
-          _log('AGGREGATED: $steps steps');
-          setState(() => _aggregatedCount = steps);
-        },
-        onError: (e) => _log('Aggregated stream error: $e'),
-      );
+      _aggregatedSubscription = _stepCounter
+          .watchAggregatedStepCounter()
+          .listen((steps) {
+            dev.log('AGGREGATED: $steps');
+            _log('AGGREGATED: $steps steps');
+            setState(() => _aggregatedCount = steps);
+          }, onError: (e) => _log('Aggregated stream error: $e'));
       _log('✓ watchAggregatedStepCounter subscribed');
 
       // Subscribe to DB total for today
-      _todaySubscription = _stepCounter.watchTodaySteps().listen(
-        (steps) {
-          dev.log('DB TOTAL: $steps');
-          setState(() => _todaySteps = steps);
-          _updateSourceStats();
-        },
-        onError: (e) => _log('Today stream error: $e'),
-      );
+      _todaySubscription = _stepCounter.watchTodaySteps().listen((steps) {
+        dev.log('DB TOTAL: $steps');
+        setState(() => _todaySteps = steps);
+        _updateSourceStats();
+      }, onError: (e) => _log('Today stream error: $e'));
       _log('✓ watchTodaySteps subscribed');
 
       // Subscribe to raw step events from detector
-      _stepSubscription = _stepCounter.stepEventStream.listen(
-        (event) {
-          dev.log('RAW STEP EVENT: ${event.stepCount}');
-          _log('RAW: ${event.stepCount} steps');
-          setState(() => _liveStepCount = event.stepCount);
-        },
-        onError: (e) => _log('Step stream error: $e'),
-      );
+      _stepSubscription = _stepCounter.stepEventStream.listen((event) {
+        dev.log('RAW STEP EVENT: ${event.stepCount}');
+        _log('RAW: ${event.stepCount} steps');
+        setState(() => _liveStepCount = event.stepCount);
+      }, onError: (e) => _log('Step stream error: $e'));
       _log('✓ stepEventStream subscribed');
 
       // Terminated steps callback
@@ -156,8 +156,9 @@ class _StepCounterHomePageState extends State<StepCounterHomePage>
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(
-              content:
-                  Text('Synced $steps missed steps from terminated state!'),
+              content: Text(
+                'Synced $steps missed steps from terminated state!',
+              ),
               backgroundColor: Colors.orange,
               duration: const Duration(seconds: 3),
             ),
@@ -194,10 +195,14 @@ class _StepCounterHomePageState extends State<StepCounterHomePage>
     if (!_isInitialized) return;
 
     final today = await _stepCounter.getTodayStepCount();
-    setState(() => _todaySteps = today);
+    final serviceRunning = await _stepCounter.isNativeStepServiceRunning();
+    setState(() {
+      _todaySteps = today;
+      _nativeServiceRunning = serviceRunning;
+    });
     _setRuntimeStateFromEngine();
     await _updateSourceStats();
-    _log('Refreshed: $today steps today');
+    _log('Refreshed: $today steps today (service: $serviceRunning)');
   }
 
   void _setRuntimeStateFromEngine() {
@@ -318,8 +323,9 @@ class _StepCounterHomePageState extends State<StepCounterHomePage>
         actions: [
           Chip(
             label: Text(_appState),
-            backgroundColor:
-                _appState == 'resumed' ? Colors.green : Colors.orange,
+            backgroundColor: _appState == 'resumed'
+                ? Colors.green
+                : Colors.orange,
           ),
           const SizedBox(width: 8),
           IconButton(
@@ -336,8 +342,9 @@ class _StepCounterHomePageState extends State<StepCounterHomePage>
           children: [
             // Status Card
             Card(
-              color:
-                  _hasPermission ? Colors.green.shade900 : Colors.red.shade900,
+              color: _hasPermission
+                  ? Colors.green.shade900
+                  : Colors.red.shade900,
               child: Padding(
                 padding: const EdgeInsets.all(12),
                 child: Column(
@@ -356,10 +363,25 @@ class _StepCounterHomePageState extends State<StepCounterHomePage>
                       'Status: ${_isInitialized ? 'Active' : 'Initializing...'}',
                     ),
                     Text('Runtime: ${_runtimeState.name}'),
-                    Text(
-                      'Flow: init → start detector → start logging'
-                      ' (isolate=${_useBackgroundIsolate ? 'on' : 'off'})',
+                    Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(
+                          _nativeServiceRunning
+                              ? Icons.circle
+                              : Icons.circle_outlined,
+                          size: 10,
+                          color: _nativeServiceRunning
+                              ? Colors.greenAccent
+                              : Colors.red,
+                        ),
+                        const SizedBox(width: 4),
+                        Text(
+                          'Native service: ${_nativeServiceRunning ? 'running' : 'stopped'}',
+                        ),
+                      ],
                     ),
+                    Text('Isolate: ${_useBackgroundIsolate ? 'on' : 'off'}'),
                   ],
                 ),
               ),
@@ -417,7 +439,10 @@ class _StepCounterHomePageState extends State<StepCounterHomePage>
                       children: [
                         _buildMiniStat('Database', '$_todaySteps', Colors.blue),
                         _buildMiniStat(
-                            'Live', '$_liveStepCount', Colors.purple),
+                          'Live',
+                          '$_liveStepCount',
+                          Colors.purple,
+                        ),
                         _buildMiniStat('FG', '$_fgSteps', Colors.green),
                         _buildMiniStat('BG', '$_bgSteps', Colors.orange),
                         _buildMiniStat('Term', '$_termSteps', Colors.red),
@@ -476,6 +501,33 @@ class _StepCounterHomePageState extends State<StepCounterHomePage>
               label: const Text('Manual Terminated Sync'),
               style: ElevatedButton.styleFrom(
                 minimumSize: const Size(double.infinity, 48),
+              ),
+            ),
+            const SizedBox(height: 8),
+            ElevatedButton.icon(
+              onPressed: () {
+                // Demo SmartMergeHelper
+                final merged = SmartMergeHelper.mergeStepCounts(
+                  sensorSteps: _liveStepCount,
+                  healthConnectSteps: 0,
+                  serverSteps: 0,
+                  currentDisplayed: _aggregatedCount,
+                );
+                _log(
+                  'SmartMerge: sensor=$_liveStepCount, displayed=$_aggregatedCount → merged=$merged',
+                );
+                ScaffoldMessenger.of(context).showSnackBar(
+                  SnackBar(
+                    content: Text('SmartMerge result: $merged steps'),
+                    backgroundColor: Colors.teal,
+                  ),
+                );
+              },
+              icon: const Icon(Icons.merge),
+              label: const Text('Test SmartMerge'),
+              style: ElevatedButton.styleFrom(
+                minimumSize: const Size(double.infinity, 48),
+                backgroundColor: Colors.teal.shade800,
               ),
             ),
             const SizedBox(height: 8),
