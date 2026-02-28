@@ -14,6 +14,9 @@ class StepCounterPlatform {
   static const EventChannel _foregroundEventChannel = EventChannel(
     'accurate_step_counter/foreground_step_events',
   );
+  static const EventChannel _nativeStepServiceEventChannel = EventChannel(
+    'accurate_step_counter/native_step_service_events',
+  );
 
   static final StepCounterPlatform _instance = StepCounterPlatform._();
 
@@ -29,6 +32,13 @@ class StepCounterPlatform {
     return _foregroundEventChannel
         .receiveBroadcastStream()
         .cast<Map<dynamic, dynamic>>();
+  }
+
+  /// Stream of realtime step counts emitted by the native step service.
+  Stream<int> get nativeStepServiceStream {
+    return _nativeStepServiceEventChannel.receiveBroadcastStream().map(
+      (event) => (event as int?) ?? 0,
+    );
   }
 
   /// Initialize the platform channel
@@ -340,6 +350,196 @@ class StepCounterPlatform {
       return result ?? false;
     } on PlatformException catch (e) {
       dev.log('Error updating foreground step count: ${e.message}', error: e);
+      return false;
+    }
+  }
+
+  /// Check if device has TYPE_STEP_COUNTER sensor for native service mode.
+  Future<bool> hasNativeStepSensor() async {
+    if (!Platform.isAndroid) {
+      return false;
+    }
+
+    try {
+      final result = await _channel.invokeMethod<bool>('hasNativeStepSensor');
+      return result ?? false;
+    } on PlatformException catch (e) {
+      dev.log('Error checking native step sensor: ${e.message}', error: e);
+      return false;
+    }
+  }
+
+  /// Start native branch-style step counter foreground service.
+  Future<bool> startNativeStepService() async {
+    if (!Platform.isAndroid) {
+      return false;
+    }
+
+    try {
+      final result = await _channel.invokeMethod<bool>(
+        'startNativeStepService',
+      );
+      return result ?? false;
+    } on PlatformException catch (e) {
+      dev.log('Error starting native step service: ${e.message}', error: e);
+      return false;
+    }
+  }
+
+  /// Stop native branch-style step counter foreground service.
+  Future<bool> stopNativeStepService() async {
+    if (!Platform.isAndroid) {
+      return false;
+    }
+
+    try {
+      final result = await _channel.invokeMethod<bool>('stopNativeStepService');
+      return result ?? false;
+    } on PlatformException catch (e) {
+      dev.log('Error stopping native step service: ${e.message}', error: e);
+      return false;
+    }
+  }
+
+  /// Get today's steps from native step service.
+  Future<int> getNativeTodaySteps() async {
+    if (!Platform.isAndroid) {
+      return 0;
+    }
+
+    try {
+      return await _channel.invokeMethod<int>('getNativeTodaySteps') ?? 0;
+    } on PlatformException catch (e) {
+      dev.log('Error getting native today steps: ${e.message}', error: e);
+      return 0;
+    }
+  }
+
+  /// Get yesterday's steps from native step service.
+  Future<int> getNativeYesterdaySteps() async {
+    if (!Platform.isAndroid) {
+      return 0;
+    }
+
+    try {
+      return await _channel.invokeMethod<int>('getNativeYesterdaySteps') ?? 0;
+    } on PlatformException catch (e) {
+      dev.log('Error getting native yesterday steps: ${e.message}', error: e);
+      return 0;
+    }
+  }
+
+  /// Get day-before-yesterday steps from native step service.
+  Future<int> getNativeDayBeforeSteps() async {
+    if (!Platform.isAndroid) {
+      return 0;
+    }
+
+    try {
+      return await _channel.invokeMethod<int>('getNativeDayBeforeSteps') ?? 0;
+    } on PlatformException catch (e) {
+      dev.log('Error getting native day-before steps: ${e.message}', error: e);
+      return 0;
+    }
+  }
+
+  /// Set native service initial offset.
+  Future<void> setNativeInitialOffset(int offset) async {
+    if (!Platform.isAndroid) {
+      return;
+    }
+
+    try {
+      await _channel.invokeMethod('setNativeInitialOffset', {'offset': offset});
+    } on PlatformException catch (e) {
+      dev.log('Error setting native offset: ${e.message}', error: e);
+    }
+  }
+
+  /// Set native service sensor floor.
+  Future<void> setNativeSensorFloor(int floor) async {
+    if (!Platform.isAndroid) {
+      return;
+    }
+
+    try {
+      await _channel.invokeMethod('setNativeSensorFloor', {'floor': floor});
+    } on PlatformException catch (e) {
+      dev.log('Error setting native floor: ${e.message}', error: e);
+    }
+  }
+
+  /// Check whether native step service needs calibration.
+  Future<bool> nativeNeedsCalibration() async {
+    if (!Platform.isAndroid) {
+      return false;
+    }
+
+    try {
+      final result = await _channel.invokeMethod<bool>(
+        'nativeNeedsCalibration',
+      );
+      return result ?? false;
+    } on PlatformException catch (e) {
+      dev.log(
+        'Error checking native calibration state: ${e.message}',
+        error: e,
+      );
+      return false;
+    }
+  }
+
+  /// Check whether the native step service is currently running.
+  Future<bool> isNativeStepServiceRunning() async {
+    if (!Platform.isAndroid) {
+      return false;
+    }
+
+    try {
+      final result = await _channel.invokeMethod<bool>(
+        'isNativeStepServiceRunning',
+      );
+      return result ?? false;
+    } on PlatformException catch (e) {
+      dev.log(
+        'Error checking native step service status: ${e.message}',
+        error: e,
+      );
+      return false;
+    }
+  }
+
+  /// Check if battery optimization is enabled for the host app.
+  Future<bool> isBatteryOptimized() async {
+    if (!Platform.isAndroid) {
+      return false;
+    }
+
+    try {
+      final result = await _channel.invokeMethod<bool>('isBatteryOptimized');
+      return result ?? false;
+    } on PlatformException catch (e) {
+      dev.log('Error checking battery optimization: ${e.message}', error: e);
+      return false;
+    }
+  }
+
+  /// Request battery optimization exclusion for reliable background tracking.
+  Future<bool> requestBatteryOptimization() async {
+    if (!Platform.isAndroid) {
+      return false;
+    }
+
+    try {
+      final result = await _channel.invokeMethod<bool>(
+        'requestBatteryOptimization',
+      );
+      return result ?? false;
+    } on PlatformException catch (e) {
+      dev.log(
+        'Error requesting battery optimization exclusion: ${e.message}',
+        error: e,
+      );
       return false;
     }
   }

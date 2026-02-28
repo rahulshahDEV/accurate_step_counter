@@ -262,7 +262,3 @@ class StepRecordConfig {
         'retention: ${retentionPeriod.inDays} days, isolate: $useBackgroundIsolate)';
   }
 }
-
-// Backwards compatibility
-@Deprecated('Use StepRecordConfig instead')
-typedef StepLoggingConfig = StepRecordConfig;

@@ -127,7 +127,3 @@ class StepRecord {
         idempotencyKey.hashCode;
   }
 }
-
-// Backwards compatibility
-@Deprecated('Use StepRecord instead')
-typedef StepLogEntry = StepRecord;

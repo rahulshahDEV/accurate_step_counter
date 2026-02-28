@@ -1,5 +1,3 @@
-// ignore_for_file: deprecated_member_use_from_same_package
-
 /// Accurate step counter plugin with accelerometer-based detection
 ///
 /// This plugin provides highly accurate step counting using:
@@ -54,13 +52,11 @@ export 'src/models/step_count_event.dart' show StepCountEvent;
 export 'src/models/step_detector_config.dart' show StepDetectorConfig;
 export 'src/models/step_runtime_state.dart' show StepRuntimeState;
 // New names
-export 'src/models/step_record.dart' show StepRecord, StepLogEntry;
-export 'src/models/step_record_source.dart'
-    show StepRecordSource, StepLogSource;
-export 'src/models/step_record_config.dart'
-    show StepRecordConfig, StepLoggingConfig;
-export 'src/services/step_record_store.dart'
-    show StepRecordStore, StepLogDatabase;
+export 'src/models/step_record.dart' show StepRecord;
+export 'src/models/step_record_source.dart' show StepRecordSource;
+export 'src/models/step_record_config.dart' show StepRecordConfig;
+export 'src/services/step_record_store.dart' show StepRecordStore;
+export 'src/services/smart_merge_helper.dart' show SmartMergeHelper;
 
 // Widgets
 export 'src/widgets/step_logs_viewer.dart' show StepLogsViewer;

@@ -623,7 +623,3 @@ class StepRecordStore {
     _isInitialized = false;
   }
 }
-
-// Backwards compatibility
-@Deprecated('Use StepRecordStore instead')
-typedef StepLogDatabase = StepRecordStore;

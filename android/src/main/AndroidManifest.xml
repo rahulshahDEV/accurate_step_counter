@@ -24,5 +24,15 @@
         android:name=".StepCounterForegroundService"
         android:foregroundServiceType="health"
         android:exported="false"/>
+
+    <service
+        android:name=".StepCounterService"
+        android:foregroundServiceType="health"
+        android:exported="false"/>
+
+    <receiver
+        android:name=".MidnightReceiver"
+        android:enabled="true"
+        android:exported="false"/>
   </application>
 </manifest>

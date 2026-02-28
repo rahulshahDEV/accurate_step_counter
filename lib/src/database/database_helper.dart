@@ -130,27 +130,6 @@ class DatabaseHelper {
       ON step_records(idempotency_key)
       WHERE idempotency_key IS NOT NULL
     ''');
-
-    // Step logs table (deprecated, for backwards compatibility)
-    await db.execute('''
-      CREATE TABLE step_logs (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        step_count INTEGER NOT NULL,
-        from_time INTEGER NOT NULL,
-        to_time INTEGER NOT NULL,
-        source INTEGER NOT NULL,
-        source_name TEXT NOT NULL DEFAULT 'accurate_step_counter',
-        confidence REAL NOT NULL DEFAULT 1.0
-      )
-    ''');
-
-    await db.execute('''
-      CREATE INDEX idx_step_logs_time ON step_logs(from_time, to_time)
-    ''');
-
-    await db.execute('''
-      CREATE INDEX idx_step_logs_source ON step_logs(source)
-    ''');
   }
 
   /// Handle database upgrades

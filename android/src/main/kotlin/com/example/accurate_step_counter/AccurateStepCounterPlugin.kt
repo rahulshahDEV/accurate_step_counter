@@ -3,18 +3,24 @@ package com.example.accurate_step_counter
 import android.app.Activity
 import android.app.Application
 import android.Manifest
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.hardware.Sensor
 import android.hardware.SensorEvent
 import android.hardware.SensorEventListener
 import android.hardware.SensorManager
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.PowerManager
+import android.provider.Settings
 import androidx.core.content.ContextCompat
+import androidx.localbroadcastmanager.content.LocalBroadcastManager
 import io.flutter.embedding.engine.plugins.FlutterPlugin
 import io.flutter.embedding.engine.plugins.activity.ActivityAware
 import io.flutter.embedding.engine.plugins.activity.ActivityPluginBinding
@@ -57,6 +63,11 @@ class AccurateStepCounterPlugin : FlutterPlugin, MethodCallHandler, SensorEventL
     // Native step detector
     private var nativeStepDetector: NativeStepDetector? = null
     private var eventSink: EventChannel.EventSink? = null
+
+    // Branch-style native service realtime event stream
+    private lateinit var nativeServiceEventChannel: EventChannel
+    private var nativeServiceEventSink: EventChannel.EventSink? = null
+    private var nativeServiceReceiver: BroadcastReceiver? = null
 
     // Activity lifecycle tracking for hybrid foreground service
     private var activity: Activity? = null
@@ -109,6 +120,24 @@ class AccurateStepCounterPlugin : FlutterPlugin, MethodCallHandler, SensorEventL
             }
         })
         
+        nativeServiceEventChannel = EventChannel(
+            flutterPluginBinding.binaryMessenger,
+            "accurate_step_counter/native_step_service_events"
+        )
+        nativeServiceEventChannel.setStreamHandler(object : EventChannel.StreamHandler {
+            override fun onListen(arguments: Any?, events: EventChannel.EventSink?) {
+                android.util.Log.d("AccurateStepCounter", "NativeService EventChannel: onListen")
+                nativeServiceEventSink = events
+                registerNativeServiceReceiver()
+            }
+
+            override fun onCancel(arguments: Any?) {
+                android.util.Log.d("AccurateStepCounter", "NativeService EventChannel: onCancel")
+                unregisterNativeServiceReceiver()
+                nativeServiceEventSink = null
+            }
+        })
+
         context = flutterPluginBinding.applicationContext
         initializeSensorManager()
         initializeNativeDetector()
@@ -120,6 +149,8 @@ class AccurateStepCounterPlugin : FlutterPlugin, MethodCallHandler, SensorEventL
 
         channel.setMethodCallHandler(null)
         eventChannel.setStreamHandler(null)
+        nativeServiceEventChannel.setStreamHandler(null)
+        unregisterNativeServiceReceiver()
         sensorManager?.unregisterListener(this)
         nativeStepDetector?.dispose()
         nativeStepDetector = null
@@ -152,6 +183,35 @@ class AccurateStepCounterPlugin : FlutterPlugin, MethodCallHandler, SensorEventL
         } ?: run {
             android.util.Log.w("AccurateStepCounter", "Step counter sensor NOT available on this device")
         }
+    }
+
+    private fun registerNativeServiceReceiver() {
+        if (nativeServiceReceiver != null) return
+
+        nativeServiceReceiver = object : BroadcastReceiver() {
+            override fun onReceive(context: Context?, intent: Intent?) {
+                val steps = intent?.getIntExtra(StepCounterService.EXTRA_STEPS, 0) ?: 0
+                mainHandler.post {
+                    nativeServiceEventSink?.success(steps)
+                }
+            }
+        }
+
+        LocalBroadcastManager.getInstance(context).registerReceiver(
+            nativeServiceReceiver!!,
+            IntentFilter(StepCounterService.ACTION_STEPS_UPDATE)
+        )
+    }
+
+    private fun unregisterNativeServiceReceiver() {
+        nativeServiceReceiver?.let {
+            try {
+                LocalBroadcastManager.getInstance(context).unregisterReceiver(it)
+            } catch (_: IllegalArgumentException) {
+                // receiver already unregistered
+            }
+        }
+        nativeServiceReceiver = null
     }
 
     override fun onMethodCall(call: MethodCall, result: Result) {
@@ -331,6 +391,67 @@ class AccurateStepCounterPlugin : FlutterPlugin, MethodCallHandler, SensorEventL
                     }
                 }
             }
+            "hasNativeStepSensor" -> {
+                val sm = context.getSystemService(Context.SENSOR_SERVICE) as SensorManager
+                val sensor = sm.getDefaultSensor(Sensor.TYPE_STEP_COUNTER)
+                result.success(sensor != null)
+            }
+            "startNativeStepService" -> {
+                try {
+                    val intent = Intent(context, StepCounterService::class.java)
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                        context.startForegroundService(intent)
+                    } else {
+                        context.startService(intent)
+                    }
+                    result.success(true)
+                } catch (e: Exception) {
+                    android.util.Log.e("AccurateStepCounter", "startNativeStepService failed: ${e.message}", e)
+                    result.success(false)
+                }
+            }
+            "stopNativeStepService" -> {
+                try {
+                    context.stopService(Intent(context, StepCounterService::class.java))
+                    result.success(true)
+                } catch (e: Exception) {
+                    android.util.Log.e("AccurateStepCounter", "stopNativeStepService failed: ${e.message}", e)
+                    result.success(false)
+                }
+            }
+            "getNativeTodaySteps" -> result.success(StepCounterService.getTodaySteps())
+            "getNativeYesterdaySteps" -> result.success(StepCounterService.getYesterdaySteps())
+            "getNativeDayBeforeSteps" -> result.success(StepCounterService.getDayBeforeSteps())
+            "setNativeInitialOffset" -> {
+                val offset = call.argument<Int>("offset") ?: 0
+                StepCounterService.setInitialOffset(offset)
+                result.success(true)
+            }
+            "setNativeSensorFloor" -> {
+                val floor = call.argument<Int>("floor") ?: 0
+                StepCounterService.setSensorFloor(floor)
+                result.success(true)
+            }
+            "nativeNeedsCalibration" -> result.success(StepCounterService.needsCalibration())
+            "isNativeStepServiceRunning" -> result.success(StepCounterService.isServiceRunning())
+            "isBatteryOptimized" -> {
+                val pm = context.getSystemService(Context.POWER_SERVICE) as PowerManager
+                result.success(pm.isIgnoringBatteryOptimizations(context.packageName).not())
+            }
+            "requestBatteryOptimization" -> {
+                try {
+                    val intent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
+                        data = Uri.parse("package:${context.packageName}")
+                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    }
+                    context.startActivity(intent)
+                    result.success(true)
+                } catch (e: Exception) {
+                    android.util.Log.e("AccurateStepCounter", "requestBatteryOptimization failed: ${e.message}", e)
+                    result.success(false)
+                }
+            }
+
             // Native step detection methods
             "startNativeDetection" -> {
                 android.util.Log.d("AccurateStepCounter", "startNativeDetection method called")

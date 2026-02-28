@@ -23,7 +23,3 @@ enum StepRecordSource {
   /// - Other step tracking apps/devices
   external,
 }
-
-// Backwards compatibility
-@Deprecated('Use StepRecordSource instead')
-typedef StepLogSource = StepRecordSource;

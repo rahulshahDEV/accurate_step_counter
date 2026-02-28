@@ -60,6 +60,10 @@ class AccurateStepCounterImpl {
   SensorsStepDetector? _sensorsStepDetector;
   StreamSubscription<StepCountEvent>? _sensorsStepSubscription;
 
+  // Branch-style native step service mode
+  bool _useNativeStepService = false;
+  StreamSubscription<int>? _nativeServiceStepSubscription;
+
   // Step recording
   StepRecordStore? _stepRecordStore;
   bool _recordingEnabled = false;
@@ -180,6 +184,29 @@ class AccurateStepCounterImpl {
   Future<bool> isUsingNativeDetector() =>
       _nativeDetector.isUsingHardwareDetector();
 
+  /// Whether the native step service (TYPE_STEP_COUNTER foreground service) is being used.
+  ///
+  /// This is the recommended detection mode on Android — uses the hardware
+  /// TYPE_STEP_COUNTER sensor via a foreground service for reliable
+  /// background counting.
+  bool get isUsingNativeStepService => _useNativeStepService;
+
+  /// Check whether the native step service is currently running on the device.
+  ///
+  /// This queries the actual Android service state, not just the Dart-side flag.
+  /// Use this to verify the service survived OEM battery optimization.
+  ///
+  /// Example:
+  /// ```dart
+  /// final running = await stepCounter.isNativeStepServiceRunning();
+  /// if (!running) {
+  ///   // Service was killed, restart it
+  ///   await stepCounter.start();
+  /// }
+  /// ```
+  Future<bool> isNativeStepServiceRunning() =>
+      _platform.isNativeStepServiceRunning();
+
   /// Start step detection
   ///
   /// [config] - Optional configuration for step detection sensitivity
@@ -263,8 +290,42 @@ class AccurateStepCounterImpl {
             });
           }
 
-          // Start the foreground service immediately (NOT on termination)
-          // This keeps the service running in ALL states for OEM compatibility
+          final nativeServiceStarted = await _traceAsync(
+            'start.startNativeStepService',
+            _platform.startNativeStepService,
+          );
+
+          if (nativeServiceStarted) {
+            _useNativeStepService = true;
+            _lastForegroundStepCount = await _platform.getNativeTodaySteps();
+
+            _nativeServiceStepSubscription = _platform.nativeStepServiceStream
+                .listen(
+                  (steps) {
+                    _lastForegroundStepCount = steps;
+                    if (!_foregroundStepController.isClosed) {
+                      _foregroundStepController.add(
+                        StepCountEvent(
+                          stepCount: steps,
+                          timestamp: DateTime.now().toUtc(),
+                        ),
+                      );
+                    }
+                  },
+                  onError: (error) {
+                    _log('native step service stream error: $error');
+                  },
+                );
+
+            _isStarted = true;
+            _setRuntimeState(_activeRuntimeState(), reason: 'startComplete');
+            _logPerf('start.total took ${sw.elapsedMilliseconds}ms');
+            return;
+          }
+
+          _log('Native step service unavailable, falling back to sensors_plus');
+
+          // Start legacy foreground service for sensors_plus fallback mode.
           await _traceAsync('start.startForegroundService', () async {
             await _platform.startForegroundService(
               title: _currentConfig!.foregroundNotificationTitle,
@@ -374,13 +435,20 @@ class AccurateStepCounterImpl {
     _setRuntimeState(StepRuntimeState.stopping, reason: 'stopCalled');
     try {
       if (_useForegroundService) {
-        // Stop sensors_plus step detection
-        await _sensorsStepSubscription?.cancel();
-        _sensorsStepSubscription = null;
-        await _sensorsStepDetector?.stop();
-        _sensorsStepDetector = null;
+        if (_useNativeStepService) {
+          await _nativeServiceStepSubscription?.cancel();
+          _nativeServiceStepSubscription = null;
+          await _platform.stopNativeStepService();
+          _useNativeStepService = false;
+        } else {
+          // Stop sensors_plus step detection
+          await _sensorsStepSubscription?.cancel();
+          _sensorsStepSubscription = null;
+          await _sensorsStepDetector?.stop();
+          _sensorsStepDetector = null;
+          await _platform.stopForegroundService();
+        }
 
-        await _platform.stopForegroundService();
         _useForegroundService = false;
       } else {
         await _nativeDetector.stop();
@@ -410,8 +478,13 @@ class AccurateStepCounterImpl {
   /// ```
   void reset() {
     if (_useForegroundService) {
-      _platform.resetForegroundStepCount();
-      _sensorsStepDetector?.reset();
+      if (_useNativeStepService) {
+        _platform.setNativeInitialOffset(0);
+        _platform.setNativeSensorFloor(0);
+      } else {
+        _platform.resetForegroundStepCount();
+        _sensorsStepDetector?.reset();
+      }
       _lastForegroundStepCount = 0;
     } else {
       _nativeDetector.resetStepCount();
@@ -469,6 +542,31 @@ class AccurateStepCounterImpl {
     return await _platform.hasPermission();
   }
 
+  /// Check if TYPE_STEP_COUNTER sensor exists for native service mode.
+  Future<bool> hasNativeStepServiceSensor() async {
+    return await _platform.hasNativeStepSensor();
+  }
+
+  /// Native service today step count (Android only).
+  Future<int> getNativeServiceTodaySteps() async {
+    return await _platform.getNativeTodaySteps();
+  }
+
+  /// Native service yesterday step count (Android only).
+  Future<int> getNativeServiceYesterdaySteps() async {
+    return await _platform.getNativeYesterdaySteps();
+  }
+
+  /// Native service battery optimization state (Android only).
+  Future<bool> isNativeServiceBatteryOptimized() async {
+    return await _platform.isBatteryOptimized();
+  }
+
+  /// Request battery optimization exclusion for native service mode.
+  Future<bool> requestNativeServiceBatteryOptimizationExclusion() async {
+    return await _platform.requestBatteryOptimization();
+  }
+
   /// Dispose the step counter and release all resources
   ///
   /// Call this when you're completely done with the step counter
@@ -485,6 +583,9 @@ class AccurateStepCounterImpl {
   Future<void> dispose() async {
     await stop();
     await _nativeDetector.dispose();
+    await _nativeServiceStepSubscription?.cancel();
+    _nativeServiceStepSubscription = null;
+    _useNativeStepService = false;
     await _sensorsStepDetector?.dispose();
     _sensorsStepDetector = null;
     await _stepRecordSubscription?.cancel();
