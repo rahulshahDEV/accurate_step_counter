@@ -6,33 +6,54 @@
 
   <!-- Optional: For better sensor access on some devices -->
   <uses-permission android:name="android.permission.BODY_SENSORS"/>
-  
+
   <!-- Required for background body sensor access on Android 13+ (API 33+) -->
   <uses-permission android:name="android.permission.BODY_SENSORS_BACKGROUND"/>
-  
+
   <!-- Required for high sampling rate sensors in health foreground service -->
   <uses-permission android:name="android.permission.HIGH_SAMPLING_RATE_SENSORS"/>
 
-  <!-- Required for foreground service on Android ≤10 -->
+  <!-- Required for foreground service -->
   <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
   <uses-permission android:name="android.permission.FOREGROUND_SERVICE_HEALTH"/>
+  <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC"/>
   <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
   <uses-permission android:name="android.permission.WAKE_LOCK"/>
+  <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED"/>
+  <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS"/>
+  <!-- Exact midnight alarm (auto-granted on Android 13+ for alarm clocks / health) -->
+  <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM"/>
+  <uses-permission android:name="android.permission.USE_EXACT_ALARM"/>
 
   <application>
+    <!-- Legacy sensors_plus FGS (fallback only) -->
     <service
         android:name=".StepCounterForegroundService"
         android:foregroundServiceType="health"
         android:exported="false"/>
 
+    <!-- Primary TYPE_STEP_COUNTER FGS. health|dataSync: HEALTH when AR granted,
+         DATA_SYNC fallback on fresh install before permission (Android 14+). -->
     <service
         android:name=".StepCounterService"
-        android:foregroundServiceType="health"
+        android:foregroundServiceType="health|dataSync"
         android:exported="false"/>
 
     <receiver
         android:name=".MidnightReceiver"
         android:enabled="true"
         android:exported="false"/>
+
+    <receiver
+        android:name=".BootReceiver"
+        android:enabled="true"
+        android:exported="true">
+      <intent-filter>
+        <action android:name="android.intent.action.BOOT_COMPLETED"/>
+        <action android:name="android.intent.action.LOCKED_BOOT_COMPLETED"/>
+        <action android:name="android.intent.action.QUICKBOOT_POWERON"/>
+        <action android:name="com.htc.intent.action.QUICKBOOT_POWERON"/>
+      </intent-filter>
+    </receiver>
   </application>
 </manifest>

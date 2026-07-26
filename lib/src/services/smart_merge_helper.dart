@@ -1,85 +1,94 @@
+import '../policy/merge_policy.dart';
+import '../policy/step_logic.dart';
+
 /// Smart merge utility for combining multiple step count sources.
 ///
-/// This pattern is derived from the Meltdown app's proven step counting
-/// architecture, where the highest reliable count from sensor, Health Connect,
-/// and server is always preferred.
+/// Backed by battle-tested [StepLogic] / [MergePolicy] (HC
+/// duplication detection, sensor overcount correction, server floor).
 ///
-/// Example usage:
+/// Host apps supply Health Connect / Apple Health / server values — this
+/// package does not depend on a Health Connect SDK.
+///
+/// Example:
 /// ```dart
-/// final merged = SmartMergeHelper.mergeStepCounts(
-///   sensorSteps: await stepCounter.currentStepCount,
-///   healthConnectSteps: await health.getTotalSteps(today),
-///   serverSteps: serverRecoveredSteps,
-///   currentDisplayed: displayedCount,
+/// final decision = SmartMergeHelper.merge(
+///   sensorSteps: sensorToday,
+///   healthConnectSteps: hcToday,
+///   serverSteps: serverRecovered,
+///   currentDisplayed: displayed,
 /// );
+/// updateUI(decision.displayed);
 /// ```
 class SmartMergeHelper {
   const SmartMergeHelper._();
 
-  /// Merge multiple step count sources, returning the highest reliable value.
+  static const MergePolicy _policy = MergePolicy();
+
+  /// Merge multiple step count sources using production-grade policy.
   ///
-  /// This is the key reliability pattern: always take the maximum of all
-  /// available sources. This handles cases where:
-  /// - Sensor missed steps due to OEM battery optimization
-  /// - Health Connect was delayed in syncing
-  /// - Server has steps from a previous session
+  /// Prefer this over [mergeStepCounts] when you need floor bookkeeping or
+  /// duplication / overcount flags.
+  static MergeDecision merge({
+    required int sensorSteps,
+    int healthConnectSteps = 0,
+    int serverSteps = 0,
+    int currentDisplayed = 0,
+  }) {
+    return _policy.mergeToday(
+      MergeInputs(
+        hcSteps: healthConnectSteps,
+        sensorSteps: sensorSteps,
+        currentFloor: currentDisplayed,
+        serverRecovered: StepLogic.sanitizeServerSteps(serverSteps),
+      ),
+    );
+  }
+
+  /// Merge multiple step count sources, returning the displayed total.
+  ///
+  /// Uses [StepLogic] (not naive max). HC duplication and sensor
+  /// overcount correction apply when [healthConnectSteps] is provided.
   ///
   /// Parameters:
   /// - [sensorSteps] — Steps from the native sensor (TYPE_STEP_COUNTER)
   /// - [healthConnectSteps] — Steps from Health Connect / Apple Health
   /// - [serverSteps] — Steps recovered from the backend server
-  /// - [currentDisplayed] — Currently displayed step count (monotonic guarantee)
-  ///
-  /// Returns the highest step count from all sources.
-  ///
-  /// Example:
-  /// ```dart
-  /// // In your cubit/bloc:
-  /// final sensorSteps = await NativeStepService.getTodaySteps();
-  /// final hcSteps = await health.getTotalStepsInInterval(startOfDay, now);
-  /// final serverSteps = lastServerResponse.stepsToday ?? 0;
-  ///
-  /// final merged = SmartMergeHelper.mergeStepCounts(
-  ///   sensorSteps: sensorSteps,
-  ///   healthConnectSteps: hcSteps ?? 0,
-  ///   serverSteps: serverSteps,
-  ///   currentDisplayed: currentStepCount,
-  /// );
-  ///
-  /// updateUI(merged);
-  /// ```
+  /// - [currentDisplayed] — Currently displayed step count (floor)
   static int mergeStepCounts({
     required int sensorSteps,
     int healthConnectSteps = 0,
     int serverSteps = 0,
     int currentDisplayed = 0,
   }) {
-    int merged = sensorSteps > healthConnectSteps
-        ? sensorSteps
-        : healthConnectSteps;
-    if (merged < serverSteps) merged = serverSteps;
-    // Never go backwards — monotonic guarantee
-    if (merged < currentDisplayed && currentDisplayed > 0) {
-      merged = currentDisplayed;
-    }
-    return merged;
+    return merge(
+      sensorSteps: sensorSteps,
+      healthConnectSteps: healthConnectSteps,
+      serverSteps: serverSteps,
+      currentDisplayed: currentDisplayed,
+    ).displayed;
   }
 
-  /// Merge just sensor and Health Connect, without server or display constraints.
-  ///
-  /// Simplified version for apps that don't have server-side step recovery.
-  ///
-  /// Example:
-  /// ```dart
-  /// final merged = SmartMergeHelper.mergeSensorAndHealth(
-  ///   sensorSteps: nativeSteps,
-  ///   healthConnectSteps: hcSteps,
-  /// );
-  /// ```
+  /// Merge sensor and Health Connect without server / display floor.
   static int mergeSensorAndHealth({
     required int sensorSteps,
     required int healthConnectSteps,
   }) {
-    return sensorSteps > healthConnectSteps ? sensorSteps : healthConnectSteps;
+    return merge(
+      sensorSteps: sensorSteps,
+      healthConnectSteps: healthConnectSteps,
+    ).displayed;
+  }
+
+  /// Merge yesterday totals with HC-first + asymmetric stability lock.
+  static int mergeYesterday({
+    required int hcYesterday,
+    required int sensorYesterday,
+    required int currentYesterday,
+  }) {
+    return _policy.mergeYesterday(
+      hcYesterday: hcYesterday,
+      sensorYesterday: sensorYesterday,
+      currentYesterday: currentYesterday,
+    );
   }
 }

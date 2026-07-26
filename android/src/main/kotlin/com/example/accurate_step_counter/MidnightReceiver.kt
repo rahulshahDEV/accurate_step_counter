@@ -8,6 +8,9 @@ import android.util.Log
 class MidnightReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context?, intent: Intent?) {
         Log.d("MidnightReceiver", "Midnight reset triggered")
-        // Reset is applied by StepCounterService when the next sensor event arrives.
+        context ?: return
+
+        // Force day rotation in the step counter service
+        StepCounterService.performMidnightReset(context)
     }
 }

@@ -1,10 +1,9 @@
 name: accurate_step_counter
 description: >-
-  Production-grade step counter for Flutter Android. Uses native TYPE_STEP_COUNTER
-  sensor via foreground service for accurate tracking in foreground, background,
-  and terminated states. Includes SQLite logging, smart merge utilities, and
-  warmup validation.
-version: 2.0.0
+  Production-grade step counter for Flutter Android. TYPE_STEP_COUNTER foreground
+  service on all API 24+, production-hardened rate caps and merge policies, SQLite
+  logging, midnight/boot recovery, and BYO Health Connect smart merge.
+version: 3.0.0
 homepage: https://github.com/rahulshahDEV/accurate_step_counter
 repository: https://github.com/rahulshahDEV/accurate_step_counter
 issue_tracker: https://github.com/rahulshahDEV/accurate_step_counter/issues

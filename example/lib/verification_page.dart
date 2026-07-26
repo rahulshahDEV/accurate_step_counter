@@ -128,10 +128,7 @@ class _VerificationPageState extends State<VerificationPage> {
   Future<VerificationResult> _startStepCounter() async {
     try {
       await _stepCounter.start(
-        config: StepDetectorConfig.walking().copyWith(
-          enableOsLevelSync: true,
-          useForegroundServiceOnOldDevices: true,
-        ),
+        config: const StepDetectorConfig(enableOsLevelSync: true),
       );
 
       if (_stepCounter.isStarted) {
@@ -146,17 +143,27 @@ class _VerificationPageState extends State<VerificationPage> {
 
   Future<VerificationResult> _checkNativeDetector() async {
     try {
-      final isHardware = await _stepCounter.isUsingNativeDetector();
-
-      if (isHardware) {
-        return VerificationResult.success(
-          'Using hardware step detector (TYPE_STEP_DETECTOR)',
-        );
-      } else {
+      if (_stepCounter.isUsingNativeStepService) {
+        final running = await _stepCounter.isNativeStepServiceRunning();
+        if (running) {
+          return VerificationResult.success(
+            'Using TYPE_STEP_COUNTER foreground service',
+          );
+        }
         return VerificationResult.warning(
-          'Using accelerometer fallback. Hardware detector not available.',
+          'Native step service mode active but service not reported running',
         );
       }
+
+      final isHardware = await _stepCounter.isUsingNativeDetector();
+      if (isHardware) {
+        return VerificationResult.success(
+          'Fallback: hardware TYPE_STEP_DETECTOR',
+        );
+      }
+      return VerificationResult.warning(
+        'Fallback: accelerometer path (no TYPE_STEP_COUNTER)',
+      );
     } catch (e) {
       return VerificationResult.failure('Error checking detector: $e');
     }

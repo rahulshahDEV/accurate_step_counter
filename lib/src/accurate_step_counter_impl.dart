@@ -207,28 +207,28 @@ class AccurateStepCounterImpl {
   Future<bool> isNativeStepServiceRunning() =>
       _platform.isNativeStepServiceRunning();
 
+  /// Set native service notification display only (does not poison sensor baseline).
+  Future<void> setNativeNotificationDisplay(int value) =>
+      _platform.setNotificationDisplay(value);
+
+  /// Force-update native today steps (mutates offset — prefer notification display).
+  Future<void> forceUpdateNativeTodaySteps(int value) =>
+      _platform.forceUpdateTodaySteps(value);
+
+  /// Consume last native midnight rotation stamp (idempotent clear-on-read).
+  Future<Map<String, dynamic>?> consumeNativeLastRotation() =>
+      _platform.consumeLastRotation();
+
+  /// Clear all native step state (logout / account switch).
+  Future<void> resetNativeStepState() => _platform.resetNativeStepState();
+
   /// Start step detection
   ///
+  /// On Android, prefers the hardware TYPE_STEP_COUNTER foreground service
+  /// on all API levels (including Samsung). Falls back to [NativeStepDetector]
+  /// or sensors_plus only if the native service cannot start.
+  ///
   /// [config] - Optional configuration for step detection sensitivity
-  ///
-  /// Example:
-  /// ```dart
-  /// // Start with default config
-  /// await stepCounter.start();
-  ///
-  /// // Start with custom config
-  /// await stepCounter.start(
-  ///   config: StepDetectorConfig.walking(),
-  /// );
-  ///
-  /// // Start with fine-tuned parameters
-  /// await stepCounter.start(
-  ///   config: StepDetectorConfig(
-  ///     threshold: 1.2,
-  ///     filterAlpha: 0.85,
-  ///   ),
-  /// );
-  /// ```
   ///
   /// Throws [StateError] if already started
   Future<void> start({StepDetectorConfig? config}) async {
@@ -241,55 +241,31 @@ class AccurateStepCounterImpl {
     try {
       _currentConfig = config ?? const StepDetectorConfig();
       _useForegroundService = false;
+      _useNativeStepService = false;
 
-      // For Android, check if we should use foreground service
       if (Platform.isAndroid) {
-        final androidVersion = await _traceAsync(
-          'start.getAndroidVersion',
-          _platform.getAndroidVersion,
-        );
-        final maxApiLevel = _currentConfig!.foregroundServiceMaxApiLevel;
-        _log('Android API level is $androidVersion');
-        dev.log(
-          'AccurateStepCounter: Foreground service max API level is $maxApiLevel',
-        );
+        await _traceAsync('start.platformInitialize', () async {
+          await _platform.initialize();
+          return;
+        });
 
-        // check for samsung devices
-        final isSamsung = await _traceAsync(
-          'start.isSamsungDevice',
-          _platform.isSamsungDevice,
+        // Primary path (all Android 24+): TYPE_STEP_COUNTER FGS
+        final hasSensor = await _traceAsync(
+          'start.hasNativeStepSensor',
+          _platform.hasNativeStepSensor,
         );
 
-        // Use PERSISTENT foreground service for Android ≤ configured level
-        // This ensures OEM battery optimization (MIUI, Samsung) doesn't kill the service
-        if (_currentConfig!.useForegroundServiceOnOldDevices &&
-            androidVersion > 0 &&
-            androidVersion <= maxApiLevel &&
-            !isSamsung) {
-          dev.log(
-            'AccurateStepCounter: Using PERSISTENT foreground service for API ≤$maxApiLevel (OEM-compatible)',
-          );
-          _useForegroundService = true;
+        // Legacy terminated-prefs sync only when the native FGS cannot run.
+        // When TYPE_STEP_COUNTER service is available it is the source of truth
+        // (own prefs + reboot/midnight recovery) — dual sync caused double fills.
+        if (!hasSensor && _currentConfig!.enableOsLevelSync) {
+          await _traceAsync('start.syncTerminatedSteps', () async {
+            await _syncStepsFromTerminatedState();
+            return;
+          });
+        }
 
-          // Initialize platform for OS-level sync and foreground service
-          if (_currentConfig!.enableOsLevelSync) {
-            await _traceAsync('start.platformInitialize', () async {
-              await _platform.initialize();
-              return;
-            });
-
-            // Sync steps from terminated state on app restart
-            // This recovers:
-            // 1. Steps saved to SharedPreferences before app was killed
-            // 2. Steps detected by TYPE_STEP_COUNTER while app was terminated
-            // Note: sensors_plus cannot run when app is killed, so OS-level
-            // step counter is the only source for terminated state steps.
-            await _traceAsync('start.syncTerminatedSteps', () async {
-              await _syncStepsFromTerminatedState();
-              return;
-            });
-          }
-
+        if (hasSensor) {
           final nativeServiceStarted = await _traceAsync(
             'start.startNativeStepService',
             _platform.startNativeStepService,
@@ -297,7 +273,15 @@ class AccurateStepCounterImpl {
 
           if (nativeServiceStarted) {
             _useNativeStepService = true;
+            _useForegroundService = true;
             _lastForegroundStepCount = await _platform.getNativeTodaySteps();
+
+            // Safe calibration: seed offset from SQLite today only when
+            // sensor baseline is unset and stored steps are sane (≤40k).
+            await _traceAsync('start.calibrateIfNeeded', () async {
+              await _calibrateNativeServiceIfNeeded();
+              return;
+            });
 
             _nativeServiceStepSubscription = _platform.nativeStepServiceStream
                 .listen(
@@ -311,11 +295,16 @@ class AccurateStepCounterImpl {
                         ),
                       );
                     }
+                    // Drain rotation stamps that arrived while stream was live
+                    unawaited(_drainNativeRotation());
                   },
                   onError: (error) {
                     _log('native step service stream error: $error');
                   },
                 );
+
+            // Catch midnight rollover that happened while app was dead
+            await _drainNativeRotation();
 
             _isStarted = true;
             _setRuntimeState(_activeRuntimeState(), reason: 'startComplete');
@@ -323,9 +312,20 @@ class AccurateStepCounterImpl {
             return;
           }
 
-          _log('Native step service unavailable, falling back to sensors_plus');
+          _log('Native step service unavailable, trying fallbacks');
+        }
 
-          // Start legacy foreground service for sensors_plus fallback mode.
+        // Optional legacy FGS + sensors_plus for old devices when config asks
+        final androidVersion = await _platform.getAndroidVersion();
+        final maxApiLevel = _currentConfig!.foregroundServiceMaxApiLevel;
+        if (_currentConfig!.useForegroundServiceOnOldDevices &&
+            androidVersion > 0 &&
+            androidVersion <= maxApiLevel) {
+          _log(
+            'Fallback: sensors_plus + legacy FGS for API ≤$maxApiLevel',
+          );
+          _useForegroundService = true;
+
           await _traceAsync('start.startForegroundService', () async {
             await _platform.startForegroundService(
               title: _currentConfig!.foregroundNotificationTitle,
@@ -334,47 +334,24 @@ class AccurateStepCounterImpl {
             return;
           });
 
-          // Use sensors_plus for step detection on Android ≤ maxApiLevel
-          // This replaces the native sensor implementation for better reliability
-          //
-          // IMPORTANT: Threshold normalization is required because:
-          // - NativeStepDetector uses raw accelerometer magnitude thresholds (10-20 range)
-          // - SensorsStepDetector uses magnitude DIFFERENCE thresholds (0.5-2.0 range)
-          // If a high threshold (intended for native) is passed, normalize it down.
           final sensorsThreshold = _normalizeThresholdForSensors(
             _currentConfig!.threshold,
           );
-
-          _log(
-            'SensorsStepDetector threshold: $sensorsThreshold (original: ${_currentConfig!.threshold})',
-          );
-
           _sensorsStepDetector = SensorsStepDetector(
             threshold: sensorsThreshold,
             filterAlpha: _currentConfig!.filterAlpha,
             minTimeBetweenStepsMs: _currentConfig!.minTimeBetweenStepsMs,
             debugLogging: _debugLogging,
           );
-          await _traceAsync('start.sensorsDetectorStart', () async {
-            await _sensorsStepDetector!.start();
-            return;
-          });
-
-          // Listen to step events from sensors_plus
+          await _sensorsStepDetector!.start();
           _sensorsStepSubscription = _sensorsStepDetector!.stepEventStream
               .listen(
                 (event) {
                   _lastForegroundStepCount = event.stepCount;
-
-                  // Emit event via foreground step controller
                   if (!_foregroundStepController.isClosed) {
                     _foregroundStepController.add(event);
                   }
-
-                  // Update native side for persistence
                   _platform.updateForegroundStepCount(event.stepCount);
-
-                  _log('sensors_plus step: ${event.stepCount}');
                 },
                 onError: (error) {
                   _log('sensors_plus error: $error');
@@ -387,33 +364,73 @@ class AccurateStepCounterImpl {
           return;
         }
 
-        // For Android 11+, use native detector + OS-level sync for terminated state
-        if (_currentConfig!.enableOsLevelSync) {
-          await _traceAsync('start.platformInitialize', () async {
-            await _platform.initialize();
-            return;
-          });
+        // Last fallback: NativeStepDetector (TYPE_STEP_DETECTOR / accel)
+        await _traceAsync('start.nativeDetectorStart', () async {
+          await _nativeDetector.start(config: _currentConfig);
+          return;
+        });
 
-          // Sync steps from terminated state (TYPE_STEP_COUNTER)
-          await _traceAsync('start.syncTerminatedSteps', () async {
-            await _syncStepsFromTerminatedState();
-            return;
-          });
-        }
+        _isStarted = true;
+        _setRuntimeState(_activeRuntimeState(), reason: 'startComplete');
+        _logPerf('start.total took ${sw.elapsedMilliseconds}ms');
+        return;
       }
 
-      // For Android 11+ or iOS, start native step detection
-      await _traceAsync('start.nativeDetectorStart', () async {
-        await _nativeDetector.start(config: _currentConfig);
-        return;
-      });
-
+      // Non-Android: no-op start (plugin is Android-only)
       _isStarted = true;
-      _setRuntimeState(_activeRuntimeState(), reason: 'startComplete');
+      _setRuntimeState(_activeRuntimeState(), reason: 'startCompleteNonAndroid');
       _logPerf('start.total took ${sw.elapsedMilliseconds}ms');
     } catch (_) {
       _setRuntimeState(StepRuntimeState.error, reason: 'startFailed');
       rethrow;
+    }
+  }
+
+  /// Seed native offset from SQLite today when calibration needed.
+  Future<void> _calibrateNativeServiceIfNeeded() async {
+    try {
+      final needs = await _platform.nativeNeedsCalibration();
+      if (!needs) return;
+
+      final sensorToday = await _platform.getNativeTodaySteps();
+      if (sensorToday > 0) return;
+
+      if (!_storeInitialized || _stepRecordStore == null) return;
+
+      final storedToday = await getTodaySteps();
+      if (storedToday <= 0 || storedToday > 40000) return;
+
+      await _platform.setNativeInitialOffset(storedToday);
+      _lastForegroundStepCount = storedToday;
+      _log('Calibrated native offset from SQLite today=$storedToday');
+    } catch (e) {
+      _log('Calibration skipped: $e');
+    }
+  }
+
+  /// Drain native midnight rotation stamp into logging / callback if needed.
+  Future<void> _drainNativeRotation() async {
+    try {
+      final rotation = await _platform.consumeLastRotation();
+      if (rotation == null) return;
+
+      final previousToday = rotation['previousToday'] as int? ?? 0;
+      final date = rotation['date'] as String? ?? '';
+      _log('Native day rotation drained: date=$date previousToday=$previousToday');
+
+      if (previousToday > 0 && _lastForegroundStepCount != 0) {
+        _lastForegroundStepCount = 0;
+        if (!_foregroundStepController.isClosed) {
+          _foregroundStepController.add(
+            StepCountEvent(
+              stepCount: 0,
+              timestamp: DateTime.now().toUtc(),
+            ),
+          );
+        }
+      }
+    } catch (e) {
+      _log('drainNativeRotation failed: $e');
     }
   }
 
@@ -567,6 +584,17 @@ class AccurateStepCounterImpl {
     return await _platform.requestBatteryOptimization();
   }
 
+  /// Whether the OS is restricting this app via battery optimization.
+  ///
+  /// Short alias for [isNativeServiceBatteryOptimized].
+  Future<bool> isBatteryOptimized() => isNativeServiceBatteryOptimized();
+
+  /// Prompt the user to exclude this app from battery optimization.
+  ///
+  /// Short alias for [requestNativeServiceBatteryOptimizationExclusion].
+  Future<bool> requestBatteryOptimization() =>
+      requestNativeServiceBatteryOptimizationExclusion();
+
   /// Dispose the step counter and release all resources
   ///
   /// Call this when you're completely done with the step counter
@@ -601,69 +629,67 @@ class AccurateStepCounterImpl {
   }
 
   // ============================================================
-  // Simplified API (Health Connect-like)
+  // Simplified API (recommended for most apps)
   // ============================================================
 
-  /// Initialize step counting with one simple call
+  /// One-shot setup: database → TYPE_STEP_COUNTER FGS → aggregated logging.
   ///
-  /// This is the recommended way to start step counting. It:
-  /// 1. Initializes the database
-  /// 2. Starts the native step detector
-  /// 3. Enables aggregated logging mode
+  /// This is the recommended entry point for Flutter apps. After permissions:
   ///
-  /// After calling this, use [getTodayStepCount], [getYesterdayStepCount],
-  /// or [watchTodaySteps] to access step data.
-  ///
-  /// Example:
   /// ```dart
-  /// final stepCounter = AccurateStepCounter();
-  ///
-  /// // One-time setup
-  /// await stepCounter.initSteps();
-  ///
-  /// // Get today's steps
-  /// final todaySteps = await stepCounter.getTodayStepCount();
-  ///
-  /// // Watch real-time updates
-  /// stepCounter.watchTodaySteps().listen((steps) {
-  ///   print('Steps today: $steps');
-  /// });
+  /// final steps = AccurateStepCounter();
+  /// await steps.startTracking();
+  /// steps.watchTodaySteps().listen(print);
   /// ```
-  Future<void> initSteps({
+  ///
+  /// Order is fixed so calibration and native↔SQLite reconcile work.
+  /// Prefer this over calling [initializeLogging], [start], [startLogging]
+  /// separately.
+  Future<void> startTracking({
+    bool useBackgroundIsolate = true,
     bool debugLogging = false,
     bool performanceTracing = false,
+    StepDetectorConfig? detectorConfig,
+    StepRecordConfig? loggingConfig,
   }) async {
     final sw = Stopwatch()..start();
-    _setRuntimeState(StepRuntimeState.initializing, reason: 'initStepsStart');
+    _setRuntimeState(StepRuntimeState.initializing, reason: 'startTracking');
     try {
-      // Add small delay to prevent ANR on heavily loaded main thread
-      await _traceAsync(
-        'initSteps.startupDelay',
-        () => Future<void>.delayed(const Duration(milliseconds: 500)),
-      );
       await initializeLogging(
         debugLogging: debugLogging,
+        useBackgroundIsolate: useBackgroundIsolate,
         performanceTracing: performanceTracing,
       );
-      await _traceAsync(
-        'initSteps.startDetector',
-        () => start(config: StepDetectorConfig.walking()),
+      await start(config: detectorConfig ?? const StepDetectorConfig());
+      await startLogging(
+        config:
+            loggingConfig ??
+            StepRecordConfig.aggregated(
+              useBackgroundIsolate: useBackgroundIsolate,
+            ),
       );
-      await _traceAsync(
-        'initSteps.startLogging',
-        () => startLogging(config: StepRecordConfig.aggregated()),
-      );
-      _logPerf('initSteps.total took ${sw.elapsedMilliseconds}ms');
+      _logPerf('startTracking.total took ${sw.elapsedMilliseconds}ms');
     } catch (_) {
-      _setRuntimeState(StepRuntimeState.error, reason: 'initStepsFailed');
+      _setRuntimeState(StepRuntimeState.error, reason: 'startTrackingFailed');
       rethrow;
     }
   }
 
+  /// Alias for [startTracking] (kept for older docs / call sites).
+  Future<void> initSteps({
+    bool debugLogging = false,
+    bool performanceTracing = false,
+  }) {
+    return startTracking(
+      debugLogging: debugLogging,
+      performanceTracing: performanceTracing,
+    );
+  }
+
   /// Get today's step count (since midnight)
   ///
-  /// Returns the total steps recorded today, including steps from
-  /// foreground, background, and terminated states.
+  /// Returns the best available total: `max(SQLite, native FGS today)` when
+  /// the hardware service is active, so process-death gaps are not lost.
   ///
   /// Works even if step detection is not currently active.
   ///
@@ -677,12 +703,24 @@ class AccurateStepCounterImpl {
     await _flushPendingWritesIfNeeded();
     final now = DateTime.now();
     final startOfToday = DateTime(now.year, now.month, now.day);
-    return await _stepRecordStore!.readTotalSteps(from: startOfToday, to: now);
+    final sqlite = await _stepRecordStore!.readTotalSteps(
+      from: startOfToday,
+      to: now,
+    );
+    if (_useNativeStepService) {
+      final native = await _platform.getNativeTodaySteps();
+      return native > sqlite ? native : sqlite;
+    }
+    return sqlite;
   }
+
+  /// Alias for [getTodayStepCount].
+  Future<int> getTodaySteps() => getTodayStepCount();
 
   /// Get yesterday's step count
   ///
   /// Returns the total steps recorded yesterday (full 24-hour period).
+  /// Prefers native yesterday when the FGS is active and higher than SQLite.
   ///
   /// Example:
   /// ```dart
@@ -695,11 +733,19 @@ class AccurateStepCounterImpl {
     final now = DateTime.now();
     final startOfToday = DateTime(now.year, now.month, now.day);
     final startOfYesterday = startOfToday.subtract(const Duration(days: 1));
-    return await _stepRecordStore!.readTotalSteps(
+    final sqlite = await _stepRecordStore!.readTotalSteps(
       from: startOfYesterday,
       to: startOfToday,
     );
+    if (_useNativeStepService) {
+      final native = await _platform.getNativeYesterdaySteps();
+      return native > sqlite ? native : sqlite;
+    }
+    return sqlite;
   }
+
+  /// Alias for [getYesterdayStepCount].
+  Future<int> getYesterdaySteps() => getYesterdayStepCount();
 
   /// Get step count for a custom date range
   ///
@@ -1067,19 +1113,45 @@ class AccurateStepCounterImpl {
     final startOfToday = DateTime(now.year, now.month, now.day);
 
     // Load today's steps from SQLite
-    final todaySteps = await _stepRecordStore!.readTotalSteps(
+    var todaySteps = await _stepRecordStore!.readTotalSteps(
       from: startOfToday,
       to: now,
     );
 
-    // Store today's steps from database
+    // Reconcile native FGS → SQLite so process-death gaps are not lost
+    if (_useNativeStepService) {
+      try {
+        final nativeToday = await _platform.getNativeTodaySteps();
+        if (nativeToday > todaySteps) {
+          final gap = nativeToday - todaySteps;
+          final dayKey = '${startOfToday.year}-'
+              '${startOfToday.month.toString().padLeft(2, '0')}-'
+              '${startOfToday.day.toString().padLeft(2, '0')}';
+          await _stepRecordStore!.insertRecord(
+            StepRecord(
+              stepCount: gap,
+              fromTime: startOfToday,
+              toTime: now,
+              source: StepRecordSource.terminated,
+              confidence: 1.0,
+              idempotencyKey: 'native_reconcile|$dayKey|$gap',
+            ),
+          );
+          todaySteps = nativeToday;
+          _log('Reconciled native→SQLite gap=$gap (today=$todaySteps)');
+        }
+      } catch (e) {
+        _log('Native reconcile skipped: $e');
+      }
+    }
+
+    // Store today's steps from database (after reconcile)
     _aggregatedStoredSteps = todaySteps;
-    // Reset session tracking
+    // Reset session tracking against current sensor reading
     _currentSessionSteps = 0;
     _sessionBaseStepCount = currentStepCount;
 
-    // Emit initial value to stream immediately (this is the fix!)
-    // Use direct add for initial value (no throttling needed)
+    // Emit initial value to stream immediately
     if (!_aggregatedStepController.isClosed) {
       _aggregatedStepController.add(_aggregatedStoredSteps);
       _lastStreamEmitTime = DateTime.now();
@@ -1287,6 +1359,11 @@ class AccurateStepCounterImpl {
     _log('App state changed to $state');
     if (_isStarted) {
       _setRuntimeState(_activeRuntimeState(), reason: 'appLifecycleChanged');
+    }
+
+    // On resume, drain midnight rotation stamps missed while backgrounded
+    if (state == AppLifecycleState.resumed && _useNativeStepService) {
+      unawaited(_drainNativeRotation());
     }
 
     // If logging is enabled and app goes to background, log current steps
@@ -1708,44 +1785,6 @@ class AccurateStepCounterImpl {
     _ensureLoggingInitialized();
     await _flushPendingWritesIfNeeded();
     return await _stepRecordStore!.readTotalSteps(from: from, to: to);
-  }
-
-  /// Get steps for today (from midnight to now)
-  ///
-  /// Convenience method that calculates today's date boundaries automatically.
-  ///
-  /// Example:
-  /// ```dart
-  /// final todaySteps = await stepCounter.getTodaySteps();
-  /// print('Steps today: $todaySteps');
-  /// ```
-  Future<int> getTodaySteps() async {
-    _ensureLoggingInitialized();
-    await _flushPendingWritesIfNeeded();
-    final now = DateTime.now();
-    final startOfToday = DateTime(now.year, now.month, now.day);
-    return await _stepRecordStore!.readTotalSteps(from: startOfToday, to: now);
-  }
-
-  /// Get steps for yesterday (full day from midnight to midnight)
-  ///
-  /// Convenience method that calculates yesterday's date boundaries automatically.
-  ///
-  /// Example:
-  /// ```dart
-  /// final yesterdaySteps = await stepCounter.getYesterdaySteps();
-  /// print('Steps yesterday: $yesterdaySteps');
-  /// ```
-  Future<int> getYesterdaySteps() async {
-    _ensureLoggingInitialized();
-    await _flushPendingWritesIfNeeded();
-    final now = DateTime.now();
-    final startOfToday = DateTime(now.year, now.month, now.day);
-    final startOfYesterday = startOfToday.subtract(const Duration(days: 1));
-    return await _stepRecordStore!.readTotalSteps(
-      from: startOfYesterday,
-      to: startOfToday,
-    );
   }
 
   /// Get combined steps for today and yesterday

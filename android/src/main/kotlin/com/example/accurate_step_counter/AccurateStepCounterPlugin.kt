@@ -75,7 +75,10 @@ class AccurateStepCounterPlugin : FlutterPlugin, MethodCallHandler, SensorEventL
     private var activityCount = 0
     
     // Foreground service configuration (set from Dart layer)
-    private var useForegroundServiceOnTerminated = true
+    // Default OFF: native StepCounterService is the primary FGS on all APIs.
+    // Legacy StepCounterForegroundService only starts when explicitly enabled
+    // via configureForegroundServiceOnTerminated AND native service is not running.
+    private var useForegroundServiceOnTerminated = false
     private var foregroundServiceMaxApiLevel = 29  // Default: Android 10
     private var foregroundNotificationTitle = "Step Counter"
     private var foregroundNotificationText = "Tracking your steps..."
@@ -398,6 +401,22 @@ class AccurateStepCounterPlugin : FlutterPlugin, MethodCallHandler, SensorEventL
             }
             "startNativeStepService" -> {
                 try {
+                    // Android 14+ health FGS requires ACTIVITY_RECOGNITION at start time.
+                    // Service itself falls back to dataSync, but we still prefer AR granted.
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                        val arGranted = ContextCompat.checkSelfPermission(
+                            context,
+                            Manifest.permission.ACTIVITY_RECOGNITION
+                        ) == PackageManager.PERMISSION_GRANTED
+                        if (!arGranted) {
+                            android.util.Log.w(
+                                "AccurateStepCounter",
+                                "startNativeStepService: ACTIVITY_RECOGNITION not granted — starting with dataSync fallback"
+                            )
+                        }
+                    }
+                    // Disable legacy terminated-state FGS so two services never fight
+                    useForegroundServiceOnTerminated = false
                     val intent = Intent(context, StepCounterService::class.java)
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                         context.startForegroundService(intent)
@@ -434,6 +453,23 @@ class AccurateStepCounterPlugin : FlutterPlugin, MethodCallHandler, SensorEventL
             }
             "nativeNeedsCalibration" -> result.success(StepCounterService.needsCalibration())
             "isNativeStepServiceRunning" -> result.success(StepCounterService.isServiceRunning())
+            "setNotificationDisplay" -> {
+                val value = call.argument<Int>("value") ?: 0
+                StepCounterService.setNotificationDisplay(value)
+                result.success(true)
+            }
+            "forceUpdateTodaySteps" -> {
+                val value = call.argument<Int>("value") ?: 0
+                StepCounterService.forceUpdateTodaySteps(value)
+                result.success(true)
+            }
+            "consumeLastRotation" -> {
+                result.success(StepCounterService.consumeLastRotation(context))
+            }
+            "resetNativeStepState" -> {
+                StepCounterService.resetState(context)
+                result.success(true)
+            }
             "isBatteryOptimized" -> {
                 val pm = context.getSystemService(Context.POWER_SERVICE) as PowerManager
                 result.success(pm.isIgnoringBatteryOptimizations(context.packageName).not())
@@ -916,6 +952,16 @@ class AccurateStepCounterPlugin : FlutterPlugin, MethodCallHandler, SensorEventL
      * Check if we should start foreground service when app is being terminated
      */
     private fun shouldStartForegroundServiceOnTermination(): Boolean {
+        // Native TYPE_STEP_COUNTER FGS is the primary path — never auto-start
+        // the legacy sensors_plus FGS alongside it (dual-FGS fight).
+        if (StepCounterService.isServiceRunning()) {
+            android.util.Log.d(
+                "AccurateStepCounter",
+                "Native StepCounterService running — skip legacy FGS"
+            )
+            return false
+        }
+
         if (!useForegroundServiceOnTerminated) {
             android.util.Log.d("AccurateStepCounter", "Foreground service disabled by config")
             return false

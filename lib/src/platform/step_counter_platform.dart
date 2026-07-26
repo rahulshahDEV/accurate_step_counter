@@ -509,6 +509,56 @@ class StepCounterPlatform {
     }
   }
 
+  /// Update notification text only — does not mutate sensor baseline/offset.
+  Future<void> setNotificationDisplay(int value) async {
+    if (!Platform.isAndroid) return;
+    try {
+      await _channel.invokeMethod('setNotificationDisplay', {'value': value});
+    } on PlatformException catch (e) {
+      dev.log('Error setting notification display: ${e.message}', error: e);
+    }
+  }
+
+  /// Force-update native today steps (mutates offset — prefer [setNotificationDisplay]).
+  Future<void> forceUpdateTodaySteps(int value) async {
+    if (!Platform.isAndroid) return;
+    try {
+      await _channel.invokeMethod('forceUpdateTodaySteps', {'value': value});
+    } on PlatformException catch (e) {
+      dev.log('Error force-updating today steps: ${e.message}', error: e);
+    }
+  }
+
+  /// Consume last native day-rotation stamp (clear-on-read).
+  ///
+  /// Returns `{'date': 'yyyy-MM-dd', 'previousToday': int}` or null.
+  Future<Map<String, dynamic>?> consumeLastRotation() async {
+    if (!Platform.isAndroid) return null;
+    try {
+      final result = await _channel.invokeMethod<Map<dynamic, dynamic>>(
+        'consumeLastRotation',
+      );
+      if (result == null) return null;
+      return {
+        'date': result['date'] as String?,
+        'previousToday': result['previousToday'] as int? ?? 0,
+      };
+    } on PlatformException catch (e) {
+      dev.log('Error consuming last rotation: ${e.message}', error: e);
+      return null;
+    }
+  }
+
+  /// Clear all native step state (logout / account switch).
+  Future<void> resetNativeStepState() async {
+    if (!Platform.isAndroid) return;
+    try {
+      await _channel.invokeMethod('resetNativeStepState');
+    } on PlatformException catch (e) {
+      dev.log('Error resetting native step state: ${e.message}', error: e);
+    }
+  }
+
   /// Check if battery optimization is enabled for the host app.
   Future<bool> isBatteryOptimized() async {
     if (!Platform.isAndroid) {

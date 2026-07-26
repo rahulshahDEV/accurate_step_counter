@@ -94,34 +94,52 @@ class _StepCounterHomePageState extends State<StepCounterHomePage>
 
   Future<void> _initStepCounter() async {
     try {
-      _log('Initializing step counter (production flow)...');
+      _log('Initializing via startTracking()...');
 
-      await _stepCounter.initializeLogging(
+      await _stepCounter.startTracking(
         debugLogging: true,
         useBackgroundIsolate: _useBackgroundIsolate,
         performanceTracing: _performanceTracing,
       );
       _setRuntimeStateFromEngine();
-      await _stepCounter.start(config: StepDetectorConfig.walking());
-      _setRuntimeStateFromEngine();
-      await _stepCounter.startLogging(
-        config: StepRecordConfig.aggregated(
-          useBackgroundIsolate: _useBackgroundIsolate,
-        ),
-      );
-      _setRuntimeStateFromEngine();
-      _log('✓ Step counter initialized (explicit startup path)');
+      _log('✓ startTracking complete');
 
       // Check detector type and native service status
-      final isHardware = await _stepCounter.isUsingNativeDetector();
       final serviceRunning = await _stepCounter.isNativeStepServiceRunning();
       setState(() {
-        _detectorType = isHardware ? 'Hardware' : 'Accelerometer';
+        if (_stepCounter.isUsingNativeStepService) {
+          _detectorType = 'TYPE_STEP_COUNTER FGS';
+        } else {
+          _detectorType = 'Fallback detector';
+        }
         _nativeServiceRunning = serviceRunning;
       });
       _log('Detector: $_detectorType, Native service: $serviceRunning');
+
+      // Prompt once for battery optimization (OEM kill resilience)
+      try {
+        final optimized = await _stepCounter.isBatteryOptimized();
+        if (optimized) {
+          _log('Battery optimization ON — requesting exclusion');
+          await _stepCounter.requestBatteryOptimization();
+        } else {
+          _log('Battery optimization already excluded');
+        }
+      } catch (e) {
+        _log('Battery opt check skipped: $e');
+      }
+
+      // Demo BYO SmartMerge (host supplies HC / server ints)
+      final merged = SmartMergeHelper.merge(
+        sensorSteps: _stepCounter.currentStepCount,
+        healthConnectSteps: 0,
+        serverSteps: 0,
+        currentDisplayed: 0,
+      );
       _log(
-        'Using native step service: ${_stepCounter.isUsingNativeStepService}',
+        'SmartMerge demo: displayed=${merged.displayed} '
+        'overcount=${merged.overcountingDetected} '
+        'hcDup=${merged.hcDuplicationDetected}',
       );
 
       // Subscribe to aggregated count stream (stored + live steps)

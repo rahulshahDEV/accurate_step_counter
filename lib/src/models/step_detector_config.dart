@@ -48,14 +48,12 @@ class StepDetectorConfig {
   /// Requires ACTIVITY_RECOGNITION permission on Android
   final bool enableOsLevelSync;
 
-  /// Whether to use foreground service on older Android versions
+  /// Whether to enable the legacy sensors_plus + FGS fallback when the
+  /// primary TYPE_STEP_COUNTER service cannot start.
   ///
-  /// On older Android versions, the terminated state sync doesn't work reliably.
-  /// When this is enabled, a foreground service with persistent notification
-  /// will be used to keep counting steps even when app is minimized.
-  ///
-  /// The Android version threshold is controlled by [foregroundServiceMaxApiLevel].
-  /// Defaults to true for reliable step counting on older devices.
+  /// Defaults to **false**. The production-hardened `StepCounterService` is the
+  /// primary path on all Android API 24+. Only enable this for rare devices
+  /// without a step-counter sensor.
   final bool useForegroundServiceOnOldDevices;
 
   /// The maximum Android API level for which foreground service should be used
@@ -112,7 +110,7 @@ class StepDetectorConfig {
     this.filterAlpha = 0.8,
     this.minTimeBetweenStepsMs = 200,
     this.enableOsLevelSync = true,
-    this.useForegroundServiceOnOldDevices = true,
+    this.useForegroundServiceOnOldDevices = false,
     this.foregroundServiceMaxApiLevel = 29,
     this.foregroundNotificationTitle = 'Step Counter',
     this.foregroundNotificationText = 'Tracking your steps...',
@@ -138,7 +136,7 @@ class StepDetectorConfig {
       filterAlpha: 0.8,
       minTimeBetweenStepsMs: 250,
       enableOsLevelSync: true,
-      useForegroundServiceOnOldDevices: true,
+      useForegroundServiceOnOldDevices: false,
     );
   }
 
@@ -149,7 +147,7 @@ class StepDetectorConfig {
       filterAlpha: 0.7,
       minTimeBetweenStepsMs: 150,
       enableOsLevelSync: true,
-      useForegroundServiceOnOldDevices: true,
+      useForegroundServiceOnOldDevices: false,
     );
   }
 
@@ -162,7 +160,7 @@ class StepDetectorConfig {
       filterAlpha: 0.7,
       minTimeBetweenStepsMs: 180,
       enableOsLevelSync: true,
-      useForegroundServiceOnOldDevices: true,
+      useForegroundServiceOnOldDevices: false,
     );
   }
 
@@ -175,7 +173,7 @@ class StepDetectorConfig {
       filterAlpha: 0.9,
       minTimeBetweenStepsMs: 300,
       enableOsLevelSync: true,
-      useForegroundServiceOnOldDevices: true,
+      useForegroundServiceOnOldDevices: false,
     );
   }
 

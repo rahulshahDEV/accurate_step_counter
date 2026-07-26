@@ -5,35 +5,62 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.0.0] - 2026-07-26
+
+### Breaking
+
+- **Primary detection is now TYPE_STEP_COUNTER FGS on all Android API 24+** (including Samsung). Previous API≤29 / non-Samsung gate removed.
+- **`SmartMergeHelper.mergeStepCounts` semantics changed** — no longer naive `max()`. Uses `StepLogic` (HC duplication band, sensor overcount at 1.10×, HC can correct downward, server floor). Prefer `SmartMergeHelper.merge()` for full `MergeDecision` flags.
+- Legacy auto-start of `StepCounterForegroundService` on app termination is **off by default** to prevent dual-FGS fights.
+- `StepDetectorConfig.useForegroundServiceOnOldDevices` defaults to **false** (legacy sensors_plus fallback only).
+
+### Added
+
+- Production-hardened `StepCounterService`: prefs persist, reboot detect, burst/minute/hour caps with baseline fold-in, vehicle/bicycle Activity Recognition filter, TYPE_STEP_DETECTOR cross-check, exact midnight alarm, BootReceiver, TimeChangeReceiver, rotation stamps
+- `ActivityClassifier` + soft-fail without Play Services (`play-services-location`)
+- Dart policies: `StepLogic`, `MergePolicy`, `smoothHcReading`, `RotationGuard`, `StepRateLimiter`
+- Platform APIs: `setNotificationDisplay`, `forceUpdateTodaySteps`, `consumeLastRotation`, `resetNativeStepState`
+- **`startTracking()`** — one-call setup (DB + FGS + aggregated logging)
+- Short aliases: `isBatteryOptimized()`, `requestBatteryOptimization()`
+- Safe calibration from SQLite today (sensor=0, seed ≤40k) on start
+- Native↔SQLite reconcile on aggregated start (fixes undercount after process death)
+- Rotation drain on start / resume / step stream
+- Ported production policy unit tests under `test/policy/`
+
+### Fixed (production DX)
+
+- Skip legacy terminated-prefs sync when the native FGS is available (no dual recovery)
+- Example + verification check TYPE_STEP_COUNTER FGS, not fallback detector
+- Removed 500ms artificial delay from `initSteps` (now aliases `startTracking`)
+- Collapsed duplicate `getTodaySteps` / `getYesterdaySteps` definitions
+
+### Migration
+
+1. Bump to `^3.0.0` and request `ACTIVITY_RECOGNITION` + notifications before `startTracking()`.
+2. Prefer `await steps.startTracking()` over the old three-call sequence.
+3. If you relied on naive max merge, switch to `SmartMergeHelper.merge(...)` and handle `MergeDecision`.
+4. Keep notification synced with `setNativeNotificationDisplay(merged)` — do **not** force-write merged HC into sensor baseline.
+5. Supply HC/server yourself (BYO); package does not embed Health Connect SDK.
+
 ## [2.0.0] - 2026-02-28
 
-### 🎉 Major: Native Step Service + Smart Merge
+### Major: Native Step Service + Smart Merge
 
 This release promotes the native `TYPE_STEP_COUNTER` foreground service as the primary detection strategy and adds the **SmartMergeHelper** utility for combining multiple step sources.
 
 ### Added
-- 🔀 **SmartMergeHelper** — New utility class for combining multiple step count sources
-  - `SmartMergeHelper.mergeStepCounts()` — Returns `max(sensor, healthConnect, server, currentDisplayed)` with monotonic guarantee
-  - `SmartMergeHelper.mergeSensorAndHealth()` — Simplified merge for apps without server recovery
-  - Based on proven production pattern from the Meltdown app
-
-- 📡 **Native Step Service Status API**
-  - `isNativeStepServiceRunning()` — Queries actual Android service state (not just Dart flag)
-  - `isUsingNativeStepService` — Getter to check if native service mode is active
-  - `StepCounterService.isServiceRunning()` — Static Kotlin accessor for service state
+- **SmartMergeHelper** — combine sensor + Health Connect + server (naive max in 2.x)
+- **Native Step Service Status API** — `isNativeStepServiceRunning()`, `isUsingNativeStepService`
 
 ### Changed
-- 📦 **VERSION BUMP to 2.0.0** — Reflects architectural shift to native step service as primary
-- 📘 **README completely rewritten** — Reflects TYPE_STEP_COUNTER architecture, SmartMergeHelper, and production API
-- 📋 **CHANGELOG trimmed** — Condensed historical entries for readability
-- 🧹 **pubspec.yaml cleaned** — Removed boilerplate comments, improved description
+- VERSION BUMP to 2.0.0
+- README rewritten for TYPE_STEP_COUNTER architecture
 
 ### Fixed
-- 🔧 **StepCounterService.kt** — Added missing `isRunning` flag to track service lifecycle state
+- `StepCounterService.kt` — added `isRunning` flag
 
 ### Removed
-- 🗑️ **Stale Hive artifacts** — Removed `accurate_step_counter/step_records.hive` (leftover from pre-v1.9.0 Hive migration)
-- 🗑️ **`.DS_Store`** — Removed committed macOS metadata file
+- Stale Hive artifacts
 
 ---
 
@@ -80,105 +107,6 @@ This release promotes the native `TYPE_STEP_COUNTER` foreground service as the p
 ### Removed
 - Hive dependencies (`hive`, `hive_flutter`, `hive_generator`, `build_runner`)
 
-## [1.8.12] - 2026-01-28
+## [1.8.12] and earlier
 
-### Fixed
-- Crash-proof `deleteRecordsBefore()` with null/open checks after cold start recovery
-
-## [1.8.11] - 2026-01-28
-
-### Fixed
-- Hive box cold start ANR — Added `_ensureBoxOpen()` for automatic box recovery
-
-## [1.8.10] - 2026-01-27
-
-### Fixed
-- **Critical**: Android 12 ANR — Replaced `DateTime.now()` with UTC in 50Hz sensor loop
-
-## [1.8.9] - 2026-01-21
-
-### Fixed
-- Android 14+ foreground service type requirement
-- Android 12+ background start restrictions
-- Added `BODY_SENSORS_BACKGROUND` and `HIGH_SAMPLING_RATE_SENSORS` permissions
-
-## [1.8.8] - 2026-01-20
-
-### Fixed
-- Real-time step counting restored — Removed sensor-level sliding window (moved to logging layer only)
-
-## [1.8.7] - 2026-01-20
-
-### Fixed
-- Duplicate external step writes — Added mutex lock + in-memory tracking
-
-## [1.8.6] - 2026-01-19
-
-### Added
-- Sensor-level shake rejection (sliding window validation)
-- `skipIfDuplicate` parameter for `writeStepsToAggregated()`
-- `hasDuplicateRecord()` and `hasOverlappingRecord()` in StepRecordStore
-
-## [1.8.5] - 2026-01-19
-
-### Fixed
-- Terminated state sync now applies warmup validation rules
-
-## [1.8.4] - 2026-01-19
-
-### Fixed
-- Warmup "shake dilution" — Added 2-second sliding window rate checks
-
-## [1.8.3] - 2026-01-14
-
-### Fixed
-- Midnight boundary — Yesterday's steps no longer appear in today's count
-
-## [1.8.2] - 2026-01-13
-
-### Added
-- `StepLogsViewer` debug widget
-- Singleton foreground service enforcement
-- Multi-day terminated step distribution
-
-## [1.8.1] - 2026-01-12
-
-### Fixed
-- Threshold normalization for SensorsStepDetector
-- Terminated state sync for foreground service mode
-
-## [1.8.0] - 2026-01-11
-
-### Added
-- sensors_plus integration for foreground service mode
-- 671 comprehensive tests
-
-## [1.7.x] - 2026-01-08 to 2026-01-09
-
-### Key changes across 1.7.0–1.7.8
-- Samsung TYPE_STEP_DETECTOR compatibility fix with accelerometer fallback
-- OEM-compatible foreground service (MIUI, Samsung)
-- Real-time EventChannel for foreground service
-- Critical Android 11 terminated state step inflation fix
-- Duplicate prevention for foreground service sync
-- Race condition fixes for SharedPreferences
-
-## [1.6.0] - 2025-12-20
-
-### Added
-- External step import via `writeStepsToAggregated()`
-- `StepRecordSource.external` source type
-
-## [1.5.0] - 2025-12-15
-
-### Added
-- Aggregated mode (`watchAggregatedStepCounter()`)
-- `StepRecordConfig` presets
-
-## [1.0.0] - 2025-11-01
-
-### Initial Release
-- Accelerometer-based step detection
-- SQLite persistent logging
-- Foreground service for background tracking
-- Terminated state recovery via TYPE_STEP_COUNTER
+See git history for pre-1.9.0 notes.
