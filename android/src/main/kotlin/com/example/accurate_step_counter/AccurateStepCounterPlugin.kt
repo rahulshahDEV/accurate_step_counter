@@ -51,7 +51,8 @@ class AccurateStepCounterPlugin : FlutterPlugin, MethodCallHandler, SensorEventL
     private lateinit var channel: MethodChannel
     private lateinit var eventChannel: EventChannel
     private lateinit var context: Context
-    private val mainHandler = Handler(Looper.getMainLooper())
+    // Lazy so JVM unit tests can construct the plugin without mocking Looper.
+    private val mainHandler by lazy { Handler(Looper.getMainLooper()) }
 
     // Coroutine scope for background operations (prevents ANR)
     private val pluginScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
@@ -178,11 +179,15 @@ class AccurateStepCounterPlugin : FlutterPlugin, MethodCallHandler, SensorEventL
         sensorManager = context.getSystemService(Context.SENSOR_SERVICE) as SensorManager
         stepCounterSensor = sensorManager?.getDefaultSensor(Sensor.TYPE_STEP_COUNTER)
 
+        // Do NOT register the sensor listener here. StepCounterService owns the
+        // live TYPE_STEP_COUNTER subscription; registering twice burns battery
+        // and races SharedPreferences baselines. Plugin registers on-demand only
+        // inside getStepCountFromSensorAsync / terminated sync.
         stepCounterSensor?.let { sensor ->
-            android.util.Log.d("AccurateStepCounter", "Step counter sensor found: ${sensor.name}")
-            android.util.Log.d("AccurateStepCounter", "Sensor vendor: ${sensor.vendor}, version: ${sensor.version}")
-            sensorManager?.registerListener(this, sensor, SensorManager.SENSOR_DELAY_NORMAL)
-            android.util.Log.d("AccurateStepCounter", "Sensor listener registered")
+            android.util.Log.d(
+                "AccurateStepCounter",
+                "Step counter sensor found: ${sensor.name} (lazy register)"
+            )
         } ?: run {
             android.util.Log.w("AccurateStepCounter", "Step counter sensor NOT available on this device")
         }

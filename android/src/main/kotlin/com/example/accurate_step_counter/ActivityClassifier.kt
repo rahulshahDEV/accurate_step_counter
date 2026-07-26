@@ -229,8 +229,17 @@ class ActivityClassifier {
                 .setActivityTransition(transitionType)
                 .build()
 
+        // Unique RC so FLAG_UPDATE_CURRENT cannot clobber midnight/notification
+        // PendingIntents that also use request-code 0 in host apps / other plugins.
+        private const val RC_ACTIVITY_TRANSITION = 0x4154_5258 // "ATRX"
+
         private fun transitionPendingIntent(context: Context): PendingIntent {
-            val intent = Intent(ACTION_TRANSITION).setPackage(context.packageName)
+            // Explicit component is required for reliable delivery on Android 8+
+            // (implicit package broadcasts are restricted; dynamic receivers alone
+            // are not enough once Play Services fires the PendingIntent).
+            val intent = Intent(context, ActivityTransitionReceiver::class.java).apply {
+                action = ACTION_TRANSITION
+            }
             // FLAG_MUTABLE required by ActivityRecognitionClient on API 31+
             // (the receiver mutates the intent extras with the result).
             val flags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
@@ -238,7 +247,7 @@ class ActivityClassifier {
             } else {
                 PendingIntent.FLAG_UPDATE_CURRENT
             }
-            return PendingIntent.getBroadcast(context, 0, intent, flags)
+            return PendingIntent.getBroadcast(context, RC_ACTIVITY_TRANSITION, intent, flags)
         }
 
         private fun isPlayServicesAvailable(context: Context): Boolean {

@@ -493,10 +493,9 @@ class StepCounterService : Service(), SensorEventListener {
                         )
                     }
                 } catch (se: SecurityException) {
-                    // SCHEDULE_EXACT_ALARM not granted on Android 12+ — fall
-                    // back to inexact while-idle. The newly added USE_EXACT_ALARM
-                    // manifest permission (auto-granted on Android 13+) should
-                    // make this path unreachable in practice on modern devices.
+                // SCHEDULE_EXACT_ALARM not granted on Android 12+ — fall
+                // back to inexact while-idle. Midnight may drift by minutes
+                // until the next sensor day-check or app resume drain.
                     Log.w(TAG, "Exact alarm denied, using inexact fallback: ${se.message}")
                     alarmManager.setAndAllowWhileIdle(
                         AlarmManager.RTC_WAKEUP,
@@ -516,7 +515,6 @@ class StepCounterService : Service(), SensorEventListener {
     private var stepSensor: Sensor? = null
     private var stepDetectorSensor: Sensor? = null
     private var timeChangeReceiver: TimeChangeReceiver? = null
-    private var activityTransitionReceiver: ActivityTransitionReceiver? = null
 
     override fun onCreate() {
         super.onCreate()
@@ -552,20 +550,10 @@ class StepCounterService : Service(), SensorEventListener {
             Log.d(TAG, "Step detector registered for cross-check")
         }
 
-        // Activity transitions classifier. Wired before sensor data starts
-        // flowing so the first onSensorChanged tick already sees a fresh
-        // state (or no state, in which case the classifier returns "not in
-        // vehicle" and we count freely). Round 4 hardening.
+        // Activity transitions classifier. Manifest-declared
+        // ActivityTransitionReceiver is the explicit PendingIntent target;
+        // do not also register dynamically (would risk double-handling).
         try {
-            val transitionFilter = IntentFilter(ActivityClassifier.ACTION_TRANSITION)
-            activityTransitionReceiver = ActivityTransitionReceiver().also {
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                    registerReceiver(it, transitionFilter, RECEIVER_NOT_EXPORTED)
-                } else {
-                    @Suppress("UnspecifiedRegisterReceiverFlag")
-                    registerReceiver(it, transitionFilter)
-                }
-            }
             ActivityClassifier.startTracking(this)
         } catch (e: Exception) {
             Log.w(TAG, "Activity classifier setup failed (soft-degrade): ${e.message}")
@@ -1086,6 +1074,19 @@ class StepCounterService : Service(), SensorEventListener {
                 999
             }
 
+            // Capture pre-rotation today so Flutter can recover yesterday when
+            // cold-start restore rotates the day (midnight alarm missed because
+            // process was dead). Without this stamp, consumeLastRotation() is
+            // empty and the UI can keep showing yesterday's total as "today".
+            val previousTodayBeforeRestore = prefs.getInt(KEY_TODAY_STEPS, 0)
+            val rotationDate = String.format(
+                Locale.US,
+                "%04d-%02d-%02d",
+                cal.get(Calendar.YEAR),
+                cal.get(Calendar.MONTH) + 1,
+                cal.get(Calendar.DAY_OF_MONTH)
+            )
+
             when {
                 daysDiff == 0 -> {
                     // Same day — restore everything
@@ -1108,6 +1109,8 @@ class StepCounterService : Service(), SensorEventListener {
                     sensorFloor = 0
                     lastResetDay = currentDay
                     lastResetYear = currentYear
+                    lastAcceptedBootSteps = -1
+                    stampRestoreRotation(prefs, rotationDate, previousTodayBeforeRestore)
                     Log.d(TAG, "New day restore: yesterday=$yesterdaySteps")
                 }
                 daysDiff == 2 -> {
@@ -1119,6 +1122,8 @@ class StepCounterService : Service(), SensorEventListener {
                     sensorFloor = 0
                     lastResetDay = currentDay
                     lastResetYear = currentYear
+                    lastAcceptedBootSteps = -1
+                    stampRestoreRotation(prefs, rotationDate, previousTodayBeforeRestore)
                     Log.d(TAG, "2-day gap: dayBefore=${dayBeforeSteps}")
                 }
                 else -> {
@@ -1130,7 +1135,30 @@ class StepCounterService : Service(), SensorEventListener {
                     sensorFloor = 0
                     lastResetDay = currentDay
                     lastResetYear = currentYear
+                    lastAcceptedBootSteps = -1
+                    if (previousTodayBeforeRestore > 0) {
+                        stampRestoreRotation(prefs, rotationDate, previousTodayBeforeRestore)
+                    }
                     Log.d(TAG, "Stale data cleared, fresh start (${daysDiff}d gap)")
+                }
+            }
+
+            // Persist rotated counters so a second cold start same day does not
+            // re-apply the gap branch with stale KEY_TODAY_STEPS.
+            if (daysDiff != 0) {
+                try {
+                    prefs.edit().apply {
+                        putInt(KEY_BOOT_BASELINE, -1)
+                        putInt(KEY_TODAY_STEPS, 0)
+                        putInt(KEY_YESTERDAY_STEPS, yesterdaySteps)
+                        putInt(KEY_DAY_BEFORE_STEPS, dayBeforeSteps)
+                        putInt(KEY_LAST_RESET_DAY, currentDay)
+                        putInt(KEY_LAST_RESET_YEAR, currentYear)
+                        putInt(KEY_LAST_BOOT_COUNT, -1)
+                        apply()
+                    }
+                } catch (e: Exception) {
+                    Log.w(TAG, "Failed to persist restore rotation: ${e.message}")
                 }
             }
 
@@ -1145,7 +1173,27 @@ class StepCounterService : Service(), SensorEventListener {
         }
     }
 
+    /** Stamp rotation prefs so Flutter drain recovers after cold-start day gap. */
+    private fun stampRestoreRotation(
+        prefs: SharedPreferences,
+        rotationDate: String,
+        previousToday: Int,
+    ) {
+        try {
+            prefs.edit()
+                .putString(KEY_LAST_ROTATION_DATE, rotationDate)
+                .putInt(KEY_LAST_ROTATION_PREV_TODAY, previousToday)
+                .apply()
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to stamp restore rotation: ${e.message}")
+        }
+    }
+
     private fun createNotificationChannel() {
+        // NotificationChannel exists only on API 26+. Calling on API 24–25
+        // crashes the primary FGS path (legacy FGS already guarded this).
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
+
         val channel = NotificationChannel(
             CHANNEL_ID,
             "Step Counter",
@@ -1224,14 +1272,6 @@ class StepCounterService : Service(), SensorEventListener {
             }
         }
         timeChangeReceiver = null
-        activityTransitionReceiver?.let {
-            try {
-                unregisterReceiver(it)
-            } catch (e: Exception) {
-                Log.w(TAG, "ActivityTransitionReceiver unregister: ${e.message}")
-            }
-        }
-        activityTransitionReceiver = null
         try {
             ActivityClassifier.stopTracking(this)
         } catch (e: Exception) {

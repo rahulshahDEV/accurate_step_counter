@@ -45,6 +45,7 @@ android {
 
     defaultConfig {
         minSdk = 24
+        consumerProguardFiles("consumer-rules.pro")
     }
 
     dependencies {
@@ -59,6 +60,7 @@ android {
     }
 
     testOptions {
+        unitTests.returnDefaultValues = true
         unitTests.all {
             useJUnitPlatform()
 

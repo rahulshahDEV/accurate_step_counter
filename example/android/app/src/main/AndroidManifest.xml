@@ -1,11 +1,8 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
-    <!-- Required for accessing step counter sensor on Android 10+ (API 29+) -->
+    <!-- Required for TYPE_STEP_COUNTER on Android 10+ -->
     <uses-permission android:name="android.permission.ACTIVITY_RECOGNITION"/>
 
-    <!-- Optional: For better sensor access on some devices -->
-    <uses-permission android:name="android.permission.BODY_SENSORS"/>
-
-    <!-- Required for foreground service on Android ≤10 -->
+    <!-- Required for foreground service -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_HEALTH"/>
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC"/>
@@ -13,6 +10,7 @@
     <uses-permission android:name="android.permission.WAKE_LOCK"/>
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED"/>
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS"/>
+    <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM"/>
 
     <application
         android:label="accurate_step_counter_example"

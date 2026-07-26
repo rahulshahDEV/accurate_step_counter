@@ -609,6 +609,15 @@ class AccurateStepCounterImpl {
   /// }
   /// ```
   Future<void> dispose() async {
+    // Stop logging first so buffered SQLite writes flush and the periodic
+    // flush timer cannot hit a closed store.
+    if (_recordingEnabled || _writeBuffer.isNotEmpty) {
+      await stopLogging();
+    } else {
+      _writeBufferFlushTimer?.cancel();
+      _writeBufferFlushTimer = null;
+    }
+
     await stop();
     await _nativeDetector.dispose();
     await _nativeServiceStepSubscription?.cancel();
@@ -1062,6 +1071,8 @@ class AccurateStepCounterImpl {
     _stepRecordSubscription = null;
     _inactivityTimer?.cancel();
     _inactivityTimer = null;
+    _writeBufferFlushTimer?.cancel();
+    _writeBufferFlushTimer = null;
     _recordingEnabled = false;
     _aggregatedModeEnabled = false;
     _log('Step logging stopped');

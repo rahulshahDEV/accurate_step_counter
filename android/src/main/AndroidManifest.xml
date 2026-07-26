@@ -1,17 +1,8 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
   package="com.example.accurate_step_counter">
 
-  <!-- Required for accessing step counter sensor on Android 10+ (API 29+) -->
+  <!-- Required for TYPE_STEP_COUNTER / Activity Recognition on Android 10+ -->
   <uses-permission android:name="android.permission.ACTIVITY_RECOGNITION"/>
-
-  <!-- Optional: For better sensor access on some devices -->
-  <uses-permission android:name="android.permission.BODY_SENSORS"/>
-
-  <!-- Required for background body sensor access on Android 13+ (API 33+) -->
-  <uses-permission android:name="android.permission.BODY_SENSORS_BACKGROUND"/>
-
-  <!-- Required for high sampling rate sensors in health foreground service -->
-  <uses-permission android:name="android.permission.HIGH_SAMPLING_RATE_SENSORS"/>
 
   <!-- Required for foreground service -->
   <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
@@ -21,9 +12,17 @@
   <uses-permission android:name="android.permission.WAKE_LOCK"/>
   <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED"/>
   <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS"/>
-  <!-- Exact midnight alarm (auto-granted on Android 13+ for alarm clocks / health) -->
+  <!-- Midnight rollover. Prefer SCHEDULE_EXACT_ALARM; code falls back to inexact
+       if denied. Do NOT declare USE_EXACT_ALARM (Play policy: clocks/calendars). -->
   <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM"/>
-  <uses-permission android:name="android.permission.USE_EXACT_ALARM"/>
+
+  <!-- Soft-declare step hardware so installs still succeed on devices without it -->
+  <uses-feature
+      android:name="android.hardware.sensor.stepcounter"
+      android:required="false"/>
+  <uses-feature
+      android:name="android.hardware.sensor.stepdetector"
+      android:required="false"/>
 
   <application>
     <!-- Legacy sensors_plus FGS (fallback only) -->
@@ -41,6 +40,12 @@
 
     <receiver
         android:name=".MidnightReceiver"
+        android:enabled="true"
+        android:exported="false"/>
+
+    <!-- Explicit component target for Activity Recognition PendingIntent -->
+    <receiver
+        android:name=".ActivityTransitionReceiver"
         android:enabled="true"
         android:exported="false"/>
 

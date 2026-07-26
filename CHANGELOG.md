@@ -26,13 +26,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Native↔SQLite reconcile on aggregated start (fixes undercount after process death)
 - Rotation drain on start / resume / step stream
 - Ported production policy unit tests under `test/policy/`
+- Soft `uses-feature` for stepcounter/stepdetector (`required=false`)
+- Consumer ProGuard keep rules for services/receivers
 
-### Fixed (production DX)
+### Fixed (production DX / hardening)
 
 - Skip legacy terminated-prefs sync when the native FGS is available (no dual recovery)
 - Example + verification check TYPE_STEP_COUNTER FGS, not fallback detector
 - Removed 500ms artificial delay from `initSteps` (now aliases `startTracking`)
 - Collapsed duplicate `getTodaySteps` / `getYesterdaySteps` definitions
+- Cold-start day-gap restore stamps `KEY_LAST_ROTATION_*` and persists rotated prefs
+- Activity Recognition PendingIntent uses explicit component + unique request code; receiver in manifest
+- Removed Play-risk permissions `USE_EXACT_ALARM`, `BODY_SENSORS`, `BODY_SENSORS_BACKGROUND`, `HIGH_SAMPLING_RATE_SENSORS`
+- Plugin no longer permanently registers a second `TYPE_STEP_COUNTER` listener (battery)
+- Kotlin unit test matches real MethodChannel API
+- `NotificationChannel` creation guarded for API 24–25 (`StepCounterService`)
+- `dispose()` / `stopLogging()` flush write buffer and cancel flush timer
 
 ### Migration
 

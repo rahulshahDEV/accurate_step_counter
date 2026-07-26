@@ -12,12 +12,9 @@ import com.google.android.gms.location.ActivityTransitionResult
  * ON_BICYCLE / STILL). Hands each event to [ActivityClassifier] which
  * maintains the in-memory state the step counter consults.
  *
- * Registered dynamically by [StepCounterService] rather than via manifest:
- *   - Manifest-registered receivers on Android 14+ require explicit
- *     `RECEIVER_EXPORTED` / `RECEIVER_NOT_EXPORTED` declaration and have
- *     additional background launch restrictions.
- *   - Dynamic registration during the foreground service's lifetime is
- *     simpler and unregisters cleanly on service stop.
+ * Registered in the plugin manifest and targeted by an explicit PendingIntent
+ * from [ActivityClassifier]. Dynamic registration is intentionally avoided
+ * so Play Services delivers exactly once to this component.
  *
  * Round 4 hardening.
  */
