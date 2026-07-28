@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:developer' as dev;
+import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:accurate_step_counter/accurate_step_counter.dart';
@@ -46,6 +47,7 @@ class _StepCounterHomePageState extends State<StepCounterHomePage>
 
   // State
   int _todaySteps = 0;
+  int _yesterdaySteps = 0;
   int _liveStepCount = 0;
   int _aggregatedCount = 0;
   int _fgSteps = 0;
@@ -75,15 +77,19 @@ class _StepCounterHomePageState extends State<StepCounterHomePage>
   Future<void> _requestPermissionAndInit() async {
     _log('Requesting permissions...');
 
-    // Request activity recognition permission
+    if (Platform.isIOS) {
+      // HealthKit permission will be requested by package start().
+      setState(() => _hasPermission = true);
+      await _initStepCounter();
+      return;
+    }
+
     final activityStatus = await Permission.activityRecognition.request();
     _log('Activity recognition: ${activityStatus.name}');
-
-    // Request notification permission (for foreground service on Android 13+)
     final notifStatus = await Permission.notification.request();
     _log('Notification: ${notifStatus.name}');
 
-    if (activityStatus.isGranted) {
+    if (activityStatus.isGranted || Platform.isIOS) {
       setState(() => _hasPermission = true);
       await _initStepCounter();
     } else {
@@ -143,13 +149,12 @@ class _StepCounterHomePageState extends State<StepCounterHomePage>
       );
 
       // Subscribe to aggregated count stream (stored + live steps)
-      _aggregatedSubscription = _stepCounter
-          .watchAggregatedStepCounter()
-          .listen((steps) {
-            dev.log('AGGREGATED: $steps');
-            _log('AGGREGATED: $steps steps');
-            setState(() => _aggregatedCount = steps);
-          }, onError: (e) => _log('Aggregated stream error: $e'));
+      _aggregatedSubscription =
+          _stepCounter.watchAggregatedStepCounter().listen((steps) {
+        dev.log('AGGREGATED: $steps');
+        _log('AGGREGATED: $steps steps');
+        setState(() => _aggregatedCount = steps);
+      }, onError: (e) => _log('Aggregated stream error: $e'));
       _log('✓ watchAggregatedStepCounter subscribed');
 
       // Subscribe to DB total for today
@@ -213,9 +218,11 @@ class _StepCounterHomePageState extends State<StepCounterHomePage>
     if (!_isInitialized) return;
 
     final today = await _stepCounter.getTodayStepCount();
+    final yesterday = await _stepCounter.getYesterdayStepCount();
     final serviceRunning = await _stepCounter.isNativeStepServiceRunning();
     setState(() {
       _todaySteps = today;
+      _yesterdaySteps = yesterday;
       _nativeServiceRunning = serviceRunning;
     });
     _setRuntimeStateFromEngine();
@@ -272,6 +279,7 @@ class _StepCounterHomePageState extends State<StepCounterHomePage>
     _stepCounter.reset();
     setState(() {
       _todaySteps = 0;
+      _yesterdaySteps = 0;
       _liveStepCount = 0;
       _aggregatedCount = 0;
       _fgSteps = 0;
@@ -341,9 +349,8 @@ class _StepCounterHomePageState extends State<StepCounterHomePage>
         actions: [
           Chip(
             label: Text(_appState),
-            backgroundColor: _appState == 'resumed'
-                ? Colors.green
-                : Colors.orange,
+            backgroundColor:
+                _appState == 'resumed' ? Colors.green : Colors.orange,
           ),
           const SizedBox(width: 8),
           IconButton(
@@ -360,9 +367,8 @@ class _StepCounterHomePageState extends State<StepCounterHomePage>
           children: [
             // Status Card
             Card(
-              color: _hasPermission
-                  ? Colors.green.shade900
-                  : Colors.red.shade900,
+              color:
+                  _hasPermission ? Colors.green.shade900 : Colors.red.shade900,
               child: Padding(
                 padding: const EdgeInsets.all(12),
                 child: Column(
@@ -433,6 +439,12 @@ class _StepCounterHomePageState extends State<StepCounterHomePage>
                     const Text(
                       'Aggregated (Stored + Live)',
                       style: TextStyle(fontSize: 12, color: Colors.grey),
+                    ),
+                    const SizedBox(height: 6),
+                    Text(
+                      'Yesterday: $_yesterdaySteps',
+                      style:
+                          const TextStyle(fontSize: 13, color: Colors.white70),
                     ),
                   ],
                 ),

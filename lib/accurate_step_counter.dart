@@ -1,7 +1,8 @@
-/// Production-grade Android step counter for Flutter.
+/// Production-grade Flutter step counter for Android and iOS.
 ///
-/// Primary path: hardware **TYPE_STEP_COUNTER** foreground service (all API 24+),
-/// with SQLite logging and production-hardened merge helpers for BYO Health Connect.
+/// Android path: hardware **TYPE_STEP_COUNTER** foreground service (API 24+).
+/// iOS path: HealthKit step reads through the `health` package.
+/// Both paths support SQLite logging and shared merge/policy helpers.
 ///
 /// ## Quick Start (recommended)
 ///

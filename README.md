@@ -3,11 +3,12 @@
 [![pub package](https://img.shields.io/pub/v/accurate_step_counter.svg)](https://pub.dev/packages/accurate_step_counter)
 [![License: MIT](https://opensource.org/licenses/MIT)](https://opensource.org/licenses/MIT)
 
-Production-grade Flutter **Android** step counter.
+Production-grade Flutter step counter for **Android + iOS**.
 
 One call starts hardware `TYPE_STEP_COUNTER` tracking in a foreground service, SQLite logging, midnight/boot recovery, and live streams. Optional BYO Health Connect / server merge — no HC SDK baked in.
 
-> **Android only** (API 24+). iOS is not supported.
+> Android uses native `TYPE_STEP_COUNTER` foreground service.  
+> iOS uses HealthKit via the `health` package (manual-entry filtered).
 
 ---
 
@@ -32,7 +33,7 @@ One call starts hardware `TYPE_STEP_COUNTER` tracking in a foreground service, S
 
 ```yaml
 dependencies:
-  accurate_step_counter: ^3.0.0
+  accurate_step_counter: ^3.1.0
   permission_handler: ^11.0.0   # request runtime permissions
 ```
 
@@ -51,7 +52,7 @@ The plugin merges most permissions. Declare them in the **host** app if you stri
 <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM"/>
 ```
 
-Request at runtime **before** `startTracking()`:
+Request at runtime **before** `startTracking()` on Android:
 
 | Permission | When |
 |------------|------|
@@ -101,7 +102,7 @@ class StepsController with WidgetsBindingObserver {
 }
 ```
 
-That is enough for most fitness / rewards apps.
+On iOS, `startTracking()` requests HealthKit read permission for steps and starts polling Health app totals.
 
 ---
 
@@ -465,9 +466,20 @@ Mostly affect the **legacy accel / sensors_plus fallback**. The primary `TYPE_ST
 | Xiaomi / Oppo / Vivo / aggressive Samsung | Works if battery unrestricted + autostart |
 | Force-stopped by user | Stops until next app open |
 | Emulator without sensors | Will not count |
-| iOS | **Not supported** |
+| iOS 14+ HealthKit | **Supported** (Health app step source) |
 
 `minSdk` is **24**. Step hardware is declared with `android:required="false"` so installs still succeed on devices without it.
+
+### iOS setup
+
+Add HealthKit usage text in your app `Info.plist`:
+
+```xml
+<key>NSHealthShareUsageDescription</key>
+<string>This app reads your step count to show daily activity.</string>
+```
+
+Enable the HealthKit capability in Xcode for your app target.
 
 ---
 

@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.1.0] - 2026-07-28
+
+### Added
+
+- iOS support via HealthKit (`health` package) with filtered step reads and HC smoothing semantics aligned with meltdown.
+- New internal `IosHealthStepDetector` service that emits realtime step events from Health app totals.
+- Cross-platform example flow now handles iOS initialization cleanly.
+
+### Changed
+
+- `watchTodaySteps()` remains immediate and floor-protected while now supporting iOS live step source.
+- Package positioning updated from Android-only to Android + iOS HealthKit.
+
+### Fixed
+
+- Native event merge now always applies floor protection before emitting (prevents downward jitter on transient resets).
+- Rotation drain persists previous day totals into SQLite with date anchoring.
+
 ## [3.0.0] - 2026-07-26
 
 ### Breaking
