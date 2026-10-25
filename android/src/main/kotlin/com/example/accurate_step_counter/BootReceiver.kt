@@ -41,6 +41,9 @@ class BootReceiver : BroadcastReceiver() {
             return
         }
 
+        // An explicit stop or logout must survive a device reboot.
+        if (!StepCounterService.isTrackingEnabled(ctx)) return
+
         // Re-arm the midnight alarm regardless of whether we can (re)start the
         // foreground service — even a sensorless device benefits from the
         // alarm firing the rotation stamp at midnight.

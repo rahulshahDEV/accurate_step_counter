@@ -77,10 +77,8 @@ class _StepCounterHomePageState extends State<StepCounterHomePage>
   Future<void> _requestPermissionAndInit() async {
     _log('Requesting permissions...');
 
-    if (Platform.isIOS) {
-      // HealthKit permission will be requested by package start().
-      setState(() => _hasPermission = true);
-      await _initStepCounter();
+    if (!Platform.isAndroid) {
+      _log('Step tracking is supported on Android API 24 and newer.');
       return;
     }
 
@@ -89,7 +87,7 @@ class _StepCounterHomePageState extends State<StepCounterHomePage>
     final notifStatus = await Permission.notification.request();
     _log('Notification: ${notifStatus.name}');
 
-    if (activityStatus.isGranted || Platform.isIOS) {
+    if (activityStatus.isGranted) {
       setState(() => _hasPermission = true);
       await _initStepCounter();
     } else {
@@ -149,12 +147,13 @@ class _StepCounterHomePageState extends State<StepCounterHomePage>
       );
 
       // Subscribe to aggregated count stream (stored + live steps)
-      _aggregatedSubscription =
-          _stepCounter.watchAggregatedStepCounter().listen((steps) {
-        dev.log('AGGREGATED: $steps');
-        _log('AGGREGATED: $steps steps');
-        setState(() => _aggregatedCount = steps);
-      }, onError: (e) => _log('Aggregated stream error: $e'));
+      _aggregatedSubscription = _stepCounter
+          .watchAggregatedStepCounter()
+          .listen((steps) {
+            dev.log('AGGREGATED: $steps');
+            _log('AGGREGATED: $steps steps');
+            setState(() => _aggregatedCount = steps);
+          }, onError: (e) => _log('Aggregated stream error: $e'));
       _log('✓ watchAggregatedStepCounter subscribed');
 
       // Subscribe to DB total for today
@@ -253,7 +252,7 @@ class _StepCounterHomePageState extends State<StepCounterHomePage>
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    _stepCounter.setAppState(state);
+    // startTracking() already observes lifecycle for the counter.
     setState(() => _appState = state.name);
     _setRuntimeStateFromEngine();
     _log('App state: ${state.name}');
@@ -275,8 +274,14 @@ class _StepCounterHomePageState extends State<StepCounterHomePage>
   }
 
   Future<void> _clearAllData() async {
+    await _stepCounter.stop();
     await _stepCounter.clearStepLogs();
-    _stepCounter.reset();
+    await _stepCounter.resetNativeStepState();
+    await _stepCounter.startTracking(
+      useBackgroundIsolate: _useBackgroundIsolate,
+      performanceTracing: _performanceTracing,
+      debugLogging: true,
+    );
     setState(() {
       _todaySteps = 0;
       _yesterdaySteps = 0;
@@ -349,8 +354,9 @@ class _StepCounterHomePageState extends State<StepCounterHomePage>
         actions: [
           Chip(
             label: Text(_appState),
-            backgroundColor:
-                _appState == 'resumed' ? Colors.green : Colors.orange,
+            backgroundColor: _appState == 'resumed'
+                ? Colors.green
+                : Colors.orange,
           ),
           const SizedBox(width: 8),
           IconButton(
@@ -367,8 +373,9 @@ class _StepCounterHomePageState extends State<StepCounterHomePage>
           children: [
             // Status Card
             Card(
-              color:
-                  _hasPermission ? Colors.green.shade900 : Colors.red.shade900,
+              color: _hasPermission
+                  ? Colors.green.shade900
+                  : Colors.red.shade900,
               child: Padding(
                 padding: const EdgeInsets.all(12),
                 child: Column(
@@ -443,8 +450,10 @@ class _StepCounterHomePageState extends State<StepCounterHomePage>
                     const SizedBox(height: 6),
                     Text(
                       'Yesterday: $_yesterdaySteps',
-                      style:
-                          const TextStyle(fontSize: 13, color: Colors.white70),
+                      style: const TextStyle(
+                        fontSize: 13,
+                        color: Colors.white70,
+                      ),
                     ),
                   ],
                 ),

@@ -12,7 +12,6 @@ import android.hardware.Sensor
 import android.hardware.SensorEvent
 import android.hardware.SensorEventListener
 import android.hardware.SensorManager
-import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
@@ -336,14 +335,6 @@ class AccurateStepCounterPlugin : FlutterPlugin, MethodCallHandler, SensorEventL
                     
                     android.util.Log.d("AccurateStepCounter", "Foreground service started successfully (API ${Build.VERSION.SDK_INT})")
                     result.success(true)
-                } catch (e: android.app.ForegroundServiceStartNotAllowedException) {
-                    // Android 12+ specific exception - app tried to start foreground service from background
-                    android.util.Log.e("AccurateStepCounter", 
-                        "ForegroundServiceStartNotAllowedException: Cannot start foreground service from background on Android 12+. " +
-                        "Ensure app has a visible activity or uses an exemption like high-priority FCM.", e)
-                    result.error("FOREGROUND_START_NOT_ALLOWED", 
-                        "Cannot start foreground service from background on Android 12+. " +
-                        "Make sure to start the service while the app is in foreground.", null)
                 } catch (e: Exception) {
                     android.util.Log.e("AccurateStepCounter", "Failed to start foreground service: ${e.message}", e)
                     result.error("SERVICE_ERROR", "Failed to start foreground service: ${e.message}", null)
@@ -404,40 +395,72 @@ class AccurateStepCounterPlugin : FlutterPlugin, MethodCallHandler, SensorEventL
                 val sensor = sm.getDefaultSensor(Sensor.TYPE_STEP_COUNTER)
                 result.success(sensor != null)
             }
+            "configureNativeStepService" -> {
+                val minute = call.argument<Int>("maxStepsPerMinute") ?: 180
+                val hour = call.argument<Int>("maxStepsPerHour") ?: 9000
+                if (minute !in 1..1000 || hour !in 1..60000) {
+                    result.error("INVALID_STEP_LIMIT", "Native step limits must be positive and within supported bounds", null)
+                } else {
+                    StepCounterService.configureLimits(context, minute, hour)
+                    result.success(true)
+                }
+            }
             "startNativeStepService" -> {
                 try {
-                    // Android 14+ health FGS requires ACTIVITY_RECOGNITION at start time.
-                    // Service itself falls back to dataSync, but we still prefer AR granted.
+                    // Android 10+ sensors and Android 14+ health services require
+                    // activity permission before registration.
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                         val arGranted = ContextCompat.checkSelfPermission(
                             context,
                             Manifest.permission.ACTIVITY_RECOGNITION
                         ) == PackageManager.PERMISSION_GRANTED
                         if (!arGranted) {
-                            android.util.Log.w(
-                                "AccurateStepCounter",
-                                "startNativeStepService: ACTIVITY_RECOGNITION not granted — starting with dataSync fallback"
-                            )
+                            result.error("ACTIVITY_PERMISSION_REQUIRED", "Grant ACTIVITY_RECOGNITION before starting tracking", null)
+                            return
                         }
                     }
                     // Disable legacy terminated-state FGS so two services never fight
                     useForegroundServiceOnTerminated = false
+                    StepCounterService.setTrackingEnabled(context, true)
                     val intent = Intent(context, StepCounterService::class.java)
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                         context.startForegroundService(intent)
                     } else {
                         context.startService(intent)
                     }
-                    result.success(true)
+                    // A service request is asynchronous. Reply after the sensor has
+                    // actually registered so Dart does not read un-restored state.
+                    pluginScope.launch {
+                        repeat(30) {
+                            if (StepCounterService.isServiceRunning()) {
+                                result.success(true)
+                                return@launch
+                            }
+                            delay(100)
+                        }
+                        StepCounterService.setTrackingEnabled(context, false)
+                        result.error("NATIVE_SERVICE_START_FAILED", "Step sensor service did not become ready", null)
+                    }
                 } catch (e: Exception) {
                     android.util.Log.e("AccurateStepCounter", "startNativeStepService failed: ${e.message}", e)
+                    StepCounterService.setTrackingEnabled(context, false)
                     result.success(false)
                 }
             }
             "stopNativeStepService" -> {
                 try {
+                    StepCounterService.setTrackingEnabled(context, false)
                     context.stopService(Intent(context, StepCounterService::class.java))
-                    result.success(true)
+                    pluginScope.launch {
+                        repeat(30) {
+                            if (!StepCounterService.isServiceRunning()) {
+                                result.success(true)
+                                return@launch
+                            }
+                            delay(100)
+                        }
+                        result.success(false)
+                    }
                 } catch (e: Exception) {
                     android.util.Log.e("AccurateStepCounter", "stopNativeStepService failed: ${e.message}", e)
                     result.success(false)
@@ -472,6 +495,7 @@ class AccurateStepCounterPlugin : FlutterPlugin, MethodCallHandler, SensorEventL
                 result.success(StepCounterService.consumeLastRotation(context))
             }
             "resetNativeStepState" -> {
+                context.stopService(Intent(context, StepCounterService::class.java))
                 StepCounterService.resetState(context)
                 result.success(true)
             }
@@ -481,8 +505,7 @@ class AccurateStepCounterPlugin : FlutterPlugin, MethodCallHandler, SensorEventL
             }
             "requestBatteryOptimization" -> {
                 try {
-                    val intent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
-                        data = Uri.parse("package:${context.packageName}")
+                    val intent = Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS).apply {
                         addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                     }
                     context.startActivity(intent)

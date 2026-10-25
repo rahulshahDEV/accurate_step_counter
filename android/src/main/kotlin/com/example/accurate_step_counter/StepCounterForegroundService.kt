@@ -121,10 +121,6 @@ class StepCounterForegroundService : Service() {
             // Android 14+ requires explicit service type
             startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_HEALTH)
             android.util.Log.d("StepForegroundService", "Started with FOREGROUND_SERVICE_TYPE_HEALTH (Android 14+)")
-        } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            // Android 10-13: Use the type specified in manifest
-            startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_HEALTH)
-            android.util.Log.d("StepForegroundService", "Started with FOREGROUND_SERVICE_TYPE_HEALTH (Android 10-13)")
         } else {
             // Android 9 and below: No service type required
             startForeground(NOTIFICATION_ID, notification)

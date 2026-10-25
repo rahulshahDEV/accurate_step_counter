@@ -22,6 +22,16 @@ class StepCounterPlatform {
 
   StepCounterPlatform._();
 
+  // One EventChannel subscription shared by every Dart consumer. Creating a
+  // receiveBroadcastStream per getter lets one consumer cancel another's sink.
+  late final Stream<int> _nativeSteps = _nativeStepServiceEventChannel
+      .receiveBroadcastStream()
+      .map((event) => (event as int?) ?? 0);
+  late final Stream<Map<dynamic, dynamic>> _foregroundSteps =
+      _foregroundEventChannel
+          .receiveBroadcastStream()
+          .cast<Map<dynamic, dynamic>>();
+
   /// Singleton instance
   static StepCounterPlatform get instance => _instance;
 
@@ -29,16 +39,12 @@ class StepCounterPlatform {
   ///
   /// Emits a map with 'stepCount' and 'timestamp' on each step
   Stream<Map<dynamic, dynamic>> get foregroundStepEventStream {
-    return _foregroundEventChannel
-        .receiveBroadcastStream()
-        .cast<Map<dynamic, dynamic>>();
+    return _foregroundSteps;
   }
 
   /// Stream of realtime step counts emitted by the native step service.
   Stream<int> get nativeStepServiceStream {
-    return _nativeStepServiceEventChannel.receiveBroadcastStream().map(
-      (event) => (event as int?) ?? 0,
-    );
+    return _nativeSteps;
   }
 
   /// Initialize the platform channel
@@ -370,6 +376,17 @@ class StepCounterPlatform {
   }
 
   /// Start native branch-style step counter foreground service.
+  Future<void> configureNativeStepService({
+    required int maxStepsPerMinute,
+    required int maxStepsPerHour,
+  }) async {
+    await _channel.invokeMethod('configureNativeStepService', {
+      'maxStepsPerMinute': maxStepsPerMinute,
+      'maxStepsPerHour': maxStepsPerHour,
+    });
+  }
+
+  /// Start the hardware step counter foreground service.
   Future<bool> startNativeStepService() async {
     if (!Platform.isAndroid) {
       return false;
@@ -574,7 +591,8 @@ class StepCounterPlatform {
     }
   }
 
-  /// Request battery optimization exclusion for reliable background tracking.
+  /// Open battery optimization settings. A true result means settings opened;
+  /// it does not mean the user has granted an exclusion.
   Future<bool> requestBatteryOptimization() async {
     if (!Platform.isAndroid) {
       return false;

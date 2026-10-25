@@ -172,8 +172,9 @@ class _WarmupTestPageState extends State<WarmupTestPage>
   }
 
   Future<void> _reset() async {
-    _stepCounter.reset();
+    if (_isStarted) await _stop();
     await _stepCounter.clearStepLogs();
+    await _stepCounter.resetNativeStepState();
 
     setState(() {
       _warmupSteps = 0;
@@ -270,8 +271,8 @@ class _WarmupTestPageState extends State<WarmupTestPage>
               color: _isInWarmup
                   ? Colors.orange.shade900
                   : _isStarted
-                      ? Colors.green.shade900
-                      : Colors.grey.shade800,
+                  ? Colors.green.shade900
+                  : Colors.grey.shade800,
               child: Padding(
                 padding: const EdgeInsets.all(20),
                 child: Column(
@@ -280,22 +281,22 @@ class _WarmupTestPageState extends State<WarmupTestPage>
                       _isInWarmup
                           ? Icons.timer
                           : _isStarted
-                              ? Icons.check_circle
-                              : Icons.pause_circle,
+                          ? Icons.check_circle
+                          : Icons.pause_circle,
                       size: 48,
                       color: _isInWarmup
                           ? Colors.orange
                           : _isStarted
-                              ? Colors.green
-                              : Colors.grey,
+                          ? Colors.green
+                          : Colors.grey,
                     ),
                     const SizedBox(height: 12),
                     Text(
                       _isInWarmup
                           ? 'WARMUP PHASE'
                           : _isStarted
-                              ? 'VALIDATED - RECORDING'
-                              : 'STOPPED',
+                          ? 'VALIDATED - RECORDING'
+                          : 'STOPPED',
                       style: const TextStyle(
                         fontSize: 20,
                         fontWeight: FontWeight.bold,
@@ -546,7 +547,11 @@ class _WarmupTestPageState extends State<WarmupTestPage>
   }
 
   Widget _buildStatCard(
-      String label, String value, Color color, IconData icon) {
+    String label,
+    String value,
+    Color color,
+    IconData icon,
+  ) {
     return Card(
       child: Padding(
         padding: const EdgeInsets.all(16),
@@ -564,10 +569,7 @@ class _WarmupTestPageState extends State<WarmupTestPage>
             ),
             Text(
               label,
-              style: TextStyle(
-                fontSize: 12,
-                color: Colors.grey.shade400,
-              ),
+              style: TextStyle(fontSize: 12, color: Colors.grey.shade400),
             ),
           ],
         ),
@@ -599,12 +601,7 @@ class _WarmupTestPageState extends State<WarmupTestPage>
             ),
           ),
           const SizedBox(width: 12),
-          Expanded(
-            child: Text(
-              text,
-              style: const TextStyle(fontSize: 13),
-            ),
-          ),
+          Expanded(child: Text(text, style: const TextStyle(fontSize: 13))),
         ],
       ),
     );

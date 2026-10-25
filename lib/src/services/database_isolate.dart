@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:isolate';
+import 'dart:ui' show DartPluginRegistrant;
 
 import 'package:flutter/services.dart';
 import 'package:path/path.dart';
@@ -177,7 +178,8 @@ class DatabaseIsolateService {
   ) async {
     await _ensureInitialized();
 
-    if (_sendPort == null || _isShuttingDown) {
+    if (_sendPort == null ||
+        (_isShuttingDown && type != DatabaseMessageType.close)) {
       throw StateError('Database isolate is not running');
     }
 
@@ -241,10 +243,15 @@ class DatabaseIsolateService {
   }
 
   /// Read total steps
-  Future<int> readTotalSteps({DateTime? from, DateTime? to}) async {
+  Future<int> readTotalSteps({
+    DateTime? from,
+    DateTime? to,
+    StepRecordSource? excludeSource,
+  }) async {
     return await _sendRequest<int>(DatabaseMessageType.readTotal, {
       if (from != null) 'from': from.toUtc().millisecondsSinceEpoch,
       if (to != null) 'to': to.toUtc().millisecondsSinceEpoch,
+      if (excludeSource != null) 'excludeSource': excludeSource.index,
     });
   }
 
@@ -273,7 +280,10 @@ class DatabaseIsolateService {
 
     try {
       // Send close request and wait for acknowledgment
-      await _sendRequest<void>(DatabaseMessageType.close, {});
+      await _sendRequest<void>(
+        DatabaseMessageType.close,
+        {},
+      ).timeout(const Duration(seconds: 5));
     } catch (_) {
       // Ignore errors during shutdown
     }
@@ -287,6 +297,11 @@ class DatabaseIsolateService {
     _sendPort = null;
     _receivePort = null;
     _receiveSubscription = null;
+    for (final request in _pendingRequests.values) {
+      if (!request.isCompleted) {
+        request.completeError(StateError('Database isolate closed'));
+      }
+    }
     _pendingRequests.clear();
     _isInitialized = false;
     _isShuttingDown = false;
@@ -299,6 +314,7 @@ class DatabaseIsolateService {
     final RootIsolateToken token = argsList[1] as RootIsolateToken;
 
     BackgroundIsolateBinaryMessenger.ensureInitialized(token);
+    DartPluginRegistrant.ensureInitialized();
 
     final receivePort = ReceivePort();
     mainSendPort.send(receivePort.sendPort);
@@ -452,7 +468,10 @@ class DatabaseIsolateService {
     final args = <dynamic>[];
 
     if (data.containsKey('from')) {
-      conditions.add('to_time > ?');
+      conditions.add(
+        '(to_time > ? OR (from_time = to_time AND from_time = ?))',
+      );
+      args.add(data['from']);
       args.add(data['from']);
     }
     if (data.containsKey('to')) {
@@ -536,12 +555,19 @@ class DatabaseIsolateService {
     final args = <dynamic>[];
 
     if (data.containsKey('from')) {
-      conditions.add('to_time > ?');
+      conditions.add(
+        '(to_time > ? OR (from_time = to_time AND from_time = ?))',
+      );
+      args.add(data['from']);
       args.add(data['from']);
     }
     if (data.containsKey('to')) {
       conditions.add('from_time <= ?');
       args.add(data['to']);
+    }
+    if (data.containsKey('excludeSource')) {
+      conditions.add('source != ?');
+      args.add(data['excludeSource']);
     }
 
     final whereClause = conditions.isNotEmpty

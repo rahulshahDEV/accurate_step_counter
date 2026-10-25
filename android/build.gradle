@@ -55,7 +55,8 @@ android {
         // Activity Recognition for vehicle/bicycle step filtering (soft-fail if absent)
         implementation("com.google.android.gms:play-services-location:21.3.0")
 
-        testImplementation("org.jetbrains.kotlin:kotlin-test")
+        testImplementation("org.jetbrains.kotlin:kotlin-test-junit5:$kotlin_version")
+        testRuntimeOnly("org.junit.jupiter:junit-jupiter-engine:5.11.4")
         testImplementation("org.mockito:mockito-core:5.0.0")
     }
 

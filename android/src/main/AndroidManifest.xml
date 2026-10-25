@@ -3,15 +3,15 @@
 
   <!-- Required for TYPE_STEP_COUNTER / Activity Recognition on Android 10+ -->
   <uses-permission android:name="android.permission.ACTIVITY_RECOGNITION"/>
+  <!-- Activity Transitions on Android 9 and earlier uses the Play Services permission. -->
+  <uses-permission android:name="com.google.android.gms.permission.ACTIVITY_RECOGNITION" android:maxSdkVersion="28"/>
 
   <!-- Required for foreground service -->
   <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
   <uses-permission android:name="android.permission.FOREGROUND_SERVICE_HEALTH"/>
-  <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC"/>
   <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
   <uses-permission android:name="android.permission.WAKE_LOCK"/>
   <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED"/>
-  <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS"/>
   <!-- Midnight rollover. Prefer SCHEDULE_EXACT_ALARM; code falls back to inexact
        if denied. Do NOT declare USE_EXACT_ALARM (Play policy: clocks/calendars). -->
   <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM"/>
@@ -31,11 +31,10 @@
         android:foregroundServiceType="health"
         android:exported="false"/>
 
-    <!-- Primary TYPE_STEP_COUNTER FGS. health|dataSync: HEALTH when AR granted,
-         DATA_SYNC fallback on fresh install before permission (Android 14+). -->
+    <!-- Long-running health tracking. Start only after activity permission. -->
     <service
         android:name=".StepCounterService"
-        android:foregroundServiceType="health|dataSync"
+        android:foregroundServiceType="health"
         android:exported="false"/>
 
     <receiver

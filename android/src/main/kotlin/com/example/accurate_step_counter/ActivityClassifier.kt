@@ -217,6 +217,10 @@ class ActivityClassifier {
                         trackingActive = false
                         Log.d(TAG, "Activity transitions unregistered")
                     }
+            } catch (e: SecurityException) {
+                trackingActive = false
+                reset()
+                Log.w(TAG, "Activity permission revoked before classifier cleanup")
             } catch (e: Exception) {
                 Log.w(TAG, "Activity classifier stop failed: ${e.message}")
                 trackingActive = false

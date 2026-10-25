@@ -3,6 +3,14 @@
 /// This class allows you to tune the sensitivity and behavior of the step detector
 /// to match different use cases (walking vs running, pocket vs hand-held, etc.)
 class StepDetectorConfig {
+  /// Native hardware counter's trailing-minute ceiling. Walking defaults to
+  /// 180; [StepDetectorConfig.running] raises this to 240.
+  final int nativeMaxStepsPerMinute;
+
+  /// Native hardware counter's trailing-hour ceiling. Walking defaults to
+  /// 9000; [StepDetectorConfig.running] raises this to 14400.
+  final int nativeMaxStepsPerHour;
+
   /// Movement threshold for detecting steps
   ///
   /// Higher values = less sensitive (fewer false positives)
@@ -106,6 +114,8 @@ class StepDetectorConfig {
   /// )
   /// ```
   const StepDetectorConfig({
+    this.nativeMaxStepsPerMinute = 180,
+    this.nativeMaxStepsPerHour = 9000,
     this.threshold = 1.0,
     this.filterAlpha = 0.8,
     this.minTimeBetweenStepsMs = 200,
@@ -114,7 +124,9 @@ class StepDetectorConfig {
     this.foregroundServiceMaxApiLevel = 29,
     this.foregroundNotificationTitle = 'Step Counter',
     this.foregroundNotificationText = 'Tracking your steps...',
-  }) : assert(threshold > 0, 'Threshold must be positive'),
+  }) : assert(nativeMaxStepsPerMinute > 0 && nativeMaxStepsPerMinute <= 1000),
+       assert(nativeMaxStepsPerHour > 0 && nativeMaxStepsPerHour <= 60000),
+       assert(threshold > 0, 'Threshold must be positive'),
        assert(
          foregroundServiceMaxApiLevel >= 21 &&
              foregroundServiceMaxApiLevel <= 50,
@@ -143,6 +155,8 @@ class StepDetectorConfig {
   /// Creates a preset configuration optimized for running
   factory StepDetectorConfig.running() {
     return const StepDetectorConfig(
+      nativeMaxStepsPerMinute: 240,
+      nativeMaxStepsPerHour: 14400,
       threshold: 1.5,
       filterAlpha: 0.7,
       minTimeBetweenStepsMs: 150,
@@ -179,6 +193,8 @@ class StepDetectorConfig {
 
   /// Creates a copy of this configuration with the given fields replaced
   StepDetectorConfig copyWith({
+    int? nativeMaxStepsPerMinute,
+    int? nativeMaxStepsPerHour,
     double? threshold,
     double? filterAlpha,
     int? minTimeBetweenStepsMs,
@@ -189,6 +205,10 @@ class StepDetectorConfig {
     String? foregroundNotificationText,
   }) {
     return StepDetectorConfig(
+      nativeMaxStepsPerMinute:
+          nativeMaxStepsPerMinute ?? this.nativeMaxStepsPerMinute,
+      nativeMaxStepsPerHour:
+          nativeMaxStepsPerHour ?? this.nativeMaxStepsPerHour,
       threshold: threshold ?? this.threshold,
       filterAlpha: filterAlpha ?? this.filterAlpha,
       minTimeBetweenStepsMs:
@@ -211,7 +231,9 @@ class StepDetectorConfig {
     return 'StepDetectorConfig(threshold: $threshold, filterAlpha: $filterAlpha, '
         'minTimeBetweenStepsMs: $minTimeBetweenStepsMs, enableOsLevelSync: $enableOsLevelSync, '
         'useForegroundServiceOnOldDevices: $useForegroundServiceOnOldDevices, '
-        'foregroundServiceMaxApiLevel: $foregroundServiceMaxApiLevel)';
+        'foregroundServiceMaxApiLevel: $foregroundServiceMaxApiLevel, '
+        'nativeMaxStepsPerMinute: $nativeMaxStepsPerMinute, '
+        'nativeMaxStepsPerHour: $nativeMaxStepsPerHour)';
   }
 
   @override
@@ -219,6 +241,8 @@ class StepDetectorConfig {
     if (identical(this, other)) return true;
 
     return other is StepDetectorConfig &&
+        other.nativeMaxStepsPerMinute == nativeMaxStepsPerMinute &&
+        other.nativeMaxStepsPerHour == nativeMaxStepsPerHour &&
         other.threshold == threshold &&
         other.filterAlpha == filterAlpha &&
         other.minTimeBetweenStepsMs == minTimeBetweenStepsMs &&
@@ -233,6 +257,8 @@ class StepDetectorConfig {
   @override
   int get hashCode {
     return threshold.hashCode ^
+        nativeMaxStepsPerMinute.hashCode ^
+        nativeMaxStepsPerHour.hashCode ^
         filterAlpha.hashCode ^
         minTimeBetweenStepsMs.hashCode ^
         enableOsLevelSync.hashCode ^

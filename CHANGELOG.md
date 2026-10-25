@@ -5,11 +5,51 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [4.0.0] - 2026-10-25
+
+### Breaking
+
+- Return to Android-only tracking. Remove the experimental HealthKit detector and
+  `health` dependency. Unsupported tracking platforms throw `UnsupportedError`.
+- `stop()` flushes and stops auto-logging. Use `startTracking()` to resume the
+  complete pipeline.
+- Deprecate the synchronous legacy `reset()`; it fails clearly for hardware
+  daily totals. Use stop, clear logs, and reset native state for an explicit reset.
+- Fail clearly for missing activity permission or a hardware service that cannot
+  start. Continuous counting uses a health service without a data-sync fallback.
+- Align the Flutter SDK minimum with Dart 3.9 (Flutter 3.35).
+
+### Added
+
+- Automatic lifecycle observation and shared concurrent/repeated `startTracking`.
+- Native cadence limits in `StepDetectorConfig`; running uses 240/minute and
+  14,400/hour while walking retains 180/minute and 9,000/hour.
+- Android acceptance matrix and a package verification record.
+- Dart and JVM regression checks for the actual package integration and native
+  restore/rotation rules.
+
+### Fixed
+
+- New-day floors and aggregate baselines, current-date stream queries, original
+  date attribution for cold-start history, and stale queries completing at midnight.
+- Shared native event-channel ownership, first logged delta, repeated equal-sized
+  recovery gaps, concurrent imports, and double-counted session totals on import.
+- Keep displayed/stored floors out of the raw sensor logging stream; preserve
+  distinct external imports during native startup and historical reconciliation.
+- Retain buffered storage operations on write failure and register plugins in the
+  database isolate; acknowledge isolate shutdown before terminating it.
+- Persist native offsets, floors, and actual rotation timestamps across process
+  restarts; preserve valid counter batches without impossible detector evidence.
+- Validate delayed screen-off batches against the whole elapsed interval and
+  persist rejected increments so a restart cannot resurrect discarded steps.
+- Wait for sensor registration before reporting startup success; preserve explicit
+  stop/logout across reboot.
+
 ## [3.1.0] - 2026-07-28
 
 ### Added
 
-- iOS support via HealthKit (`health` package) with filtered step reads and HC smoothing semantics aligned with meltdown.
+- iOS support via HealthKit (`health` package) with filtered step reads and step smoothing.
 - New internal `IosHealthStepDetector` service that emits realtime step events from Health app totals.
 - Cross-platform example flow now handles iOS initialization cleanly.
 

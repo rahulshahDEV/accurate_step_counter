@@ -60,6 +60,7 @@ void main() {
     });
 
     test('reset should set step count to zero', () {
+      // ignore: deprecated_member_use, deprecated_member_use_from_same_package
       stepCounter.reset();
       expect(stepCounter.currentStepCount, 0);
     });
@@ -72,12 +73,9 @@ void main() {
       expect(stepCounter.runtimeState, StepRuntimeState.uninitialized);
     });
 
-    test('start and stop should update runtimeState', () async {
-      await stepCounter.start();
-      expect(stepCounter.runtimeState, StepRuntimeState.detectingForeground);
-
-      await stepCounter.stop();
-      expect(stepCounter.runtimeState, StepRuntimeState.stopped);
+    test('tracking fails clearly on an unsupported host platform', () async {
+      await expectLater(stepCounter.start(), throwsUnsupportedError);
+      expect(stepCounter.isStarted, isFalse);
     });
   });
 

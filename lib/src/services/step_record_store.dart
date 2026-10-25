@@ -68,6 +68,9 @@ class StepRecordStore {
   /// Whether the store has been initialized
   bool get isInitialized => _isInitialized;
 
+  /// Changes from any store sharing this database, without reading all history.
+  Stream<void> get recordChanges => _reactiveDb.recordChanges;
+
   /// Whether this store is using background isolate mode
   bool get isUsingIsolate => _useIsolate;
 
@@ -328,7 +331,10 @@ class StepRecordStore {
     final args = <dynamic>[];
 
     if (from != null) {
-      conditions.add('to_time > ?');
+      conditions.add(
+        '(to_time > ? OR (from_time = to_time AND from_time = ?))',
+      );
+      args.add(from.toUtc().millisecondsSinceEpoch);
       args.add(from.toUtc().millisecondsSinceEpoch);
     }
     if (to != null) {
@@ -366,20 +372,49 @@ class StepRecordStore {
   ///
   /// [from] - Optional start time filter (inclusive)
   /// [to] - Optional end time filter (inclusive)
-  Future<int> readTotalSteps({DateTime? from, DateTime? to}) async {
+  Future<int> readTotalSteps({
+    DateTime? from,
+    DateTime? to,
+    StepRecordSource? excludeSource,
+  }) async {
     final sw = Stopwatch()..start();
     if (_useIsolate) {
-      final total = await _isolateService!.readTotalSteps(from: from, to: to);
+      final total = await _isolateService!.readTotalSteps(
+        from: from,
+        to: to,
+        excludeSource: excludeSource,
+      );
       _logPerf('readTotalSteps(isolate) took ${sw.elapsedMilliseconds}ms');
       return total;
     }
 
-    final entries = await readRecords(from: from, to: to);
-    final total = entries.fold<int>(0, (sum, entry) => sum + entry.stepCount);
-    _logPerf(
-      'readTotalSteps(main) took ${sw.elapsedMilliseconds}ms '
-      '(rows: ${entries.length})',
+    final db = await _ensureDbOpen();
+    final conditions = <String>[];
+    final args = <Object>[];
+    if (from != null) {
+      conditions.add(
+        '(to_time > ? OR (from_time = to_time AND from_time = ?))',
+      );
+      args.add(from.toUtc().millisecondsSinceEpoch);
+      args.add(from.toUtc().millisecondsSinceEpoch);
+    }
+    if (to != null) {
+      conditions.add('from_time <= ?');
+      args.add(to.toUtc().millisecondsSinceEpoch);
+    }
+    if (excludeSource != null) {
+      conditions.add('source != ?');
+      args.add(excludeSource.index);
+    }
+    final where = conditions.isEmpty
+        ? ''
+        : ' WHERE ${conditions.join(' AND ')}';
+    final rows = await db.rawQuery(
+      'SELECT COALESCE(SUM(step_count), 0) AS total FROM $_tableName$where',
+      args,
     );
+    final total = (rows.first['total'] as num).toInt();
+    _logPerf('readTotalSteps(main) took ${sw.elapsedMilliseconds}ms');
     return total;
   }
 
@@ -408,43 +443,52 @@ class StepRecordStore {
     DateTime? to,
     StepRecordSource? source,
   }) {
-    // Use async* generator to ensure database is open before watching
-    Stream<List<StepRecord>> watchWithRetry() async* {
-      await _ensureDbOpen();
-
-      // Emit current value immediately
-      yield await readRecords(from: from, to: to, source: source);
-
-      // Then watch for changes
-      await for (final _ in _reactiveDb.recordChanges) {
-        yield await readRecords(from: from, to: to, source: source);
-      }
-    }
-
-    return watchWithRetry();
+    return _watch(() => readRecords(from: from, to: to, source: source));
   }
 
-  /// Watch total step count in real-time
-  ///
-  /// Emits the current total immediately, then emits updates
-  /// whenever the total changes.
-  ///
-  /// Handles closed database scenarios by ensuring database is open before watching.
+  /// Watch the initial total and subsequent storage changes.
   Stream<int> watchTotalSteps({DateTime? from, DateTime? to}) {
-    // Use async* generator to ensure database is open before watching
-    Stream<int> watchWithRetry() async* {
-      await _ensureDbOpen();
+    return _watch(() => readTotalSteps(from: from, to: to));
+  }
 
-      // Emit current value immediately
-      yield await readTotalSteps(from: from, to: to);
+  Stream<T> _watch<T>(Future<T> Function() read) {
+    late StreamController<T> controller;
+    StreamSubscription<void>? changes;
+    Future<void> pending = Future<void>.value();
+    var cancelled = false;
 
-      // Then watch for changes
-      await for (final _ in _reactiveDb.recordChanges) {
-        yield await readTotalSteps(from: from, to: to);
-      }
+    void refresh() {
+      pending = pending
+          .then((_) async {
+            if (cancelled) return;
+            final value = await read();
+            if (!cancelled && !controller.isClosed) controller.add(value);
+          })
+          .catchError((Object error, StackTrace stack) {
+            if (!cancelled && !controller.isClosed) {
+              controller.addError(error, stack);
+            }
+          });
     }
 
-    return watchWithRetry();
+    controller = StreamController<T>(
+      onListen: () {
+        // Subscribe first so a write during the initial read cannot be lost.
+        // read() chooses the main or background database; watching itself does
+        // not open a second database connection on the UI isolate.
+        changes = _reactiveDb.recordChanges.listen(
+          (_) => refresh(),
+          onDone: () => unawaited(controller.close()),
+        );
+        refresh();
+      },
+      onCancel: () async {
+        cancelled = true;
+        await changes?.cancel();
+        await pending;
+      },
+    );
+    return controller.stream;
   }
 
   /// Get the number of records

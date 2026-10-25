@@ -29,6 +29,14 @@ class StepCounterService : Service(), SensorEventListener {
         private const val KEY_LAST_RESET_DAY = "last_reset_day"
         private const val KEY_LAST_RESET_YEAR = "last_reset_year"
         private const val KEY_LAST_BOOT_COUNT = "last_boot_count"
+        private const val KEY_INITIAL_OFFSET = "initial_offset"
+        private const val KEY_SENSOR_FLOOR = "sensor_floor"
+        private const val KEY_RESET_ELAPSED = "reset_elapsed"
+        private const val KEY_RESET_WALL = "reset_wall"
+        private const val KEY_DEVICE_BOOT = "device_boot"
+        private const val KEY_SENSOR_ELAPSED = "sensor_elapsed"
+        private const val KEY_TRACKING_ENABLED = "tracking_enabled"
+        private const val KEY_ROTATION_PREVIOUS_DATE = "rotation_previous_date"
         // Date stamp written by performMidnightReset / handleTimeOrZoneChange so
         // the Flutter cubit can detect "service rotated the day while we were
         // backgrounded" even if the LocalBroadcast was lost (Apr 27 Bug 2 —
@@ -67,7 +75,7 @@ class StepCounterService : Service(), SensorEventListener {
         // walking before a real user could care, and the actual sustained walk
         // ceiling (~150) gives us safety margin without clipping legitimate
         // running. Anything beyond this rate over a 60s window is dropped.
-        private const val MAX_STEPS_PER_MINUTE = 180
+        @Volatile private var maxStepsPerMinute = 180
         private const val ONE_MINUTE_MS = 60_000L
         // Hourly ceiling: layered on top of the per-minute cap. The minute cap
         // alone allowed 180*60=10 800 steps/h sustained, which a Samsung A07
@@ -77,7 +85,7 @@ class StepCounterService : Service(), SensorEventListener {
         // sustained for a full hour. 9000 keeps casual+brisk walking lossless
         // while clipping persistent sensor drift (May 10 QA — sensor
         // 9079 vs G-Fit 4572 = 98% over without HC for cross-validation).
-        private const val MAX_STEPS_PER_HOUR = 9000
+        @Volatile private var maxStepsPerHour = 9000
         private const val ONE_HOUR_MS = 60 * 60_000L
         // Minimum monotonic time (ms) between day resets — protects against
         // time manipulation. Tuned to 16h to match the cubit-side
@@ -109,6 +117,8 @@ class StepCounterService : Service(), SensorEventListener {
 
         // Monotonic clock at last day reset — can't be manipulated by user
         @Volatile private var lastResetElapsedTime = 0L
+        @Volatile private var lastResetWallTime = 0L
+        @Volatile private var lastSensorElapsedTime = 0L
 
         // Debounce state
         @Volatile private var lastAcceptedBootSteps = -1
@@ -142,6 +152,43 @@ class StepCounterService : Service(), SensorEventListener {
         fun getYesterdaySteps(): Int = yesterdaySteps
         fun getDayBeforeSteps(): Int = dayBeforeSteps
 
+        fun configureLimits(context: Context, minute: Int, hour: Int) {
+            synchronized(STATE_LOCK) {
+                maxStepsPerMinute = minute
+                maxStepsPerHour = hour
+            }
+            context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit()
+                .putInt("max_steps_minute", minute).putInt("max_steps_hour", hour).apply()
+        }
+
+        fun isTrackingEnabled(context: Context): Boolean =
+            context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                .getBoolean(KEY_TRACKING_ENABLED, false)
+
+        fun setTrackingEnabled(context: Context, enabled: Boolean) {
+            context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                .edit().putBoolean(KEY_TRACKING_ENABLED, enabled).apply()
+            if (!enabled) {
+                val manager = context.getSystemService(Context.ALARM_SERVICE) as? AlarmManager ?: return
+                val intent = PendingIntent.getBroadcast(context, RC_MIDNIGHT_ALARM,
+                    Intent(context, MidnightReceiver::class.java),
+                    PendingIntent.FLAG_NO_CREATE or PendingIntent.FLAG_IMMUTABLE)
+                if (intent != null) manager.cancel(intent)
+            }
+        }
+
+        private fun bootId(context: Context): Int = try {
+            android.provider.Settings.Global.getInt(context.contentResolver,
+                android.provider.Settings.Global.BOOT_COUNT)
+        } catch (_: Exception) { -1 }
+
+        private fun savedDate(year: Int, day: Int): String = Calendar.getInstance().run {
+            set(Calendar.YEAR, year)
+            set(Calendar.DAY_OF_YEAR, day)
+            String.format(Locale.US, "%04d-%02d-%02d", get(Calendar.YEAR),
+                get(Calendar.MONTH) + 1, get(Calendar.DAY_OF_MONTH))
+        }
+
         /** Whether the foreground service is currently running. */
         fun isServiceRunning(): Boolean = isRunning
 
@@ -158,11 +205,15 @@ class StepCounterService : Service(), SensorEventListener {
                 val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
                 val date = prefs.getString(KEY_LAST_ROTATION_DATE, null) ?: return null
                 val prev = prefs.getInt(KEY_LAST_ROTATION_PREV_TODAY, 0)
+                val previousDate = prefs.getString(KEY_ROTATION_PREVIOUS_DATE, null)
                 prefs.edit()
                     .remove(KEY_LAST_ROTATION_DATE)
                     .remove(KEY_LAST_ROTATION_PREV_TODAY)
+                    .remove(KEY_ROTATION_PREVIOUS_DATE)
                     .apply()
-                mapOf("date" to date, "previousToday" to prev)
+                mutableMapOf<String, Any>("date" to date, "previousToday" to prev).apply {
+                    if (previousDate != null) put("previousDate", previousDate)
+                }
             } catch (e: Exception) {
                 Log.w(TAG, "consumeLastRotation failed: ${e.message}")
                 null
@@ -182,6 +233,7 @@ class StepCounterService : Service(), SensorEventListener {
                     initialOffset + sensorFloor
                 }
                 serviceInstance?.let {
+                    it.persistState(lastAcceptedBootSteps)
                     it.broadcastSteps(todaySteps)
                     it.updateNotification(todaySteps)
                 }
@@ -199,6 +251,7 @@ class StepCounterService : Service(), SensorEventListener {
                     initialOffset + sensorFloor
                 }
                 serviceInstance?.let {
+                    it.persistState(lastAcceptedBootSteps)
                     it.broadcastSteps(todaySteps)
                     it.updateNotification(todaySteps)
                 }
@@ -230,6 +283,7 @@ class StepCounterService : Service(), SensorEventListener {
                 }
                 todaySteps = value
                 serviceInstance?.let {
+                    it.persistState(lastAcceptedBootSteps)
                     it.broadcastSteps(todaySteps)
                     it.updateNotification(todaySteps)
                 }
@@ -267,6 +321,8 @@ class StepCounterService : Service(), SensorEventListener {
                 lastResetDay = -1
                 lastResetYear = -1
                 lastResetElapsedTime = 0L
+                lastResetWallTime = 0L
+                lastSensorElapsedTime = 0L
                 lastAcceptedBootSteps = -1
                 lastAcceptedTime = 0L
                 pendingSteps = 0
@@ -281,6 +337,7 @@ class StepCounterService : Service(), SensorEventListener {
                 lastDetectorEventElapsedMs = 0L
                 detectorEventsSinceLastCounterAccept = 0
             }
+            setTrackingEnabled(context, false)
             ActivityClassifier.reset()
 
             // Clear persisted state
@@ -300,6 +357,9 @@ class StepCounterService : Service(), SensorEventListener {
          * arrive at midnight so onSensorChanged day-change detection doesn't trigger.
          */
         fun performMidnightReset(context: Context) {
+            // AlarmManager may start a fresh process after the service died.
+            // Load persisted counters before touching companion defaults.
+            if (lastResetYear < 0 || lastResetDay < 0) restoreState(context)
             // The whole reset is now under STATE_LOCK so the AlarmManager
             // thread cannot interleave with a sensor-thread mutation of
             // bootStepsBaseline / todaySteps / pendingSteps mid-rollover
@@ -312,6 +372,7 @@ class StepCounterService : Service(), SensorEventListener {
             val currentYear = cal.get(Calendar.YEAR)
             var previousToday = 0
             var rotationDate = ""
+            var previousDate = ""
             var didRotate = false
 
             synchronized(STATE_LOCK) {
@@ -329,7 +390,8 @@ class StepCounterService : Service(), SensorEventListener {
                 // manually winding the clock to mint a fresh day of rewards).
                 val nowMono = SystemClock.elapsedRealtime()
                 val elapsedMono = nowMono - lastResetElapsedTime
-                if (lastResetElapsedTime > 0 && elapsedMono < MIN_RESET_INTERVAL_MS) {
+                if (!NativeStepPolicy.canRotate(nowMono, System.currentTimeMillis(),
+                        lastResetElapsedTime, lastResetWallTime)) {
                     Log.w(
                         TAG,
                         "performMidnightReset rejected on monotonic guard: ${elapsedMono / 1000}s real-time since last reset (need ${MIN_RESET_INTERVAL_MS / 1000}s)"
@@ -338,6 +400,7 @@ class StepCounterService : Service(), SensorEventListener {
                 }
 
                 previousToday = todaySteps
+                previousDate = savedDate(lastResetYear, lastResetDay)
                 rotationDate = String.format(
                     Locale.US,
                     "%04d-%02d-%02d",
@@ -346,14 +409,16 @@ class StepCounterService : Service(), SensorEventListener {
                     cal.get(Calendar.DAY_OF_MONTH)
                 )
 
-                dayBeforeSteps = yesterdaySteps
-                yesterdaySteps = todaySteps
+                val gap = NativeStepPolicy.dayDifference(lastResetYear, lastResetDay, currentYear, currentDay)
+                dayBeforeSteps = if (gap == 1) yesterdaySteps else if (gap == 2) todaySteps else 0
+                yesterdaySteps = if (gap == 1) todaySteps else 0
                 todaySteps = 0
                 initialOffset = 0
                 sensorFloor = 0
                 lastResetDay = currentDay
                 lastResetYear = currentYear
                 lastResetElapsedTime = SystemClock.elapsedRealtime()
+                lastResetWallTime = System.currentTimeMillis()
                 pendingSteps = 0
                 updatesSincePersist = 0
                 recentAcceptedSteps.clear()
@@ -361,9 +426,10 @@ class StepCounterService : Service(), SensorEventListener {
                 hourlyAcceptedSteps.clear()
                 hourlyAcceptedTotal = 0
 
-                // Re-baseline on next sensor event
-                bootStepsBaseline = null
-                lastAcceptedBootSteps = -1
+                // Preserve the last observed counter as the boundary baseline.
+                // The first post-midnight event must contribute its new delta.
+                bootStepsBaseline = lastAcceptedBootSteps.takeIf { it >= 0 }
+                detectorEventsSinceLastCounterAccept = 0
                 didRotate = true
             }
 
@@ -377,13 +443,19 @@ class StepCounterService : Service(), SensorEventListener {
             try {
                 val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
                 prefs.edit().apply {
-                    putInt(KEY_BOOT_BASELINE, -1)
+                    putInt(KEY_BOOT_BASELINE, bootStepsBaseline ?: -1)
+                    putInt(KEY_INITIAL_OFFSET, 0)
+                    putInt(KEY_SENSOR_FLOOR, 0)
+                    putLong(KEY_RESET_ELAPSED, lastResetElapsedTime)
+                    putLong(KEY_RESET_WALL, lastResetWallTime)
+                    putInt(KEY_DEVICE_BOOT, bootId(context))
                     putInt(KEY_TODAY_STEPS, 0)
                     putInt(KEY_YESTERDAY_STEPS, yesterdaySteps)
                     putInt(KEY_DAY_BEFORE_STEPS, dayBeforeSteps)
                     putInt(KEY_LAST_RESET_DAY, currentDay)
                     putInt(KEY_LAST_RESET_YEAR, currentYear)
-                    putInt(KEY_LAST_BOOT_COUNT, -1)
+                    putInt(KEY_LAST_BOOT_COUNT, lastAcceptedBootSteps)
+                    putString(KEY_ROTATION_PREVIOUS_DATE, previousDate)
                     putString(KEY_LAST_ROTATION_DATE, rotationDate)
                     putInt(KEY_LAST_ROTATION_PREV_TODAY, previousToday)
                     apply()
@@ -429,9 +501,8 @@ class StepCounterService : Service(), SensorEventListener {
                 val elapsedSinceReset = now - lastResetElapsedTime
                 // Symmetric monotonic guard for forward and backward TZ shifts
                 // (May 26 obs 8 + 9 — manual time change attack mitigation).
-                if (lastResetElapsedTime > 0 &&
-                    elapsedSinceReset < MIN_RESET_INTERVAL_MS
-                ) {
+                if (!NativeStepPolicy.canRotate(now, System.currentTimeMillis(),
+                        lastResetElapsedTime, lastResetWallTime)) {
                     Log.w(
                         TAG,
                         "TZ/time change rejected on monotonic guard: ${elapsedSinceReset / 1000}s since last reset (isBackward=$isBackward)"
@@ -459,21 +530,10 @@ class StepCounterService : Service(), SensorEventListener {
                     PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
                 )
 
-                // Use java.time for DST-safe scheduling. The old Calendar
-                // approach (set HOUR=0, then add(DAY, 1)) could land on a
-                // non-existent local time during spring-forward (00:00 may
-                // not exist that day in some zones) or fire twice during
-                // fall-back (native audit May 28 HIGH). 00:00:05 keeps the
-                // 5s margin so we land just past the boundary.
-                val zone = java.time.ZoneId.systemDefault()
-                val tomorrowMidnight = java.time.LocalDate.now(zone)
-                    .plusDays(1)
-                    .atStartOfDay(zone)
-                    .plusSeconds(5)
-                val triggerAtMillis = tomorrowMidnight.toInstant().toEpochMilli()
-                val midnight = Calendar.getInstance().apply {
-                    timeInMillis = triggerAtMillis
-                }
+                // Calendar handles local-day transitions (including DST) on
+                // API 24–25 without requiring java.time desugaring in the host.
+                val triggerAtMillis = NativeStepPolicy.nextMidnight(System.currentTimeMillis())
+                val midnight = Calendar.getInstance().apply { timeInMillis = triggerAtMillis }
 
                 // Use exact alarm for reliable midnight reset.
                 // On Android 12+ (API 31), setExactAndAllowWhileIdle requires
@@ -509,6 +569,174 @@ class StepCounterService : Service(), SensorEventListener {
                 Log.e(TAG, "Failed to schedule midnight alarm: ${e.message}")
             }
         }
+        /** Restore step state from SharedPreferences on cold start. */
+        private fun restoreState(context: Context) {
+            try {
+                val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                maxStepsPerMinute = prefs.getInt("max_steps_minute", 180).coerceIn(1, 1000)
+                maxStepsPerHour = prefs.getInt("max_steps_hour", 9000).coerceIn(1, 60000)
+                if (!prefs.contains(KEY_LAST_RESET_DAY)) {
+                    val cal = Calendar.getInstance()
+                    lastResetDay = cal.get(Calendar.DAY_OF_YEAR)
+                    lastResetYear = cal.get(Calendar.YEAR)
+                    lastResetElapsedTime = 0L
+                    lastResetWallTime = 0L
+                    return
+                }
+
+                val savedDay = prefs.getInt(KEY_LAST_RESET_DAY, -1)
+                val savedYear = prefs.getInt(KEY_LAST_RESET_YEAR, -1)
+                val cal = Calendar.getInstance()
+                val currentDay = cal.get(Calendar.DAY_OF_YEAR)
+                val currentYear = cal.get(Calendar.YEAR)
+
+                val sameBoot = prefs.getInt(KEY_DEVICE_BOOT, -1).let { it >= 0 && it == bootId(context) }
+                lastResetElapsedTime = if (sameBoot) prefs.getLong(KEY_RESET_ELAPSED, 0L) else 0L
+                lastResetWallTime = prefs.getLong(KEY_RESET_WALL, 0L)
+                lastSensorElapsedTime = if (sameBoot) prefs.getLong(KEY_SENSOR_ELAPSED, 0L) else 0L
+
+                val daysDiff = NativeStepPolicy.dayDifference(savedYear, savedDay, currentYear, currentDay)
+
+                // Capture pre-rotation today so Flutter can recover yesterday when
+                // cold-start restore rotates the day (midnight alarm missed because
+                // process was dead). Without this stamp, consumeLastRotation() is
+                // empty and the UI can keep showing yesterday's total as "today".
+                val previousTodayBeforeRestore = prefs.getInt(KEY_TODAY_STEPS, 0)
+                val rotationDate = String.format(
+                    Locale.US,
+                    "%04d-%02d-%02d",
+                    cal.get(Calendar.YEAR),
+                    cal.get(Calendar.MONTH) + 1,
+                    cal.get(Calendar.DAY_OF_MONTH)
+                )
+
+                when {
+                    daysDiff == 0 || !NativeStepPolicy.canRotate(SystemClock.elapsedRealtime(),
+                        System.currentTimeMillis(), lastResetElapsedTime, lastResetWallTime) -> {
+                        // Same day — restore everything
+                        val savedBaseline = prefs.getInt(KEY_BOOT_BASELINE, -1)
+                        bootStepsBaseline = if (savedBaseline >= 0) savedBaseline else null
+                        todaySteps = prefs.getInt(KEY_TODAY_STEPS, 0)
+                        yesterdaySteps = prefs.getInt(KEY_YESTERDAY_STEPS, 0)
+                        dayBeforeSteps = prefs.getInt(KEY_DAY_BEFORE_STEPS, 0)
+                        lastResetDay = savedDay
+                        lastResetYear = savedYear
+                        lastAcceptedBootSteps = prefs.getInt(KEY_LAST_BOOT_COUNT, -1)
+                        sensorFloor = prefs.getInt(KEY_SENSOR_FLOOR, 0)
+                        initialOffset = prefs.getInt(KEY_INITIAL_OFFSET,
+                            NativeStepPolicy.restoredOffset(todaySteps, bootStepsBaseline, lastAcceptedBootSteps) - sensorFloor).coerceAtLeast(0)
+                        if (!sameBoot) {
+                            initialOffset = todaySteps
+                            sensorFloor = 0
+                            bootStepsBaseline = null
+                            lastAcceptedBootSteps = -1
+                        }
+                        Log.d(TAG, "Restored state: today=$todaySteps, baseline=$bootStepsBaseline")
+                    }
+                    daysDiff == 1 -> {
+                        dayBeforeSteps = prefs.getInt(KEY_YESTERDAY_STEPS, 0)
+                        yesterdaySteps = prefs.getInt(KEY_TODAY_STEPS, 0)
+                        todaySteps = 0
+                        bootStepsBaseline = null
+                        initialOffset = 0
+                        sensorFloor = 0
+                        lastResetDay = currentDay
+                        lastResetYear = currentYear
+                        lastAcceptedBootSteps = -1
+                        stampRestoreRotation(prefs, rotationDate, previousTodayBeforeRestore, savedDate(savedYear, savedDay))
+                        Log.d(TAG, "New day restore: yesterday=$yesterdaySteps")
+                    }
+                    daysDiff == 2 -> {
+                        dayBeforeSteps = prefs.getInt(KEY_TODAY_STEPS, 0)
+                        yesterdaySteps = 0
+                        todaySteps = 0
+                        bootStepsBaseline = null
+                        initialOffset = 0
+                        sensorFloor = 0
+                        lastResetDay = currentDay
+                        lastResetYear = currentYear
+                        lastAcceptedBootSteps = -1
+                        stampRestoreRotation(prefs, rotationDate, previousTodayBeforeRestore, savedDate(savedYear, savedDay))
+                        Log.d(TAG, "2-day gap: dayBefore=${dayBeforeSteps}")
+                    }
+                    else -> {
+                        dayBeforeSteps = 0
+                        yesterdaySteps = 0
+                        todaySteps = 0
+                        bootStepsBaseline = null
+                        initialOffset = 0
+                        sensorFloor = 0
+                        lastResetDay = currentDay
+                        lastResetYear = currentYear
+                        lastAcceptedBootSteps = -1
+                        if (previousTodayBeforeRestore > 0) {
+                            stampRestoreRotation(prefs, rotationDate, previousTodayBeforeRestore, savedDate(savedYear, savedDay))
+                        }
+                        Log.d(TAG, "Stale data cleared, fresh start (${daysDiff}d gap)")
+                    }
+                }
+
+                // Persist rotated counters so a second cold start same day does not
+                // re-apply the gap branch with stale KEY_TODAY_STEPS.
+                if (daysDiff != 0 && lastResetDay == currentDay && lastResetYear == currentYear) {
+                    // Restore represents the current calendar day, even when the
+                    // process starts late at night. Do not arm a fresh 16h guard
+                    // from launch time and block tonight's genuine midnight.
+                    val startOfDay = NativeStepPolicy.startOfDay(System.currentTimeMillis())
+                    val elapsedToday = (System.currentTimeMillis() - startOfDay).coerceAtLeast(0)
+                    lastResetElapsedTime = (SystemClock.elapsedRealtime() - elapsedToday).coerceAtLeast(0)
+                    lastResetWallTime = startOfDay
+                    lastSensorElapsedTime = 0L
+                    try {
+                        prefs.edit().apply {
+                            putInt(KEY_BOOT_BASELINE, -1)
+                            putInt(KEY_INITIAL_OFFSET, 0)
+                            putInt(KEY_SENSOR_FLOOR, 0)
+                            putLong(KEY_RESET_ELAPSED, lastResetElapsedTime)
+                            putLong(KEY_RESET_WALL, lastResetWallTime)
+                            putLong(KEY_SENSOR_ELAPSED, 0L)
+                            putInt(KEY_DEVICE_BOOT, bootId(context))
+                            putInt(KEY_TODAY_STEPS, 0)
+                            putInt(KEY_YESTERDAY_STEPS, yesterdaySteps)
+                            putInt(KEY_DAY_BEFORE_STEPS, dayBeforeSteps)
+                            putInt(KEY_LAST_RESET_DAY, currentDay)
+                            putInt(KEY_LAST_RESET_YEAR, currentYear)
+                            putInt(KEY_LAST_BOOT_COUNT, -1)
+                            apply()
+                        }
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Failed to persist restore rotation: ${e.message}")
+                    }
+                }
+
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to restore state: ${e.message}")
+                val cal = Calendar.getInstance()
+                lastResetDay = cal.get(Calendar.DAY_OF_YEAR)
+                lastResetYear = cal.get(Calendar.YEAR)
+                lastResetElapsedTime = 0L
+                lastResetWallTime = 0L
+            }
+        }
+
+        /** Stamp rotation prefs so Flutter drain recovers after cold-start day gap. */
+        private fun stampRestoreRotation(
+            prefs: SharedPreferences,
+            rotationDate: String,
+            previousToday: Int,
+            previousDate: String,
+        ) {
+            try {
+                prefs.edit()
+                    .putString(KEY_LAST_ROTATION_DATE, rotationDate)
+                    .putString(KEY_ROTATION_PREVIOUS_DATE, previousDate)
+                    .putInt(KEY_LAST_ROTATION_PREV_TODAY, previousToday)
+                    .apply()
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed to stamp restore rotation: ${e.message}")
+            }
+        }
+
     }
 
     private var sensorManager: SensorManager? = null
@@ -518,21 +746,38 @@ class StepCounterService : Service(), SensorEventListener {
 
     override fun onCreate() {
         super.onCreate()
+        if (!isTrackingEnabled(this) ||
+            (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q &&
+             ContextCompat.checkSelfPermission(this, Manifest.permission.ACTIVITY_RECOGNITION) != PackageManager.PERMISSION_GRANTED)) {
+            stopSelf()
+            return
+        }
         serviceInstance = this
         createNotificationChannel()
-        startForegroundSafely()
+        if (!startForegroundSafely()) {
+            stopSelf()
+            return
+        }
 
         // Restore persisted state before registering sensor
-        restoreState()
+        restoreState(this)
 
         sensorManager = getSystemService(Context.SENSOR_SERVICE) as SensorManager
         stepSensor = sensorManager?.getDefaultSensor(Sensor.TYPE_STEP_COUNTER)
 
         stepSensor?.let {
-            sensorManager?.registerListener(this, it, SensorManager.SENSOR_DELAY_NORMAL)
-            isRunning = true
+            isRunning = try {
+                sensorManager?.registerListener(this, it, SensorManager.SENSOR_DELAY_NORMAL) == true
+            } catch (error: SecurityException) {
+                Log.w(TAG, "Activity permission revoked during sensor registration")
+                false
+            }
             Log.d(TAG, "Step sensor registered (baseline=${bootStepsBaseline}, today=$todaySteps)")
         } ?: Log.e(TAG, "No step counter sensor found")
+        if (!isRunning) {
+            stopSelf()
+            return
+        }
 
         // Register TYPE_STEP_DETECTOR alongside TYPE_STEP_COUNTER. Detector
         // fires once per detected step (rather than reporting the cumulative
@@ -541,13 +786,18 @@ class StepCounterService : Service(), SensorEventListener {
         // steps and not phantom vibration / sensor drift (Round 4).
         stepDetectorSensor =
             sensorManager?.getDefaultSensor(Sensor.TYPE_STEP_DETECTOR)
-        stepDetectorSensor?.let {
+        try {
+          stepDetectorSensor?.let {
             sensorManager?.registerListener(
                 this,
                 it,
                 SensorManager.SENSOR_DELAY_NORMAL,
             )
             Log.d(TAG, "Step detector registered for cross-check")
+          }
+        } catch (error: SecurityException) {
+            stepDetectorSensor = null
+            Log.w(TAG, "Activity permission revoked during detector registration")
         }
 
         // Activity transitions classifier. Manifest-declared
@@ -619,76 +869,22 @@ class StepCounterService : Service(), SensorEventListener {
         super.onTaskRemoved(rootIntent)
     }
 
-    /**
-     * Wrap the initial [startForeground] in defensive layers so a fresh install
-     * on Android 14+ never produces the "app keeps stopping" system dialog
-     * the QA team flagged on Apr 27 (Samsung A07 / One UI 7).
-     *
-     * Failure mode being defended: when the manifest declares
-     * `foregroundServiceType="health"`, Android 14+ requires the app to
-     * already hold one of {ACTIVITY_RECOGNITION, BODY_SENSORS, health.READ_*}
-     * runtime permissions at the moment startForeground runs. On a brand-new
-     * install nothing is granted yet and the platform raises
-     * `ForegroundServiceTypeNotAllowedException`, which propagates as an
-     * unhandled crash on the main thread.
-     *
-     * The new manifest declares both `health|dataSync` so we have a permission-
-     * less fallback; we pick the type at runtime and fall back further to a
-     * type-less startForeground if even dataSync is rejected (e.g. OEMs that
-     * gate dataSync behind their own background-execution policy).
-     */
-    private fun startForegroundSafely() {
-        val notification = buildNotification(0)
-
-        // Pre-Q: classic two-arg form.
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
-            try {
+    private fun startForegroundSafely(): Boolean {
+        return try {
+            val notification = buildNotification(0)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_HEALTH)
+            } else {
                 startForeground(NOTIFICATION_ID, notification)
-            } catch (e: Exception) {
-                Log.e(TAG, "startForeground (legacy) failed: ${e.message}")
             }
-            return
-        }
-
-        val hasActivityRecognition = ContextCompat.checkSelfPermission(
-            this,
-            Manifest.permission.ACTIVITY_RECOGNITION
-        ) == PackageManager.PERMISSION_GRANTED
-
-        val preferredType = if (hasActivityRecognition) {
-            ServiceInfo.FOREGROUND_SERVICE_TYPE_HEALTH
-        } else {
-            // No runtime sensor permission yet — running as dataSync is enough
-            // to keep the service alive while we wait for the user to grant
-            // ACTIVITY_RECOGNITION through the cubit flow. Once granted, the
-            // next process boot will re-enter onCreate with HEALTH.
-            ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
-        }
-
-        try {
-            startForeground(NOTIFICATION_ID, notification, preferredType)
-        } catch (e: Exception) {
-            Log.w(TAG, "startForeground type=$preferredType failed: ${e.message}, retrying with dataSync")
-            try {
-                startForeground(
-                    NOTIFICATION_ID,
-                    notification,
-                    ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
-                )
-            } catch (e2: Exception) {
-                Log.e(TAG, "startForeground dataSync fallback failed too: ${e2.message}")
-                // Last-resort: type-less call so we at least don't crash. The
-                // service may be killed later by the platform but the user
-                // never sees the "keeps stopping" dialog.
-                try {
-                    @Suppress("DEPRECATION")
-                    startForeground(NOTIFICATION_ID, notification)
-                } catch (e3: Exception) {
-                    Log.e(TAG, "startForeground last-resort failed: ${e3.message}")
-                }
-            }
+            true
+        } catch (error: Exception) {
+            Log.e(TAG, "Cannot start health foreground service: ${error.message}")
+            false
         }
     }
+
+    private var firstCounterEvent = true
 
     override fun onSensorChanged(event: SensorEvent?) {
         if (event == null) return
@@ -737,65 +933,10 @@ class StepCounterService : Service(), SensorEventListener {
         val currentYear = cal.get(Calendar.YEAR)
 
         if (currentDay != lastResetDay || currentYear != lastResetYear) {
-            // Detect if day went BACKWARD (system time manipulation)
-            val isBackward = currentYear < lastResetYear ||
-                (currentYear == lastResetYear && currentDay < lastResetDay)
-
-            // Block ANY day change (forward or backward) that arrives faster
-            // than MIN_RESET_INTERVAL_MS of monotonic time since the previous
-            // reset. Forward used to be unconditionally allowed but that left
-            // the trivial "spin the clock forward" attack open (May 26 obs 8
-            // + 9 — manual time change re-running the yesterday API + minting
-            // fresh reward day). MIN_RESET_INTERVAL_MS=20h covers TZ jumps
-            // and unusual schedules while blocking rapid-fire fake rollovers.
-            val elapsedSinceReset = now - lastResetElapsedTime
-            if (lastResetElapsedTime > 0 && elapsedSinceReset < MIN_RESET_INTERVAL_MS) {
-                Log.w(TAG, "Day change rejected on monotonic guard: ${elapsedSinceReset / 1000}s since last reset (need ${MIN_RESET_INTERVAL_MS / 1000}s, isBackward=$isBackward)")
-            } else {
-                val previousToday = todaySteps
-                val rotationDate = String.format(
-                    Locale.US,
-                    "%04d-%02d-%02d",
-                    cal.get(Calendar.YEAR),
-                    cal.get(Calendar.MONTH) + 1,
-                    cal.get(Calendar.DAY_OF_MONTH)
-                )
-                dayBeforeSteps = yesterdaySteps
-                yesterdaySteps = todaySteps
-                bootStepsBaseline = totalBootSteps
-                initialOffset = 0
-                sensorFloor = 0
-                lastResetDay = currentDay
-                lastResetYear = currentYear
-                lastResetElapsedTime = now
-                lastAcceptedBootSteps = totalBootSteps
-                pendingSteps = 0
-                updatesSincePersist = 0
-                synchronized(STATE_LOCK) {
-                    recentAcceptedSteps.clear()
-                    recentAcceptedTotal = 0
-                    hourlyAcceptedSteps.clear()
-                    hourlyAcceptedTotal = 0
-                }
-                todaySteps = 0
-                persistState(totalBootSteps)
-                // Stamp the rotation so the cubit can detect it on resume even
-                // if the LocalBroadcast below is dropped on the floor (Apr 27
-                // Bug 2 — process-suspended Flutter side missed events).
-                try {
-                    getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-                        .edit()
-                        .putString(KEY_LAST_ROTATION_DATE, rotationDate)
-                        .putInt(KEY_LAST_ROTATION_PREV_TODAY, previousToday)
-                        .apply()
-                } catch (e: Exception) {
-                    Log.w(TAG, "Failed to stamp rotation: ${e.message}")
-                }
-                Log.d(TAG, "Day changed: yesterday=$yesterdaySteps, dayBefore=$dayBeforeSteps")
-                broadcastSteps(0)
-                updateNotification(0)
-            }
+            performMidnightReset(this)
         }
+        val isFirstCounter = firstCounterEvent
+        firstCounterEvent = false
 
         // Detect device reboot: if totalBootSteps < last known boot count,
         // the sensor was reset (reboot). Re-baseline.
@@ -827,14 +968,12 @@ class StepCounterService : Service(), SensorEventListener {
             // `now`, causing the debounce branch to short-return until the
             // wall-clock catches up. Reset so the next event flows normally.
             lastAcceptedTime = 0L
-            lastResetElapsedTime = now
             persistState(totalBootSteps)
         }
 
         if (bootStepsBaseline == null) {
             bootStepsBaseline = totalBootSteps
             lastAcceptedBootSteps = totalBootSteps
-            lastResetElapsedTime = now
             persistState(totalBootSteps)
             Log.d(TAG, "Boot baseline set: $totalBootSteps")
         }
@@ -842,6 +981,24 @@ class StepCounterService : Service(), SensorEventListener {
         // --- Step debounce: filter micro-vibrations and phantom steps ---
         val incrementSinceLastAccepted = totalBootSteps - lastAcceptedBootSteps
         if (incrementSinceLastAccepted <= 0) return
+
+        // Non-wakeup counters can also batch while a live service's CPU sleeps.
+        // Validate against the whole gap, not a single minute or first-start flag.
+        if (lastSensorElapsedTime > 0 &&
+            now - lastSensorElapsedTime >= ONE_MINUTE_MS &&
+            !ActivityClassifier.isInVehicleWindow(now)) {
+            val accepted = NativeStepPolicy.admitRecovery(incrementSinceLastAccepted,
+                now - lastSensorElapsedTime, maxStepsPerHour, maxStepsPerMinute)
+            bootStepsBaseline = (bootStepsBaseline ?: totalBootSteps) + incrementSinceLastAccepted - accepted
+            lastAcceptedBootSteps = totalBootSteps
+            todaySteps = (totalBootSteps - (bootStepsBaseline ?: totalBootSteps)).coerceAtLeast(0) + initialOffset + sensorFloor
+            lastAcceptedTime = now
+            pendingSteps = 0
+            persistState(totalBootSteps)
+            broadcastSteps(todaySteps)
+            updateNotification(todaySteps)
+            return
+        }
 
         // ROUND 4 GATE 1: Vehicle / bicycle suppression. ActivityClassifier
         // flips to true when Play Services' Activity Recognition has
@@ -859,6 +1016,7 @@ class StepCounterService : Service(), SensorEventListener {
                 TAG,
                 "Vehicle window: dropping $incrementSinceLastAccepted (totalBoot=$totalBootSteps)"
             )
+            persistState(totalBootSteps)
             return
         }
 
@@ -872,8 +1030,8 @@ class StepCounterService : Service(), SensorEventListener {
         // 0.5x ratio is forgiving: detector occasionally misses on
         // OPPO / cheap-Samsung hardware so we don't demand 1:1.
         if (stepDetectorSensor != null &&
-            incrementSinceLastAccepted >= 4 &&
-            detectorEventsSinceLastCounterAccept * 2 < incrementSinceLastAccepted
+            NativeStepPolicy.detectorMismatch(incrementSinceLastAccepted,
+                detectorEventsSinceLastCounterAccept, now, lastDetectorEventElapsedMs, isFirstCounter)
         ) {
             bootStepsBaseline = (bootStepsBaseline ?: totalBootSteps) + incrementSinceLastAccepted
             lastAcceptedBootSteps = totalBootSteps
@@ -882,6 +1040,7 @@ class StepCounterService : Service(), SensorEventListener {
                 "Detector mismatch: counter+=$incrementSinceLastAccepted but detector fired $detectorEventsSinceLastCounterAccept — likely vibration, dropping"
             )
             detectorEventsSinceLastCounterAccept = 0
+            persistState(totalBootSteps)
             return
         }
 
@@ -909,12 +1068,12 @@ class StepCounterService : Service(), SensorEventListener {
         }
 
         // Sustained-rate guard: drop steps that would push the trailing-60s
-        // total above MAX_STEPS_PER_MINUTE. Unlike the 5s burst guard above,
+        // total above maxStepsPerMinute. Unlike the 5s burst guard above,
         // these steps are *discarded* rather than deferred — they represent
         // overcounting drift, not real walking we'll see again next event.
         pruneRecentAccepted(now)
-        val minuteCapped = if (recentAcceptedTotal + pendingSteps > MAX_STEPS_PER_MINUTE) {
-            val capped = (MAX_STEPS_PER_MINUTE - recentAcceptedTotal).coerceAtLeast(0)
+        val minuteCapped = if (recentAcceptedTotal + pendingSteps > maxStepsPerMinute) {
+            val capped = (maxStepsPerMinute - recentAcceptedTotal).coerceAtLeast(0)
             if (capped < pendingSteps) {
                 Log.d(
                     TAG,
@@ -933,8 +1092,8 @@ class StepCounterService : Service(), SensorEventListener {
         // a 9000+ overcount across the day (May 10 QA — 9079 vs G-Fit
         // 4572 without HC for cross-validation).
         pruneHourlyAccepted(now)
-        val acceptedNow = if (hourlyAcceptedTotal + minuteCapped > MAX_STEPS_PER_HOUR) {
-            val capped = (MAX_STEPS_PER_HOUR - hourlyAcceptedTotal).coerceAtLeast(0)
+        val acceptedNow = if (hourlyAcceptedTotal + minuteCapped > maxStepsPerHour) {
+            val capped = (maxStepsPerHour - hourlyAcceptedTotal).coerceAtLeast(0)
             if (capped < minuteCapped) {
                 Log.d(
                     TAG,
@@ -958,6 +1117,7 @@ class StepCounterService : Service(), SensorEventListener {
         if (acceptedNow <= 0) {
             // Nothing to accept this round; wait for the window to drain.
             pendingSteps = 0
+            persistState(totalBootSteps)
             return
         }
 
@@ -1029,9 +1189,16 @@ class StepCounterService : Service(), SensorEventListener {
     /** Persist step state to SharedPreferences for cold-start recovery. */
     private fun persistState(currentBootCount: Int) {
         try {
+            lastSensorElapsedTime = SystemClock.elapsedRealtime()
             val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             prefs.edit().apply {
                 putInt(KEY_BOOT_BASELINE, bootStepsBaseline ?: -1)
+                putInt(KEY_INITIAL_OFFSET, initialOffset)
+                putInt(KEY_SENSOR_FLOOR, sensorFloor)
+                putLong(KEY_RESET_ELAPSED, lastResetElapsedTime)
+                putLong(KEY_RESET_WALL, lastResetWallTime)
+                putLong(KEY_SENSOR_ELAPSED, lastSensorElapsedTime)
+                putInt(KEY_DEVICE_BOOT, bootId(this@StepCounterService))
                 putInt(KEY_TODAY_STEPS, todaySteps)
                 putInt(KEY_YESTERDAY_STEPS, yesterdaySteps)
                 putInt(KEY_DAY_BEFORE_STEPS, dayBeforeSteps)
@@ -1042,150 +1209,6 @@ class StepCounterService : Service(), SensorEventListener {
             }
         } catch (e: Exception) {
             Log.e(TAG, "Failed to persist state: ${e.message}")
-        }
-    }
-
-    /** Restore step state from SharedPreferences on cold start. */
-    private fun restoreState() {
-        try {
-            val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-            if (!prefs.contains(KEY_LAST_RESET_DAY)) {
-                val cal = Calendar.getInstance()
-                lastResetDay = cal.get(Calendar.DAY_OF_YEAR)
-                lastResetYear = cal.get(Calendar.YEAR)
-                lastResetElapsedTime = SystemClock.elapsedRealtime()
-                return
-            }
-
-            val savedDay = prefs.getInt(KEY_LAST_RESET_DAY, -1)
-            val savedYear = prefs.getInt(KEY_LAST_RESET_YEAR, -1)
-            val cal = Calendar.getInstance()
-            val currentDay = cal.get(Calendar.DAY_OF_YEAR)
-            val currentYear = cal.get(Calendar.YEAR)
-
-            // Calculate actual day difference accounting for year boundaries
-            val daysDiff = if (savedYear == currentYear) {
-                currentDay - savedDay
-            } else if (currentYear == savedYear + 1) {
-                val savedYearCal = Calendar.getInstance().apply { set(Calendar.YEAR, savedYear) }
-                val maxDays = savedYearCal.getActualMaximum(Calendar.DAY_OF_YEAR)
-                (maxDays - savedDay) + currentDay
-            } else {
-                999
-            }
-
-            // Capture pre-rotation today so Flutter can recover yesterday when
-            // cold-start restore rotates the day (midnight alarm missed because
-            // process was dead). Without this stamp, consumeLastRotation() is
-            // empty and the UI can keep showing yesterday's total as "today".
-            val previousTodayBeforeRestore = prefs.getInt(KEY_TODAY_STEPS, 0)
-            val rotationDate = String.format(
-                Locale.US,
-                "%04d-%02d-%02d",
-                cal.get(Calendar.YEAR),
-                cal.get(Calendar.MONTH) + 1,
-                cal.get(Calendar.DAY_OF_MONTH)
-            )
-
-            when {
-                daysDiff == 0 -> {
-                    // Same day — restore everything
-                    val savedBaseline = prefs.getInt(KEY_BOOT_BASELINE, -1)
-                    bootStepsBaseline = if (savedBaseline >= 0) savedBaseline else null
-                    todaySteps = prefs.getInt(KEY_TODAY_STEPS, 0)
-                    yesterdaySteps = prefs.getInt(KEY_YESTERDAY_STEPS, 0)
-                    dayBeforeSteps = prefs.getInt(KEY_DAY_BEFORE_STEPS, 0)
-                    lastResetDay = savedDay
-                    lastResetYear = savedYear
-                    lastAcceptedBootSteps = prefs.getInt(KEY_LAST_BOOT_COUNT, -1)
-                    Log.d(TAG, "Restored state: today=$todaySteps, baseline=$bootStepsBaseline")
-                }
-                daysDiff == 1 -> {
-                    dayBeforeSteps = prefs.getInt(KEY_YESTERDAY_STEPS, 0)
-                    yesterdaySteps = prefs.getInt(KEY_TODAY_STEPS, 0)
-                    todaySteps = 0
-                    bootStepsBaseline = null
-                    initialOffset = 0
-                    sensorFloor = 0
-                    lastResetDay = currentDay
-                    lastResetYear = currentYear
-                    lastAcceptedBootSteps = -1
-                    stampRestoreRotation(prefs, rotationDate, previousTodayBeforeRestore)
-                    Log.d(TAG, "New day restore: yesterday=$yesterdaySteps")
-                }
-                daysDiff == 2 -> {
-                    dayBeforeSteps = prefs.getInt(KEY_TODAY_STEPS, 0)
-                    yesterdaySteps = 0
-                    todaySteps = 0
-                    bootStepsBaseline = null
-                    initialOffset = 0
-                    sensorFloor = 0
-                    lastResetDay = currentDay
-                    lastResetYear = currentYear
-                    lastAcceptedBootSteps = -1
-                    stampRestoreRotation(prefs, rotationDate, previousTodayBeforeRestore)
-                    Log.d(TAG, "2-day gap: dayBefore=${dayBeforeSteps}")
-                }
-                else -> {
-                    dayBeforeSteps = 0
-                    yesterdaySteps = 0
-                    todaySteps = 0
-                    bootStepsBaseline = null
-                    initialOffset = 0
-                    sensorFloor = 0
-                    lastResetDay = currentDay
-                    lastResetYear = currentYear
-                    lastAcceptedBootSteps = -1
-                    if (previousTodayBeforeRestore > 0) {
-                        stampRestoreRotation(prefs, rotationDate, previousTodayBeforeRestore)
-                    }
-                    Log.d(TAG, "Stale data cleared, fresh start (${daysDiff}d gap)")
-                }
-            }
-
-            // Persist rotated counters so a second cold start same day does not
-            // re-apply the gap branch with stale KEY_TODAY_STEPS.
-            if (daysDiff != 0) {
-                try {
-                    prefs.edit().apply {
-                        putInt(KEY_BOOT_BASELINE, -1)
-                        putInt(KEY_TODAY_STEPS, 0)
-                        putInt(KEY_YESTERDAY_STEPS, yesterdaySteps)
-                        putInt(KEY_DAY_BEFORE_STEPS, dayBeforeSteps)
-                        putInt(KEY_LAST_RESET_DAY, currentDay)
-                        putInt(KEY_LAST_RESET_YEAR, currentYear)
-                        putInt(KEY_LAST_BOOT_COUNT, -1)
-                        apply()
-                    }
-                } catch (e: Exception) {
-                    Log.w(TAG, "Failed to persist restore rotation: ${e.message}")
-                }
-            }
-
-            // Set monotonic timestamp on restore
-            lastResetElapsedTime = SystemClock.elapsedRealtime()
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to restore state: ${e.message}")
-            val cal = Calendar.getInstance()
-            lastResetDay = cal.get(Calendar.DAY_OF_YEAR)
-            lastResetYear = cal.get(Calendar.YEAR)
-            lastResetElapsedTime = SystemClock.elapsedRealtime()
-        }
-    }
-
-    /** Stamp rotation prefs so Flutter drain recovers after cold-start day gap. */
-    private fun stampRestoreRotation(
-        prefs: SharedPreferences,
-        rotationDate: String,
-        previousToday: Int,
-    ) {
-        try {
-            prefs.edit()
-                .putString(KEY_LAST_ROTATION_DATE, rotationDate)
-                .putInt(KEY_LAST_ROTATION_PREV_TODAY, previousToday)
-                .apply()
-        } catch (e: Exception) {
-            Log.w(TAG, "Failed to stamp restore rotation: ${e.message}")
         }
     }
 

@@ -9,8 +9,14 @@ class MidnightReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context?, intent: Intent?) {
         Log.d("MidnightReceiver", "Midnight reset triggered")
         context ?: return
+        if (!StepCounterService.isTrackingEnabled(context)) return
 
         // Force day rotation in the step counter service
-        StepCounterService.performMidnightReset(context)
+        try {
+            StepCounterService.performMidnightReset(context)
+        } finally {
+            // A rejected/already-restored rotation still needs tomorrow's alarm.
+            StepCounterService.scheduleMidnightAlarm(context)
+        }
     }
 }

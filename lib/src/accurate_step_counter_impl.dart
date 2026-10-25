@@ -12,8 +12,6 @@ import 'models/step_record_source.dart';
 import 'models/step_runtime_state.dart';
 import 'models/terminated_sync_gap.dart';
 import 'platform/step_counter_platform.dart';
-import 'policy/merge_policy.dart';
-import 'services/ios_health_step_detector.dart';
 import 'services/native_step_detector.dart';
 import 'services/sensors_step_detector.dart';
 import 'services/step_record_store.dart';
@@ -47,10 +45,41 @@ class PendingStep {
   });
 }
 
-class AccurateStepCounterImpl {
+class AccurateStepCounterImpl with WidgetsBindingObserver {
+  AccurateStepCounterImpl()
+    : _platform = StepCounterPlatform.instance,
+      _now = DateTime.now,
+      _isAndroid = Platform.isAndroid;
+
+  @visibleForTesting
+  AccurateStepCounterImpl.testing({
+    required StepCounterPlatform platform,
+    required DateTime Function() now,
+  }) : _platform = platform,
+       _now = now,
+       _isAndroid = true;
+
+  final DateTime Function() _now;
+  final bool _isAndroid;
+  Future<void>? _startTrackingInFlight;
+  Future<void>? _rotationInFlight;
+  Future<void>? _dayRolloverInFlight;
+  Map<String, dynamic>? _pendingNativeRotation;
+  Future<void> _loggingQueue = Future<void>.value();
+  Future<void>? _writeFlushInFlight;
+  Future<void> _nativeEventQueue = Future<void>.value();
+  Future<void> _externalWriteChain = Future<void>.value();
+  DateTime? _sessionDay;
+  Timer? _dayBoundaryTimer;
+  bool _observingLifecycle = false;
+  bool _disposed = false;
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) =>
+      setAppState(state);
+
   final NativeStepDetector _nativeDetector = NativeStepDetector();
-  final StepCounterPlatform _platform = StepCounterPlatform.instance;
-  final MergePolicy _mergePolicy = const MergePolicy();
+  final StepCounterPlatform _platform;
 
   StepDetectorConfig? _currentConfig;
   bool _isStarted = false;
@@ -58,14 +87,10 @@ class AccurateStepCounterImpl {
   final StreamController<StepCountEvent> _foregroundStepController =
       StreamController<StepCountEvent>.broadcast();
   int _lastForegroundStepCount = 0;
-  int _latestSqliteTodaySteps = 0;
-  int _latestMergedTodaySteps = 0;
 
   // Sensors plus step detector for foreground service mode
   SensorsStepDetector? _sensorsStepDetector;
   StreamSubscription<StepCountEvent>? _sensorsStepSubscription;
-  IosHealthStepDetector? _iosHealthStepDetector;
-  StreamSubscription<StepCountEvent>? _iosStepSubscription;
 
   // Branch-style native step service mode
   bool _useNativeStepService = false;
@@ -119,7 +144,6 @@ class AccurateStepCounterImpl {
 
   // Write lock to prevent concurrent writeStepsToAggregated calls
   // This prevents race conditions where multiple writes happen before duplicate check completes
-  Completer<void>? _writeLock;
   final List<PendingStep> _writeBuffer = [];
   Timer? _writeBufferFlushTimer;
 
@@ -164,20 +188,15 @@ class AccurateStepCounterImpl {
   /// Returns events from native detector or foreground service
   /// depending on the Android version and configuration.
   Stream<StepCountEvent> get stepEventStream {
-    if (Platform.isIOS && _iosHealthStepDetector != null) {
-      return _iosHealthStepDetector!.stepEventStream;
-    }
     if (_useForegroundService) {
       return _foregroundStepController.stream;
     }
     return _nativeDetector.stepEventStream;
   }
 
-  /// Current step count since start()
+  /// Current detector count: today's total for the hardware service, or a
+  /// session count for legacy detectors.
   int get currentStepCount {
-    if (Platform.isIOS && _iosHealthStepDetector != null) {
-      return _iosHealthStepDetector!.currentStepCount;
-    }
     if (_useForegroundService) {
       return _lastForegroundStepCount;
     }
@@ -233,18 +252,45 @@ class AccurateStepCounterImpl {
       _platform.consumeLastRotation();
 
   /// Clear all native step state (logout / account switch).
-  Future<void> resetNativeStepState() => _platform.resetNativeStepState();
+  Future<void> resetNativeStepState() async {
+    if (_isStarted) await stop();
+    await _platform.resetNativeStepState();
+    _lastForegroundStepCount = 0;
+    final now = _now();
+    final stored = _storeInitialized
+        ? await _stepRecordStore!.readTotalSteps(
+            from: DateTime(now.year, now.month, now.day),
+            to: now,
+          )
+        : 0;
+
+    _aggregatedStoredSteps = stored;
+    _currentSessionSteps = 0;
+    _sessionBaseStepCount = 0;
+    _lastRecordedStepCount = 0;
+    _pendingNativeRotation = null;
+  }
 
   /// Start step detection
   ///
   /// On Android, prefers the hardware TYPE_STEP_COUNTER foreground service
-  /// on all API levels (including Samsung). Falls back to [NativeStepDetector]
-  /// or sensors_plus only if the native service cannot start.
+  /// on all supported API levels. Devices without a counter sensor can use
+  /// [NativeStepDetector] or the explicitly enabled accelerometer fallback.
   ///
   /// [config] - Optional configuration for step detection sensitivity
   ///
   /// Throws [StateError] if already started
   Future<void> start({StepDetectorConfig? config}) async {
+    if (_disposed) throw StateError('Create a new counter after dispose().');
+    if (!_isAndroid) {
+      throw UnsupportedError('Step tracking requires Android API 24 or newer.');
+    }
+    if (!await _platform.hasPermission()) {
+      throw StateError(
+        'Grant ACTIVITY_RECOGNITION before starting step tracking.',
+      );
+    }
+    await _ensureCurrentDay();
     if (_isStarted) {
       throw StateError('Step counter is already started');
     }
@@ -256,7 +302,7 @@ class AccurateStepCounterImpl {
       _useForegroundService = false;
       _useNativeStepService = false;
 
-      if (Platform.isAndroid) {
+      if (_isAndroid) {
         await _traceAsync('start.platformInitialize', () async {
           await _platform.initialize();
           return;
@@ -279,6 +325,10 @@ class AccurateStepCounterImpl {
         }
 
         if (hasSensor) {
+          await _platform.configureNativeStepService(
+            maxStepsPerMinute: _currentConfig!.nativeMaxStepsPerMinute,
+            maxStepsPerHour: _currentConfig!.nativeMaxStepsPerHour,
+          );
           final nativeServiceStarted = await _traceAsync(
             'start.startNativeStepService',
             _platform.startNativeStepService,
@@ -299,28 +349,7 @@ class AccurateStepCounterImpl {
             _nativeServiceStepSubscription = _platform.nativeStepServiceStream
                 .listen(
                   (steps) {
-                    final merged = _mergePolicy
-                        .mergeToday(
-                          MergeInputs(
-                            hcSteps: 0,
-                            sensorSteps: steps,
-                            currentFloor: _bestTodayFloor(),
-                            serverRecovered: 0,
-                          ),
-                        )
-                        .displayed;
-                    _lastForegroundStepCount = merged;
-                    _latestMergedTodaySteps = merged;
-                    if (!_foregroundStepController.isClosed) {
-                      _foregroundStepController.add(
-                        StepCountEvent(
-                          stepCount: merged,
-                          timestamp: DateTime.now().toUtc(),
-                        ),
-                      );
-                    }
-                    // Drain rotation stamps that arrived while stream was live
-                    unawaited(_drainNativeRotation());
+                    _queueNativeSteps(steps);
                   },
                   onError: (error) {
                     _log('native step service stream error: $error');
@@ -336,7 +365,9 @@ class AccurateStepCounterImpl {
             return;
           }
 
-          _log('Native step service unavailable, trying fallbacks');
+          throw StateError(
+            'The Android step service could not start. Start tracking while the app is visible and check activity permission.',
+          );
         }
 
         // Optional legacy FGS + sensors_plus for old devices when config asks
@@ -397,53 +428,46 @@ class AccurateStepCounterImpl {
         _logPerf('start.total took ${sw.elapsedMilliseconds}ms');
         return;
       }
-
-      if (Platform.isIOS) {
-        _iosHealthStepDetector ??= IosHealthStepDetector();
-        await _traceAsync('start.iosHealthStart', () async {
-          await _iosHealthStepDetector!.start();
-          return;
-        });
-        await _iosStepSubscription?.cancel();
-        _iosStepSubscription = _iosHealthStepDetector!.stepEventStream.listen((
-          event,
-        ) {
-          if (!_foregroundStepController.isClosed) {
-            _foregroundStepController.add(event);
-          }
-        });
-        _isStarted = true;
-        _setRuntimeState(_activeRuntimeState(), reason: 'startCompleteIos');
-        _logPerf('start.total took ${sw.elapsedMilliseconds}ms');
-        return;
-      }
-
-      // Non-Android/iOS: no-op start
-      _isStarted = true;
-      _setRuntimeState(
-        _activeRuntimeState(),
-        reason: 'startCompleteNonAndroid',
-      );
-      _logPerf('start.total took ${sw.elapsedMilliseconds}ms');
     } catch (_) {
       _setRuntimeState(StepRuntimeState.error, reason: 'startFailed');
       rethrow;
     }
   }
 
+  Future<void> _queueNativeSteps(int steps) {
+    return _nativeEventQueue = _nativeEventQueue
+        .then((_) async {
+          await _drainNativeRotation();
+          await _ensureCurrentDay();
+          // Log only sensor-source counts. A stored/display floor must never
+          // flow back through this stream as if it were new physical steps.
+          if (steps < 0) return;
+          _lastForegroundStepCount = steps;
+          if (!_foregroundStepController.isClosed) {
+            _foregroundStepController.add(
+              StepCountEvent(stepCount: steps, timestamp: _now().toUtc()),
+            );
+          }
+        })
+        .catchError((Object error, StackTrace stack) {
+          _log('Native event processing failed: $error');
+        });
+  }
+
   /// Seed native offset from SQLite today when calibration needed.
   Future<void> _calibrateNativeServiceIfNeeded() async {
     try {
-      final needs = await _platform.nativeNeedsCalibration();
-      if (!needs) return;
-
       final sensorToday = await _platform.getNativeTodaySteps();
       if (sensorToday > 0) return;
 
       if (!_storeInitialized || _stepRecordStore == null) return;
 
-      final storedToday = await getTodaySteps();
-      if (storedToday <= 0 || storedToday > 40000) return;
+      final now = _now();
+      final storedToday = await _readNativeStoredSteps(
+        DateTime(now.year, now.month, now.day),
+        now,
+      );
+      if (storedToday <= 0 || storedToday > 80000) return;
 
       await _platform.setNativeInitialOffset(storedToday);
       _lastForegroundStepCount = storedToday;
@@ -453,70 +477,117 @@ class AccurateStepCounterImpl {
     }
   }
 
-  /// Drain native midnight rotation stamp into logging / callback if needed.
-  Future<void> _drainNativeRotation() async {
-    try {
-      final rotation = await _platform.consumeLastRotation();
-      if (rotation == null) return;
+  /// Count native-tagged records independently from imported external records.
+  Future<int> _readNativeStoredSteps(DateTime start, DateTime end) {
+    // A single aggregate query avoids mixing snapshots if an import commits
+    // while native recovery is reading the same day's records.
+    return _stepRecordStore!.readTotalSteps(
+      from: start,
+      to: end,
+      excludeSource: StepRecordSource.external,
+    );
+  }
 
-      final previousToday = rotation['previousToday'] as int? ?? 0;
-      final date = rotation['date'] as String? ?? '';
-      _log(
-        'Native day rotation drained: date=$date previousToday=$previousToday',
-      );
+  /// Drain and persist native historical counts without consuming external imports.
+  Future<void> _drainNativeRotation() {
+    return _rotationInFlight ??= _performRotationDrain().whenComplete(() {
+      _rotationInFlight = null;
+    });
+  }
 
-      if (previousToday > 0 && _storeInitialized && _stepRecordStore != null) {
-        final todayAnchor = _parseRotationDate(date) ?? DateTime.now();
-        final startOfToday = DateTime(
-          todayAnchor.year,
-          todayAnchor.month,
-          todayAnchor.day,
-        );
-        final startOfYesterday = startOfToday.subtract(const Duration(days: 1));
-        final existingYesterday = await _stepRecordStore!.readTotalSteps(
-          from: startOfYesterday,
-          to: startOfToday,
-        );
-        if (previousToday > existingYesterday) {
-          final gap = previousToday - existingYesterday;
-          final dateStr = date.isNotEmpty
-              ? date
-              : startOfYesterday.toIso8601String().substring(0, 10);
-          await _safeInsertRecord(
-            StepRecord(
-              stepCount: gap,
-              fromTime: startOfYesterday,
-              toTime: startOfToday,
-              source: StepRecordSource.foreground,
-              confidence: 1.0,
-              idempotencyKey:
-                  'native_rotation_yesterday|$dateStr|$previousToday',
-            ),
-          );
-          _log(
-            'Persisted rotated yesterday steps to SQLite: previousToday=$previousToday, gap=$gap',
-          );
-        }
-      }
-
-      if (previousToday > 0 && _lastForegroundStepCount != 0) {
-        _lastForegroundStepCount = 0;
-        _latestMergedTodaySteps = 0;
-        if (!_foregroundStepController.isClosed) {
-          _foregroundStepController.add(
-            StepCountEvent(stepCount: 0, timestamp: DateTime.now().toUtc()),
-          );
-        }
-      }
-    } catch (e) {
-      _log('drainNativeRotation failed: $e');
+  Future<void> _performRotationDrain() async {
+    await _ensureCurrentDay();
+    _pendingNativeRotation ??= await _platform.consumeLastRotation();
+    final rotation = _pendingNativeRotation;
+    if (rotation == null || !_storeInitialized) return;
+    final previousToday = rotation['previousToday'] as int? ?? 0;
+    final anchor = _parseRotationDate(rotation['date'] as String? ?? '');
+    if (anchor == null || previousToday <= 0) {
+      _pendingNativeRotation = null;
+      return;
     }
+    final previous =
+        _parseRotationDate(rotation['previousDate'] as String? ?? '') ??
+        DateTime(anchor.year, anchor.month, anchor.day - 1);
+    final start = DateTime(previous.year, previous.month, previous.day);
+    final end = DateTime(previous.year, previous.month, previous.day + 1);
+    final existing = await _readNativeStoredSteps(
+      start,
+      end.subtract(const Duration(milliseconds: 1)),
+    );
+    if (previousToday > existing) {
+      await _safeInsertRecord(
+        StepRecord(
+          stepCount: previousToday - existing,
+          fromTime: start,
+          toTime: end,
+          source: StepRecordSource.terminated,
+          confidence: 1.0,
+          idempotencyKey:
+              'native_rotation|${start.toIso8601String()}|$previousToday',
+        ),
+      );
+    }
+    _pendingNativeRotation = null;
+  }
+
+  Future<void> _ensureCurrentDay() {
+    return _dayRolloverInFlight ??= _performDayRollover().whenComplete(() {
+      _dayRolloverInFlight = null;
+    });
+  }
+
+  Future<void> _performDayRollover() async {
+    final now = _now();
+    final day = DateTime(now.year, now.month, now.day);
+    if (_sessionDay == day) return;
+    if (_sessionDay == null) {
+      _sessionDay = day;
+      return;
+    }
+    await _loggingQueue;
+    await _flushWriteBuffer();
+    _sessionDay = day;
+    final stored = _storeInitialized
+        ? await _stepRecordStore!.readTotalSteps(from: day, to: now)
+        : 0;
+    _aggregatedStoredSteps = stored;
+    _currentSessionSteps = 0;
+    _sessionBaseStepCount = 0;
+    _lastRecordedStepCount = 0;
+    _lastRecordTime = day.toUtc();
+    _lastForegroundStepCount = 0;
+
+    _lastStreamEmitTime = null;
+    _resetWarmupState();
+    _emitAggregatedCount(stored);
+    if (!_foregroundStepController.isClosed) {
+      _foregroundStepController.add(
+        StepCountEvent(stepCount: 0, timestamp: now.toUtc()),
+      );
+    }
+  }
+
+  void _scheduleDayBoundary() {
+    _dayBoundaryTimer?.cancel();
+    final now = _now();
+    final next = DateTime(now.year, now.month, now.day + 1);
+    _dayBoundaryTimer = Timer(next.difference(now), () async {
+      try {
+        await _ensureCurrentDay();
+        if (_useNativeStepService) await _drainNativeRotation();
+      } catch (error) {
+        _log('Day rollover failed: $error');
+      } finally {
+        if (_recordingEnabled) _scheduleDayBoundary();
+      }
+    });
   }
 
   /// Stop step detection
   ///
-  /// This stops the accelerometer listening but preserves the current step count.
-  /// Call [reset] if you want to clear the step count as well.
+  /// Flushes logging and stops the detector/service while preserving history.
+  /// Clear history and native state explicitly for logout or an account switch.
   ///
   /// Example:
   /// ```dart
@@ -524,6 +595,16 @@ class AccurateStepCounterImpl {
   /// print('Stopped at: ${stepCounter.currentStepCount} steps');
   /// ```
   Future<void> stop() async {
+    try {
+      await _startTrackingInFlight;
+    } catch (_) {
+      // Startup reports its own failure; stop still releases partial resources.
+    }
+    await _stopInternal();
+  }
+
+  Future<void> _stopInternal() async {
+    if (_recordingEnabled) await stopLogging();
     if (!_isStarted) {
       return;
     }
@@ -534,6 +615,7 @@ class AccurateStepCounterImpl {
         if (_useNativeStepService) {
           await _nativeServiceStepSubscription?.cancel();
           _nativeServiceStepSubscription = null;
+          await _nativeEventQueue;
           await _platform.stopNativeStepService();
           _useNativeStepService = false;
         } else {
@@ -549,9 +631,6 @@ class AccurateStepCounterImpl {
       } else {
         await _nativeDetector.stop();
       }
-      await _iosStepSubscription?.cancel();
-      _iosStepSubscription = null;
-      await _iosHealthStepDetector?.stop();
 
       _isStarted = false;
       _setRuntimeState(StepRuntimeState.stopped, reason: 'stopComplete');
@@ -561,10 +640,10 @@ class AccurateStepCounterImpl {
     }
   }
 
-  /// Reset the step counter to zero
+  /// Reset a legacy session detector to zero.
   ///
-  /// This does not stop the detector if it's running.
-  /// Use this to start counting from zero while continuing detection.
+  /// Hardware service counts are persisted daily totals. Use [stop],
+  /// [clearStepLogs], and [resetNativeStepState] to clear those totals explicitly.
   ///
   /// Example:
   /// ```dart
@@ -575,19 +654,18 @@ class AccurateStepCounterImpl {
   /// await stepCounter.stop();
   /// stepCounter.reset();
   /// ```
+  @Deprecated(
+    'For daily hardware totals use stop(), clearStepLogs(), and resetNativeStepState().',
+  )
   void reset() {
-    if (Platform.isIOS) {
-      _iosHealthStepDetector?.reset();
-      return;
+    if (_useNativeStepService) {
+      throw UnsupportedError(
+        'Clear hardware daily totals with stop(), clearStepLogs(), and resetNativeStepState().',
+      );
     }
     if (_useForegroundService) {
-      if (_useNativeStepService) {
-        _platform.setNativeInitialOffset(0);
-        _platform.setNativeSensorFloor(0);
-      } else {
-        _platform.resetForegroundStepCount();
-        _sensorsStepDetector?.reset();
-      }
+      _platform.resetForegroundStepCount();
+      _sensorsStepDetector?.reset();
       _lastForegroundStepCount = 0;
     } else {
       _nativeDetector.resetStepCount();
@@ -642,10 +720,6 @@ class AccurateStepCounterImpl {
   /// }
   /// ```
   Future<bool> hasActivityRecognitionPermission() async {
-    if (Platform.isIOS) {
-      _iosHealthStepDetector ??= IosHealthStepDetector();
-      return _iosHealthStepDetector!.hasStepPermission();
-    }
     return await _platform.hasPermission();
   }
 
@@ -669,7 +743,7 @@ class AccurateStepCounterImpl {
     return await _platform.isBatteryOptimized();
   }
 
-  /// Request battery optimization exclusion for native service mode.
+  /// Open battery optimization settings for native service mode.
   Future<bool> requestNativeServiceBatteryOptimizationExclusion() async {
     return await _platform.requestBatteryOptimization();
   }
@@ -699,6 +773,16 @@ class AccurateStepCounterImpl {
   /// }
   /// ```
   Future<void> dispose() async {
+    if (_disposed) return;
+    try {
+      await _startTrackingInFlight;
+    } catch (_) {}
+    _disposed = true;
+    if (_observingLifecycle) {
+      WidgetsBinding.instance.removeObserver(this);
+      _observingLifecycle = false;
+    }
+    _dayBoundaryTimer?.cancel();
     // Stop logging first so buffered SQLite writes flush and the periodic
     // flush timer cannot hit a closed store.
     if (_recordingEnabled || _writeBuffer.isNotEmpty) {
@@ -713,10 +797,6 @@ class AccurateStepCounterImpl {
     await _nativeServiceStepSubscription?.cancel();
     _nativeServiceStepSubscription = null;
     _useNativeStepService = false;
-    await _iosStepSubscription?.cancel();
-    _iosStepSubscription = null;
-    await _iosHealthStepDetector?.dispose();
-    _iosHealthStepDetector = null;
     await _sensorsStepDetector?.dispose();
     _sensorsStepDetector = null;
     await _stepRecordSubscription?.cancel();
@@ -754,16 +834,50 @@ class AccurateStepCounterImpl {
     bool performanceTracing = false,
     StepDetectorConfig? detectorConfig,
     StepRecordConfig? loggingConfig,
+  }) {
+    if (_disposed) {
+      return Future.error(StateError('Create a new counter after dispose().'));
+    }
+    if (_startTrackingInFlight != null) return _startTrackingInFlight!;
+    return _startTrackingInFlight = _startTracking(
+      useBackgroundIsolate: useBackgroundIsolate,
+      debugLogging: debugLogging,
+      performanceTracing: performanceTracing,
+      detectorConfig: detectorConfig,
+      loggingConfig: loggingConfig,
+    ).whenComplete(() => _startTrackingInFlight = null);
+  }
+
+  Future<void> _startTracking({
+    required bool useBackgroundIsolate,
+    required bool debugLogging,
+    required bool performanceTracing,
+    StepDetectorConfig? detectorConfig,
+    StepRecordConfig? loggingConfig,
   }) async {
-    final sw = Stopwatch()..start();
-    _setRuntimeState(StepRuntimeState.initializing, reason: 'startTracking');
+    if (!_isAndroid) {
+      throw UnsupportedError('Step tracking requires Android API 24 or newer.');
+    }
+    if (!await _platform.hasPermission()) {
+      if (_isStarted) await _stopInternal();
+      throw StateError(
+        'Grant ACTIVITY_RECOGNITION before starting step tracking.',
+      );
+    }
+    if (_isStarted && _recordingEnabled) {
+      if (!_useNativeStepService ||
+          await _platform.isNativeStepServiceRunning()) {
+        return;
+      }
+      await _stopInternal();
+    }
     try {
       await initializeLogging(
         debugLogging: debugLogging,
         useBackgroundIsolate: useBackgroundIsolate,
         performanceTracing: performanceTracing,
       );
-      await start(config: detectorConfig ?? const StepDetectorConfig());
+      if (!_isStarted) await start(config: detectorConfig);
       await startLogging(
         config:
             loggingConfig ??
@@ -771,8 +885,12 @@ class AccurateStepCounterImpl {
               useBackgroundIsolate: useBackgroundIsolate,
             ),
       );
-      _logPerf('startTracking.total took ${sw.elapsedMilliseconds}ms');
+      if (!_observingLifecycle) {
+        WidgetsBinding.instance.addObserver(this);
+        _observingLifecycle = true;
+      }
     } catch (_) {
+      if (_isStarted) await _stopInternal();
       _setRuntimeState(StepRuntimeState.error, reason: 'startTrackingFailed');
       rethrow;
     }
@@ -803,8 +921,9 @@ class AccurateStepCounterImpl {
   /// ```
   Future<int> getTodayStepCount() async {
     _ensureLoggingInitialized();
+    await _ensureCurrentDay();
     await _flushPendingWritesIfNeeded();
-    final now = DateTime.now();
+    final now = _now();
     final startOfToday = DateTime(now.year, now.month, now.day);
     final sqlite = await _stepRecordStore!.readTotalSteps(
       from: startOfToday,
@@ -813,12 +932,10 @@ class AccurateStepCounterImpl {
     if (_useNativeStepService) {
       final native = await _platform.getNativeTodaySteps();
       final merged = native > sqlite ? native : sqlite;
-      _latestSqliteTodaySteps = sqlite;
-      _latestMergedTodaySteps = merged;
+
       return merged;
     }
-    _latestSqliteTodaySteps = sqlite;
-    _latestMergedTodaySteps = sqlite;
+
     return sqlite;
   }
 
@@ -838,12 +955,12 @@ class AccurateStepCounterImpl {
   Future<int> getYesterdayStepCount() async {
     _ensureLoggingInitialized();
     await _flushPendingWritesIfNeeded();
-    final now = DateTime.now();
+    final now = _now();
     final startOfToday = DateTime(now.year, now.month, now.day);
-    final startOfYesterday = startOfToday.subtract(const Duration(days: 1));
+    final startOfYesterday = DateTime(now.year, now.month, now.day - 1);
     final sqlite = await _stepRecordStore!.readTotalSteps(
       from: startOfYesterday,
-      to: startOfToday,
+      to: startOfToday.subtract(const Duration(milliseconds: 1)),
     );
     if (_useNativeStepService) {
       final native = await _platform.getNativeYesterdaySteps();
@@ -879,7 +996,7 @@ class AccurateStepCounterImpl {
     final startMidnight = DateTime(start.year, start.month, start.day);
 
     // Set end to midnight of end date, or now if end is today
-    final now = DateTime.now();
+    final now = _now();
     final endMidnight = DateTime(end.year, end.month, end.day);
     final isEndToday =
         endMidnight.year == now.year &&
@@ -908,89 +1025,61 @@ class AccurateStepCounterImpl {
   Stream<int> watchTodaySteps() {
     _ensureLoggingInitialized();
     late StreamController<int> controller;
-    StreamSubscription<int>? sqliteSub;
-    StreamSubscription<int>? nativeSub;
+    StreamSubscription<void>? sqliteSub;
     StreamSubscription<StepCountEvent>? eventSub;
-    int lastEmitted = -1;
-    int lastSqlite = 0;
-    int lastNative = _useNativeStepService ? _lastForegroundStepCount : 0;
+    Future<void> refreshQueue = Future<void>.value();
+    int? lastEmitted;
 
-    void checkAndEmit(int currentTotal) {
-      if (!controller.isClosed && currentTotal != lastEmitted) {
-        lastEmitted = currentTotal;
-        controller.add(currentTotal);
-      }
-    }
+    void refresh() {
+      refreshQueue = refreshQueue
+          .then((_) async {
+            await _ensureCurrentDay();
+            final now = _now();
+            final stored = await _stepRecordStore!.readTotalSteps(
+              from: DateTime(now.year, now.month, now.day),
+              to: now,
+            );
+            final current = _now();
+            if (DateTime(current.year, current.month, current.day) !=
+                DateTime(now.year, now.month, now.day)) {
+              refresh();
+              return;
+            }
 
-    Future<void> evaluateInitial() async {
-      try {
-        final now = DateTime.now();
-        final startOfToday = DateTime(now.year, now.month, now.day);
-        lastSqlite = await _stepRecordStore!.readTotalSteps(
-          from: startOfToday,
-          to: now,
-        );
-        lastNative = _useNativeStepService ? _lastForegroundStepCount : 0;
-        final maxVal = lastNative > lastSqlite ? lastNative : lastSqlite;
-        checkAndEmit(maxVal);
-      } catch (e) {
-        _log('watchTodaySteps evaluate error: $e');
-      }
-    }
+            var total = stored;
+            if (_useNativeStepService && _lastForegroundStepCount > total) {
+              total = _lastForegroundStepCount;
+            }
+            if (_aggregatedModeEnabled && aggregatedStepCount > total) {
+              total = aggregatedStepCount;
+            }
 
-    controller = StreamController<int>.broadcast(
-      onListen: () {
-        final now = DateTime.now();
-        final startOfToday = DateTime(now.year, now.month, now.day);
-        evaluateInitial();
-
-        sqliteSub = _stepRecordStore!
-            .watchTotalSteps(from: startOfToday)
-            .listen((sqliteVal) {
-              lastSqlite = sqliteVal;
-              _latestSqliteTodaySteps = sqliteVal;
-              final maxVal = lastNative > lastSqlite ? lastNative : lastSqlite;
-              _latestMergedTodaySteps = maxVal;
-              checkAndEmit(maxVal);
-            });
-
-        if (_useNativeStepService) {
-          nativeSub = _platform.nativeStepServiceStream.listen((nativeVal) {
-            final merged = _mergePolicy
-                .mergeToday(
-                  MergeInputs(
-                    hcSteps: 0,
-                    sensorSteps: nativeVal,
-                    currentFloor: lastSqlite > _bestTodayFloor()
-                        ? lastSqlite
-                        : _bestTodayFloor(),
-                    serverRecovered: 0,
-                  ),
-                )
-                .displayed;
-            lastNative = merged;
-            _lastForegroundStepCount = merged;
-            final maxVal = lastNative > lastSqlite ? lastNative : lastSqlite;
-            _latestMergedTodaySteps = maxVal;
-            checkAndEmit(maxVal);
+            if (!controller.isClosed && total != lastEmitted) {
+              lastEmitted = total;
+              controller.add(total);
+            }
+          })
+          .catchError((Object error, StackTrace stack) {
+            if (!controller.isClosed) controller.addError(error, stack);
           });
-        }
+    }
 
-        // Fallback sources (legacy paths) still trigger a merged emit.
-        eventSub = stepEventStream.listen((event) {
-          lastNative = event.stepCount;
-          final maxVal = lastNative > lastSqlite ? lastNative : lastSqlite;
-          _latestMergedTodaySteps = maxVal;
-          checkAndEmit(maxVal);
-        });
+    controller = StreamController<int>(
+      onListen: () {
+        // Subscribe before the initial query so no write can fall in a gap.
+        // The query uses the current date each time, including after midnight.
+        sqliteSub = _stepRecordStore!.recordChanges.listen((_) => refresh());
+        eventSub = stepEventStream.listen(
+          (_) => refresh(),
+          onDone: () => unawaited(controller.close()),
+        );
+        refresh();
       },
-      onCancel: () {
-        sqliteSub?.cancel();
-        nativeSub?.cancel();
-        eventSub?.cancel();
+      onCancel: () async {
+        await sqliteSub?.cancel();
+        await eventSub?.cancel();
       },
     );
-
     return controller.stream;
   }
 
@@ -1023,6 +1112,7 @@ class AccurateStepCounterImpl {
     bool useBackgroundIsolate = false,
     bool performanceTracing = false,
   }) async {
+    if (_disposed) throw StateError('Create a new counter after dispose().');
     if (_storeInitialized) {
       _debugLogging = _debugLogging || debugLogging;
       _performanceTracing = _performanceTracing || performanceTracing;
@@ -1112,7 +1202,7 @@ class AccurateStepCounterImpl {
   void _emitAggregatedCount(int count) {
     if (_aggregatedStepController.isClosed) return;
 
-    final now = DateTime.now();
+    final now = _now();
 
     if (_lastStreamEmitTime == null ||
         now.difference(_lastStreamEmitTime!) >= _minStreamEmitInterval) {
@@ -1123,6 +1213,8 @@ class AccurateStepCounterImpl {
 
   /// Flush pending buffered writes before read APIs that expect fresh data.
   Future<void> _flushPendingWritesIfNeeded() async {
+    await _nativeEventQueue;
+    await _loggingQueue;
     if (_aggregatedModeEnabled && _writeBuffer.isNotEmpty) {
       await _flushWriteBuffer();
     }
@@ -1200,7 +1292,7 @@ class AccurateStepCounterImpl {
     _isInWarmup = cfg.warmupDurationMs > 0;
     _warmupStartTime = null;
     _warmupStartStepCount = 0;
-    _lastRecordTime = DateTime.now().toUtc();
+    _lastRecordTime = _now().toUtc();
     _lastRecordedStepCount = 0;
     _writeBuffer.clear();
     _writeBufferFlushTimer?.cancel();
@@ -1215,7 +1307,9 @@ class AccurateStepCounterImpl {
       // Start buffer flush timer (every 3 seconds)
       _writeBufferFlushTimer = Timer.periodic(
         const Duration(seconds: 3),
-        (_) => _flushWriteBuffer(),
+        (_) => _flushWriteBuffer().catchError((Object error) {
+          _log('Buffered writes retained for retry: $error');
+        }),
       );
     }
 
@@ -1225,13 +1319,21 @@ class AccurateStepCounterImpl {
       unawaited(_cleanupOldLogs(cfg.retentionPeriod));
     }
 
+    _scheduleDayBoundary();
+
     // Subscribe to step events for auto-logging
-    _stepRecordSubscription = stepEventStream.listen((event) async {
-      if (_aggregatedModeEnabled) {
-        await _autoLogStepsContinuous(event);
-      } else {
-        await _autoLogSteps(event, _recordIntervalMs);
-      }
+    _stepRecordSubscription = stepEventStream.listen((event) {
+      _loggingQueue = _loggingQueue
+          .then((_) async {
+            if (_aggregatedModeEnabled) {
+              await _autoLogStepsContinuous(event);
+            } else {
+              await _autoLogSteps(event, _recordIntervalMs);
+            }
+          })
+          .catchError((Object error, StackTrace stack) {
+            _log('Step logging failed: $error');
+          });
     });
 
     if (_aggregatedModeEnabled) {
@@ -1248,8 +1350,11 @@ class AccurateStepCounterImpl {
 
   /// Stop auto-logging steps
   Future<void> stopLogging() async {
+    _dayBoundaryTimer?.cancel();
+    _dayBoundaryTimer = null;
     await _stepRecordSubscription?.cancel();
     _stepRecordSubscription = null;
+    await _loggingQueue;
     _inactivityTimer?.cancel();
     _inactivityTimer = null;
     _writeBufferFlushTimer?.cancel();
@@ -1291,7 +1396,7 @@ class AccurateStepCounterImpl {
   /// Clean up old logs based on retention period
   Future<void> _cleanupOldLogs(Duration retentionPeriod) async {
     try {
-      final cutoff = DateTime.now().subtract(retentionPeriod);
+      final cutoff = _now().subtract(retentionPeriod);
       _log('Cleaning up logs older than $cutoff');
       await _stepRecordStore!.deleteRecordsBefore(cutoff);
     } catch (e) {
@@ -1301,9 +1406,11 @@ class AccurateStepCounterImpl {
 
   /// Initialize aggregated mode by loading today's steps
   Future<void> _initializeAggregatedMode() async {
-    final now = DateTime.now();
+    await _ensureCurrentDay();
+    final now = _now();
     final startOfToday = DateTime(now.year, now.month, now.day);
 
+    var nativeBaseline = currentStepCount;
     // Load today's steps from SQLite
     var todaySteps = await _stepRecordStore!.readTotalSteps(
       from: startOfToday,
@@ -1314,8 +1421,10 @@ class AccurateStepCounterImpl {
     if (_useNativeStepService) {
       try {
         final nativeToday = await _platform.getNativeTodaySteps();
-        if (nativeToday > todaySteps) {
-          final gap = nativeToday - todaySteps;
+        nativeBaseline = nativeToday;
+        final recordedNative = await _readNativeStoredSteps(startOfToday, now);
+        if (nativeToday > recordedNative) {
+          final gap = nativeToday - recordedNative;
           final dayKey =
               '${startOfToday.year}-'
               '${startOfToday.month.toString().padLeft(2, '0')}-'
@@ -1327,10 +1436,13 @@ class AccurateStepCounterImpl {
               toTime: now,
               source: StepRecordSource.terminated,
               confidence: 1.0,
-              idempotencyKey: 'native_reconcile|$dayKey|$gap',
+              idempotencyKey: 'native_reconcile|$dayKey|$nativeToday',
             ),
           );
-          todaySteps = nativeToday;
+          todaySteps = await _stepRecordStore!.readTotalSteps(
+            from: startOfToday,
+            to: now,
+          );
           _log('Reconciled native→SQLite gap=$gap (today=$todaySteps)');
         }
       } catch (e) {
@@ -1342,12 +1454,13 @@ class AccurateStepCounterImpl {
     _aggregatedStoredSteps = todaySteps;
     // Reset session tracking against current sensor reading
     _currentSessionSteps = 0;
-    _sessionBaseStepCount = currentStepCount;
+    _sessionBaseStepCount = nativeBaseline;
+    _lastRecordedStepCount = _sessionBaseStepCount;
 
     // Emit initial value to stream immediately
     if (!_aggregatedStepController.isClosed) {
       _aggregatedStepController.add(_aggregatedStoredSteps);
-      _lastStreamEmitTime = DateTime.now();
+      _lastStreamEmitTime = _now();
     }
 
     _log('Initialized aggregated mode: $todaySteps steps from today');
@@ -1458,7 +1571,7 @@ class AccurateStepCounterImpl {
       _lastRecordedStepCount = event.stepCount;
 
       // Update session steps tracking
-      _currentSessionSteps = event.stepCount - _sessionBaseStepCount;
+      _currentSessionSteps += warmupSteps;
 
       // Emit aggregated count (stored from DB + new session steps)
       _emitAggregatedCount(_aggregatedStoredSteps + _currentSessionSteps);
@@ -1467,17 +1580,11 @@ class AccurateStepCounterImpl {
 
     // === CONTINUOUS LOGGING (after warmup) ===
 
-    if (_lastRecordedStepCount == 0) {
-      _lastRecordedStepCount = event.stepCount;
-      _lastRecordTime = now;
-      return;
-    }
-
     final newSteps = event.stepCount - _lastRecordedStepCount;
 
     if (newSteps > 0) {
       // Validate step rate if there's a time gap
-      if (_lastRecordTime != null) {
+      if (!_useNativeStepService && _lastRecordTime != null) {
         final elapsed = now.difference(_lastRecordTime!);
         final elapsedSeconds = elapsed.inMilliseconds / 1000.0;
 
@@ -1509,7 +1616,7 @@ class AccurateStepCounterImpl {
       _log('Buffered $newSteps steps (source: $source)');
 
       // Update session steps tracking
-      _currentSessionSteps = event.stepCount - _sessionBaseStepCount;
+      _currentSessionSteps += newSteps;
 
       // Emit aggregated count (stored from DB + new session steps + buffered pending)
       // Note: buffered steps are part of _currentSessionSteps implicitly
@@ -1563,18 +1670,28 @@ class AccurateStepCounterImpl {
     if (_recordingEnabled &&
         state != AppLifecycleState.resumed &&
         _lastRecordTime != null) {
+      if (_aggregatedModeEnabled) {
+        unawaited(
+          _loggingQueue.then((_) => _flushWriteBuffer()).catchError((
+            Object error,
+          ) {
+            _log('Background flush retained for retry: $error');
+          }),
+        );
+        return;
+      }
       // Force log current batch before going to background
       final currentCount = currentStepCount;
       if (currentCount > _lastRecordedStepCount) {
         final entry = StepRecord(
           stepCount: currentCount - _lastRecordedStepCount,
           fromTime: _lastRecordTime!,
-          toTime: DateTime.now(),
+          toTime: _now(),
           source: StepRecordSource.foreground,
         );
         // Use async insertion with error handling for cold start safety
         _safeInsertRecord(entry);
-        _lastRecordTime = DateTime.now();
+        _lastRecordTime = _now();
         _lastRecordedStepCount = currentCount;
         _log('Logged steps before background');
       }
@@ -1582,7 +1699,12 @@ class AccurateStepCounterImpl {
   }
 
   Future<void> _handleResumeDrain() async {
-    await _drainNativeRotation();
+    try {
+      await _drainNativeRotation();
+      await _queueNativeSteps(await _platform.getNativeTodaySteps());
+    } catch (error) {
+      _log('Resume reconciliation failed: $error');
+    }
   }
 
   /// Safely insert a record with error handling for closed box scenarios
@@ -1616,8 +1738,7 @@ class AccurateStepCounterImpl {
       await _stepRecordStore!.insertRecord(normalizedEntry);
     } catch (e) {
       _log('Error inserting record (will retry): $e');
-      // The store will handle reopening internally, so we just log the error
-      // If it fails again, it's a more serious issue
+      rethrow;
     }
   }
 
@@ -1787,6 +1908,8 @@ class AccurateStepCounterImpl {
     StepRecordSource source, {
     double confidence = 1.0,
   }) async {
+    fromTime = fromTime.toLocal();
+    toTime = toTime.toLocal();
     // Check if time range spans across days
     final fromDate = DateTime(fromTime.year, fromTime.month, fromTime.day);
     final toDate = DateTime(toTime.year, toTime.month, toTime.day);
@@ -1830,7 +1953,11 @@ class AccurateStepCounterImpl {
       );
       // End of this day (first millisecond of next day, calculated to avoid gaps)
       // Actually using midnight of next day is cleaner for comparison
-      final nextDay = currentDate.add(const Duration(days: 1));
+      final nextDay = DateTime(
+        currentDate.year,
+        currentDate.month,
+        currentDate.day + 1,
+      );
       final currentEnd = nextDay.isBefore(toTime) ? nextDay : toTime;
 
       // Calculate proportion
@@ -1996,9 +2123,8 @@ class AccurateStepCounterImpl {
   Future<int> getTodayAndYesterdaySteps() async {
     _ensureLoggingInitialized();
     await _flushPendingWritesIfNeeded();
-    final now = DateTime.now();
-    final startOfToday = DateTime(now.year, now.month, now.day);
-    final startOfYesterday = startOfToday.subtract(const Duration(days: 1));
+    final now = _now();
+    final startOfYesterday = DateTime(now.year, now.month, now.day - 1);
     return await _stepRecordStore!.readTotalSteps(
       from: startOfYesterday,
       to: now,
@@ -2033,7 +2159,7 @@ class AccurateStepCounterImpl {
     final start = DateTime(startDate.year, startDate.month, startDate.day);
 
     // Set end to midnight of endDate, or now if endDate is today
-    final now = DateTime.now();
+    final now = _now();
     final endOfEndDate = DateTime(endDate.year, endDate.month, endDate.day);
     final isEndDateToday =
         endOfEndDate.year == now.year &&
@@ -2042,7 +2168,11 @@ class AccurateStepCounterImpl {
 
     final end = isEndDateToday
         ? now
-        : endOfEndDate.add(const Duration(days: 1));
+        : DateTime(
+            endDate.year,
+            endDate.month,
+            endDate.day + 1,
+          ).subtract(const Duration(milliseconds: 1));
 
     return await _stepRecordStore!.readTotalSteps(from: start, to: end);
   }
@@ -2174,17 +2304,15 @@ class AccurateStepCounterImpl {
       );
     }
 
-    // Use async* generator to emit initial value first, then forward stream
-    Stream<int> streamWithInitial() async* {
-      // Emit current value immediately on subscribe
-      yield _aggregatedStoredSteps + _currentSessionSteps;
-      // Then forward all future events
-      await for (final value in _aggregatedStepController.stream) {
-        yield value;
-      }
-    }
-
-    return streamWithInitial();
+    return Stream<int>.multi((controller) {
+      final subscription = _aggregatedStepController.stream.listen(
+        controller.add,
+        onError: controller.addError,
+        onDone: controller.close,
+      );
+      controller.add(_aggregatedStoredSteps + _currentSessionSteps);
+      controller.onCancel = subscription.cancel;
+    });
   }
 
   /// Get current aggregated step count (stored + live)
@@ -2295,7 +2423,28 @@ class AccurateStepCounterImpl {
     StepRecordSource? source,
     bool skipIfDuplicate = true,
   }) async {
+    final next = _externalWriteChain.then(
+      (_) => _writeStepsToAggregatedLocked(
+        stepCount: stepCount,
+        fromTime: fromTime,
+        toTime: toTime,
+        source: source,
+        skipIfDuplicate: skipIfDuplicate,
+      ),
+    );
+    _externalWriteChain = next.then<void>((_) {}, onError: (Object _) {});
+    return next;
+  }
+
+  Future<bool> _writeStepsToAggregatedLocked({
+    required int stepCount,
+    required DateTime fromTime,
+    DateTime? toTime,
+    StepRecordSource? source,
+    required bool skipIfDuplicate,
+  }) async {
     _ensureLoggingInitialized();
+    await _ensureCurrentDay();
 
     if (!_aggregatedModeEnabled) {
       throw StateError(
@@ -2308,7 +2457,7 @@ class AccurateStepCounterImpl {
       throw ArgumentError('Step count must be positive');
     }
 
-    final endTime = toTime ?? DateTime.now().toUtc();
+    final endTime = toTime ?? _now().toUtc();
 
     if (endTime.isBefore(fromTime)) {
       throw ArgumentError('toTime must be after fromTime');
@@ -2316,23 +2465,12 @@ class AccurateStepCounterImpl {
 
     final recordSource = source ?? StepRecordSource.external;
 
-    // === MUTEX LOCK: Prevent concurrent writes ===
-    // Wait for any in-progress write to complete before proceeding
-    // This prevents race conditions where duplicate checks pass simultaneously
-    if (_writeLock != null && !_writeLock!.isCompleted) {
-      _log('Waiting for previous write to complete...');
-      await _writeLock!.future;
-    }
-
-    // Create a new lock for this write operation
-    _writeLock = Completer<void>();
-
     try {
       // === IN-MEMORY DUPLICATE CHECK ===
       // Fast check against last write to catch rapid duplicate calls
       // This is faster than database check and catches most race conditions
       if (skipIfDuplicate && recordSource == StepRecordSource.external) {
-        final now = DateTime.now().toUtc();
+        final now = _now().toUtc();
         if (_lastExternalWriteTime != null &&
             _lastExternalWriteSteps == stepCount &&
             _lastExternalWriteFromTime != null) {
@@ -2371,19 +2509,20 @@ class AccurateStepCounterImpl {
         }
       }
 
+      await _flushWriteBuffer();
       // Write to database (with distribution if needed)
       await _logDistributedSteps(stepCount, fromTime, endTime, recordSource);
       _log('Wrote $stepCount steps to aggregated database');
 
       // Track this write for in-memory duplicate detection
       if (recordSource == StepRecordSource.external) {
-        _lastExternalWriteTime = DateTime.now();
+        _lastExternalWriteTime = _now();
         _lastExternalWriteSteps = stepCount;
         _lastExternalWriteFromTime = fromTime;
       }
 
       // Update stored steps to include the new manually added steps
-      final now = DateTime.now();
+      final now = _now();
       final startOfToday = DateTime(now.year, now.month, now.day);
 
       // Recalculate today's total from database
@@ -2393,20 +2532,19 @@ class AccurateStepCounterImpl {
       );
 
       // Update stored steps count
-      _aggregatedStoredSteps = todayTotal;
+      _aggregatedStoredSteps = todayTotal - _currentSessionSteps;
 
       // Emit updated aggregated count immediately (no throttling for external writes
       // since they're infrequent and user expects immediate UI update)
       final newAggregatedCount = _aggregatedStoredSteps + _currentSessionSteps;
       if (!_aggregatedStepController.isClosed) {
         _aggregatedStepController.add(newAggregatedCount);
-        _lastStreamEmitTime = DateTime.now();
+        _lastStreamEmitTime = _now();
       }
 
       return true; // Successfully written
-    } finally {
-      // Always release the lock, even if an error occurs
-      _writeLock?.complete();
+    } catch (_) {
+      rethrow;
     }
   }
 
@@ -2438,6 +2576,15 @@ class AccurateStepCounterImpl {
     _ensureLoggingInitialized();
     await _flushPendingWritesIfNeeded();
     await _stepRecordStore!.deleteAllRecords();
+
+    _aggregatedStoredSteps = 0;
+    _currentSessionSteps = 0;
+    _sessionBaseStepCount = currentStepCount;
+    _lastRecordedStepCount = _sessionBaseStepCount;
+    _lastExternalWriteTime = null;
+    _lastExternalWriteSteps = null;
+    _lastExternalWriteFromTime = null;
+    _processedTerminatedGapKeys.clear();
     _log('All step logs cleared');
   }
 
@@ -2511,7 +2658,7 @@ class AccurateStepCounterImpl {
     try {
       final osCount = await _platform.getOsStepCount();
       if (osCount != null) {
-        await _platform.saveStepCount(osCount, DateTime.now());
+        await _platform.saveStepCount(osCount, _now());
       }
     } catch (e) {
       // Silently fail
@@ -2695,15 +2842,15 @@ class AccurateStepCounterImpl {
   }
 
   /// Flush buffered writes to DB in a single batch equivalent
-  Future<void> _flushWriteBuffer() async {
-    if (_writeBuffer.isEmpty) return;
+  Future<void> _flushWriteBuffer() {
+    return _writeFlushInFlight ??= _performWriteBufferFlush().whenComplete(() {
+      _writeFlushInFlight = null;
+    });
+  }
 
-    final pending = List<PendingStep>.from(_writeBuffer);
-    _writeBuffer.clear();
-
-    _log('Flushing ${pending.length} buffered write operations');
-
-    for (final step in pending) {
+  Future<void> _performWriteBufferFlush() async {
+    while (_writeBuffer.isNotEmpty) {
+      final step = _writeBuffer.first;
       await _logDistributedSteps(
         step.stepCount,
         step.fromTime,
@@ -2711,23 +2858,10 @@ class AccurateStepCounterImpl {
         step.source,
         confidence: step.confidence,
       );
+      // Keep failed writes queued. Deterministic record keys make retries safe
+      // even if a multi-day write persisted some segments before failing.
+      _writeBuffer.removeAt(0);
     }
-  }
-
-  int _bestTodayFloor() {
-    final floorFromAgg = _aggregatedStoredSteps + _currentSessionSteps;
-    final sqliteFloor = _latestSqliteTodaySteps;
-    final candidates = <int>[
-      _lastForegroundStepCount,
-      _latestMergedTodaySteps,
-      floorFromAgg,
-      sqliteFloor,
-    ];
-    var floor = 0;
-    for (final c in candidates) {
-      if (c > floor) floor = c;
-    }
-    return floor;
   }
 
   DateTime? _parseRotationDate(String raw) {

@@ -79,12 +79,6 @@ void main() {
       () async {
         // Initialize the step counter with logging
         await stepCounter.initializeLogging(debugLogging: true);
-        await stepCounter.start(
-          config: StepDetectorConfig(
-            foregroundServiceMaxApiLevel: 32,
-            useForegroundServiceOnOldDevices: false,
-          ),
-        );
         await stepCounter.startLogging(config: StepRecordConfig.aggregated());
 
         final now = DateTime.now();
@@ -145,12 +139,6 @@ void main() {
       () async {
         // Initialize the step counter with logging
         await stepCounter.initializeLogging(debugLogging: true);
-        await stepCounter.start(
-          config: StepDetectorConfig(
-            foregroundServiceMaxApiLevel: 32,
-            useForegroundServiceOnOldDevices: false,
-          ),
-        );
         await stepCounter.startLogging(config: StepRecordConfig.aggregated());
 
         final now = DateTime.now();
@@ -189,12 +177,6 @@ void main() {
       () async {
         // Initialize the step counter with logging
         await stepCounter.initializeLogging(debugLogging: true);
-        await stepCounter.start(
-          config: StepDetectorConfig(
-            foregroundServiceMaxApiLevel: 32,
-            useForegroundServiceOnOldDevices: false,
-          ),
-        );
         await stepCounter.startLogging(config: StepRecordConfig.aggregated());
 
         final now = DateTime.now();

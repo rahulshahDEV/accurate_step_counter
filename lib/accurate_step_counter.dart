@@ -1,8 +1,7 @@
-/// Production-grade Flutter step counter for Android and iOS.
+/// Flutter step tracking for Android API 24 and newer.
 ///
 /// Android path: hardware **TYPE_STEP_COUNTER** foreground service (API 24+).
-/// iOS path: HealthKit step reads through the `health` package.
-/// Both paths support SQLite logging and shared merge/policy helpers.
+/// Includes SQLite logging and optional merge policies for host-provided data.
 ///
 /// ## Quick Start (recommended)
 ///
@@ -17,8 +16,7 @@
 /// steps.watchTodaySteps().listen((n) => print('Today: $n'));
 /// ```
 ///
-/// Wire [AccurateStepCounter.setAppState] from your [WidgetsBindingObserver]
-/// so midnight rotation drains on resume.
+/// [AccurateStepCounter.startTracking] observes app lifecycle automatically.
 library;
 
 // Export public API
